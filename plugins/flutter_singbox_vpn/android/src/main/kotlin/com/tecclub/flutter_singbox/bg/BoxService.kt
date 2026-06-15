@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -38,6 +39,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 class BoxService(
     private val service: Service, private val platformInterface: PlatformInterface
@@ -114,6 +117,12 @@ class BoxService(
                         serviceUpdateIdleMode()
                     }
                     refreshKeeperWakeLock("idle-mode")
+                }
+
+                ConnectivityManager.CONNECTIVITY_ACTION,
+                Intent.ACTION_SCREEN_ON,
+                Intent.ACTION_USER_PRESENT -> {
+                    handleNetworkWakeEvent(intent.action ?: "network-wake")
                 }
             }
         }
@@ -400,6 +409,9 @@ class BoxService(
             ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
                 addAction(Action.SERVICE_CLOSE)
                 addAction(Action.SERVICE_RESTART)
+                addAction(ConnectivityManager.CONNECTIVITY_ACTION)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
                 }
@@ -562,6 +574,41 @@ class BoxService(
         watchdogRestarting = false
     }
 
+    private fun handleNetworkWakeEvent(reason: String) {
+        if (status.value != Status.Started || watchdogRestarting) {
+            return
+        }
+
+        serviceScope.launch {
+            android.util.Log.d("BoxService", "Watchdog: network/wake event $reason")
+            refreshKeeperWakeLock(reason)
+            commandServer?.wake()
+            runCatching {
+                DefaultNetworkMonitor.stop()
+                DefaultNetworkMonitor.start()
+            }.onFailure {
+                android.util.Log.w("BoxService", "Watchdog: network monitor refresh failed", it)
+            }
+
+            if (watchdogJob?.isActive != true) {
+                startNativeWatchdog()
+            }
+
+            if (!watchdogMixedProxyEnabled) {
+                return@launch
+            }
+
+            delay(2_500L)
+            if (status.value != Status.Started || !hasDefaultNetwork()) {
+                return@launch
+            }
+
+            if (!probeMixedProxy()) {
+                restartFromWatchdog(reason)
+            }
+        }
+    }
+
     private suspend fun restartFromWatchdog(reason: String) {
         val now = System.currentTimeMillis()
         if (watchdogRestarting || now - lastWatchdogRestartAt < WATCHDOG_RESTART_COOLDOWN_MS) {
@@ -600,35 +647,60 @@ class BoxService(
 
     private fun probeMixedProxy(): Boolean {
         val targets = arrayOf(
-            "cp.cloudflare.com" to 443,
-            "www.gstatic.com" to 443
+            "cp.cloudflare.com" to "/generate_204",
+            "www.gstatic.com" to "/generate_204"
         )
 
-        for ((host, port) in targets) {
-            var socket: Socket? = null
+        for ((host, path) in targets) {
+            var rawSocket: Socket? = null
+            var tlsSocket: SSLSocket? = null
             try {
-                socket = Socket()
-                socket.connect(
+                rawSocket = Socket()
+                rawSocket.connect(
                     InetSocketAddress("127.0.0.1", WATCHDOG_MIXED_PROXY_PORT),
                     2500
                 )
-                socket.soTimeout = 3500
-                val request = "CONNECT $host:$port HTTP/1.1\r\n" +
-                    "Host: $host:$port\r\n" +
+                rawSocket.soTimeout = 3500
+                val connectRequest = "CONNECT $host:443 HTTP/1.1\r\n" +
+                    "Host: $host:443\r\n" +
                     "Connection: close\r\n\r\n"
-                socket.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
-                socket.getOutputStream().flush()
-                val statusLine = socket.getInputStream()
+                rawSocket.getOutputStream().write(connectRequest.toByteArray(Charsets.US_ASCII))
+                rawSocket.getOutputStream().flush()
+                val connectReader = rawSocket.getInputStream().bufferedReader(Charsets.US_ASCII)
+                val connectStatus = connectReader.readLine()
+                if (connectStatus?.contains(" 200 ") != true) {
+                    android.util.Log.w("BoxService", "Watchdog CONNECT status: $connectStatus")
+                    continue
+                }
+                while (true) {
+                    val header = connectReader.readLine() ?: break
+                    if (header.isEmpty()) break
+                }
+
+                tlsSocket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+                    .createSocket(rawSocket, host, 443, true) as SSLSocket
+                tlsSocket.soTimeout = 4500
+                tlsSocket.startHandshake()
+                val request = "GET $path HTTP/1.1\r\n" +
+                    "Host: $host\r\n" +
+                    "User-Agent: YurichConnectNativeKeeper/1\r\n" +
+                    "Connection: close\r\n\r\n"
+                tlsSocket.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
+                tlsSocket.getOutputStream().flush()
+                val responseStatus = tlsSocket.getInputStream()
                     .bufferedReader(Charsets.US_ASCII)
                     .readLine()
-                if (statusLine?.contains(" 200 ") == true) {
+                if (responseStatus?.startsWith("HTTP/") == true &&
+                    (responseStatus.contains(" 204 ") || responseStatus.contains(" 200 "))
+                ) {
                     return true
                 }
-                android.util.Log.w("BoxService", "Watchdog probe HTTP status: $statusLine")
+                android.util.Log.w("BoxService", "Watchdog HTTPS status: $responseStatus")
             } catch (e: Exception) {
                 android.util.Log.w("BoxService", "Watchdog probe failed for $host: ${e.message}")
             } finally {
-                runCatching { socket?.close() }
+                runCatching { tlsSocket?.close() }
+                runCatching { rawSocket?.close() }
             }
         }
 

@@ -36,7 +36,10 @@ object SimpleConfigManager {
             
             // Then save to preferences for persistence
             val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            prefs.edit().putString(KEY_CONFIG, config).apply()
+            if (!prefs.edit().putString(KEY_CONFIG, config).commit()) {
+                Log.e(TAG, "Config commit returned false")
+                return false
+            }
             
             Log.e(TAG, "Config saved successfully")
             true
@@ -170,7 +173,9 @@ object SimpleConfigManager {
     fun setStartedByUser(started: Boolean) {
         try {
             val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            prefs.edit().putBoolean(KEY_STARTED_BY_USER, started).apply()
+            if (!prefs.edit().putBoolean(KEY_STARTED_BY_USER, started).commit()) {
+                Log.w(TAG, "Started-by-user commit returned false")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save started-by-user setting", e)
         }

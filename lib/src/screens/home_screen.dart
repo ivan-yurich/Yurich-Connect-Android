@@ -46,6 +46,7 @@ const _subscriptionReminderWindow = Duration(days: 5);
 const _tunnelHealthProbeInterval = Duration(seconds: 105);
 const _startupProbeRecheckDelay = Duration(seconds: 8);
 const _recentTrafficGrace = Duration(seconds: 120);
+const _resumeHealthCheckDelay = Duration(seconds: 2);
 const _tunnelHealthFailureThreshold = 4;
 const _autoReconnectMaxAttempts = 6;
 const _maxStoredLogs = 180;
@@ -376,6 +377,29 @@ class _HomeScreenState extends State<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_refreshBatteryOptimizationStatus());
+      unawaited(_handleResumeRecovery());
+    }
+  }
+
+  Future<void> _handleResumeRecovery() async {
+    await Future<void>.delayed(_resumeHealthCheckDelay);
+    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+      return;
+    }
+
+    final status = await _refreshVpnStatus();
+    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+      return;
+    }
+
+    if (status == AurumVpnStatus.stopped) {
+      _markUnexpectedStop('app-resume');
+      return;
+    }
+
+    if (status == AurumVpnStatus.started) {
+      _nextTunnelHealthCheckAt = DateTime.now();
+      unawaited(_refreshTunnelHealth(source: 'app-resume'));
     }
   }
 
@@ -1355,7 +1379,7 @@ class _HomeScreenState extends State<HomeScreen>
           _autoRecoveryArmed &&
           !_stoppingByUser &&
           !ignoreStopped) {
-        await _refreshTunnelHealth();
+        await _refreshTunnelHealth(source: 'watchdog');
       }
     } finally {
       _statusWatchdogInFlight = false;
@@ -1378,7 +1402,7 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_recoverUnexpectedStop(source));
   }
 
-  Future<void> _refreshTunnelHealth() async {
+  Future<void> _refreshTunnelHealth({String source = 'watchdog'}) async {
     if (_autoReconnectInFlight || _tunnelHealthCheckInFlight || !mounted) {
       return;
     }
@@ -1407,7 +1431,7 @@ class _HomeScreenState extends State<HomeScreen>
     _tunnelHealthCheckInFlight = true;
     try {
       final healthy = await _probeLocalMixedProxy(
-        attempts: 1,
+        attempts: source == 'app-resume' ? 2 : 1,
         logFailures: false,
       );
       if (!mounted || _status != AurumVpnStatus.started) {
@@ -1422,7 +1446,7 @@ class _HomeScreenState extends State<HomeScreen>
 
       _tunnelHealthFailures += 1;
       _queueLog(
-        'VPN watchdog: health probe failed #$_tunnelHealthFailures '
+        'VPN watchdog: health probe failed #$_tunnelHealthFailures from $source '
         'for ${profile.name}.',
       );
 
@@ -1469,8 +1493,10 @@ class _HomeScreenState extends State<HomeScreen>
 
     if (_autoReconnectAttempts >= _autoReconnectMaxAttempts) {
       _nextAutoReconnectAt = now.add(const Duration(minutes: 5));
+      _autoReconnectAttempts = 0;
       _queueLog(
-        'VPN watchdog: auto reconnect paused for mobile network cooldown.',
+        'VPN watchdog: auto reconnect paused for mobile network cooldown; '
+        'attempt counter reset for the next recovery window.',
       );
       if (mounted) {
         setState(() {
