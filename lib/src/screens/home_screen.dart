@@ -200,6 +200,37 @@ class _HomeScreenState extends State<HomeScreen>
     return duration.isNegative ? Duration.zero : duration;
   }
 
+  String get _keeperStatusLabel {
+    if (!_autoRecoveryArmed) {
+      return s.keeperIdle;
+    }
+    if (_autoReconnectInFlight) {
+      return s.keeperReconnecting;
+    }
+    if (_tunnelHealthCheckInFlight) {
+      return s.keeperChecking;
+    }
+    if (_connectionDegraded) {
+      return s.keeperDegraded;
+    }
+    return s.keeperActive;
+  }
+
+  String get _lastHealthStatusLabel {
+    final lastHealthyAt = _lastHealthyAt;
+    if (lastHealthyAt == null) {
+      return s.lastCheckNever;
+    }
+    return s.lastCheckAgo(_clockNow.difference(lastHealthyAt));
+  }
+
+  String get _autoRecoveryStatusLabel =>
+      _autoRecoveryArmed ? s.autoRecoveryOn : s.autoRecoveryOff;
+
+  String get _healthFailuresStatusLabel => _tunnelHealthFailures == 0
+      ? s.healthFailuresNone
+      : s.healthFailuresCount(_tunnelHealthFailures);
+
   VpnProfile? get _selectedProfile {
     for (final profile in _profiles) {
       if (profile.id == _selectedProfileId) {
@@ -2603,6 +2634,12 @@ class _HomeScreenState extends State<HomeScreen>
                       subscriptionStatus: _subscriptionTileStatus,
                       subscriptionNeedsAttention: _subscriptionNeedsAttention,
                       batteryOptimizationIgnored: _batteryOptimizationIgnored,
+                      keeperStatus: _keeperStatusLabel,
+                      lastHealthStatus: _lastHealthStatusLabel,
+                      autoRecoveryStatus: _autoRecoveryStatusLabel,
+                      healthFailuresStatus: _healthFailuresStatusLabel,
+                      stabilityNeedsAttention:
+                          _connectionDegraded || !_batteryOptimizationIgnored,
                       kindLabel: _profileKindLabel,
                       displayName: _profileDisplayName,
                       countryFlag: _profileCountryFlag,
@@ -3062,6 +3099,11 @@ class _ProfilePanel extends StatelessWidget {
     required this.subscriptionStatus,
     required this.subscriptionNeedsAttention,
     required this.batteryOptimizationIgnored,
+    required this.keeperStatus,
+    required this.lastHealthStatus,
+    required this.autoRecoveryStatus,
+    required this.healthFailuresStatus,
+    required this.stabilityNeedsAttention,
     required this.kindLabel,
     required this.displayName,
     required this.countryFlag,
@@ -3090,6 +3132,11 @@ class _ProfilePanel extends StatelessWidget {
   final String? Function(VpnProfile profile) subscriptionStatus;
   final bool Function(VpnProfile profile) subscriptionNeedsAttention;
   final bool batteryOptimizationIgnored;
+  final String keeperStatus;
+  final String lastHealthStatus;
+  final String autoRecoveryStatus;
+  final String healthFailuresStatus;
+  final bool stabilityNeedsAttention;
   final String Function(VpnProfileKind kind) kindLabel;
   final String Function(VpnProfile profile) displayName;
   final String? Function(VpnProfile profile) countryFlag;
@@ -3208,6 +3255,11 @@ class _ProfilePanel extends StatelessWidget {
           canRefreshSubscriptions: hasSubscriptionSources,
           subscriptionRefreshBusy: subscriptionRefreshBusy,
           batteryOptimizationIgnored: batteryOptimizationIgnored,
+          keeperStatus: keeperStatus,
+          lastHealthStatus: lastHealthStatus,
+          autoRecoveryStatus: autoRecoveryStatus,
+          healthFailuresStatus: healthFailuresStatus,
+          stabilityNeedsAttention: stabilityNeedsAttention,
           onRefreshSubscriptions: onRefreshSubscriptions,
           onRequestBackgroundAccess: onRequestBackgroundAccess,
           onPing: selectedProfile == null
@@ -3593,6 +3645,11 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.canRefreshSubscriptions,
     required this.subscriptionRefreshBusy,
     required this.batteryOptimizationIgnored,
+    required this.keeperStatus,
+    required this.lastHealthStatus,
+    required this.autoRecoveryStatus,
+    required this.healthFailuresStatus,
+    required this.stabilityNeedsAttention,
     required this.onRefreshSubscriptions,
     required this.onRequestBackgroundAccess,
     required this.onPing,
@@ -3608,6 +3665,11 @@ class _ProfileInsightPanel extends StatelessWidget {
   final bool canRefreshSubscriptions;
   final bool subscriptionRefreshBusy;
   final bool batteryOptimizationIgnored;
+  final String keeperStatus;
+  final String lastHealthStatus;
+  final String autoRecoveryStatus;
+  final String healthFailuresStatus;
+  final bool stabilityNeedsAttention;
   final VoidCallback onRefreshSubscriptions;
   final VoidCallback onRequestBackgroundAccess;
   final VoidCallback? onPing;
@@ -3681,7 +3743,38 @@ class _ProfileInsightPanel extends StatelessWidget {
                       _InsightRow(
                         icon: Icons.security_update_good_outlined,
                         label: strings.stabilityLabel,
-                        value: strings.stabilityValue,
+                        value: stabilityNeedsAttention
+                            ? strings.stabilityNeedsAttention
+                            : strings.stabilityValue,
+                        valueColor: stabilityNeedsAttention
+                            ? _dangerSoft
+                            : null,
+                      ),
+                      _InsightRow(
+                        icon: Icons.monitor_heart_outlined,
+                        label: strings.keeperLabel,
+                        value: keeperStatus,
+                        valueColor: stabilityNeedsAttention
+                            ? _dangerSoft
+                            : null,
+                      ),
+                      _InsightRow(
+                        icon: Icons.schedule_outlined,
+                        label: strings.lastCheckLabel,
+                        value: lastHealthStatus,
+                      ),
+                      _InsightRow(
+                        icon: Icons.restart_alt_outlined,
+                        label: strings.autoRecoveryLabel,
+                        value: autoRecoveryStatus,
+                      ),
+                      _InsightRow(
+                        icon: Icons.error_outline,
+                        label: strings.healthFailuresLabel,
+                        value: healthFailuresStatus,
+                        valueColor: stabilityNeedsAttention
+                            ? _dangerSoft
+                            : null,
                       ),
                       _InsightRow(
                         icon: Icons.battery_saver_outlined,
@@ -4603,12 +4696,108 @@ class _Strings {
         _Strings.en => 'All',
         _ => 'Все',
       },
-      _ProfileTab.vless => 'VLESS',
-      _ProfileTab.naive => 'Naive',
-      _ProfileTab.hysteria => 'Hysteria',
+      _ProfileTab.vless => 'Reality',
+      _ProfileTab.naive => 'HTTPS',
+      _ProfileTab.hysteria => 'Turbo',
     };
     return '$label $count';
   }
+
+  String get stabilityNeedsAttention => switch (this) {
+    _Strings.en => 'Needs attention',
+    _ => 'Требует внимания',
+  };
+
+  String get keeperLabel => switch (this) {
+    _Strings.en => 'Keeper',
+    _ => 'Keeper',
+  };
+
+  String get keeperActive => switch (this) {
+    _Strings.en => 'Active',
+    _ => 'Активен',
+  };
+
+  String get keeperIdle => switch (this) {
+    _Strings.en => 'Waiting',
+    _ => 'Ожидает',
+  };
+
+  String get keeperChecking => switch (this) {
+    _Strings.en => 'Checking',
+    _ => 'Проверка',
+  };
+
+  String get keeperReconnecting => switch (this) {
+    _Strings.en => 'Reconnecting',
+    _ => 'Переподключение',
+  };
+
+  String get keeperDegraded => switch (this) {
+    _Strings.en => 'Degraded',
+    _ => 'Нестабильно',
+  };
+
+  String get lastCheckLabel => switch (this) {
+    _Strings.en => 'Last check',
+    _ => 'Проверка',
+  };
+
+  String get lastCheckNever => switch (this) {
+    _Strings.en => 'Not yet',
+    _ => 'Ещё не было',
+  };
+
+  String lastCheckAgo(Duration duration) {
+    final safe = duration.isNegative ? Duration.zero : duration;
+    if (safe.inSeconds < 60) {
+      final seconds = safe.inSeconds.clamp(1, 59);
+      return switch (this) {
+        _Strings.en => '${seconds}s ago',
+        _ => '$seconds сек назад',
+      };
+    }
+    if (safe.inMinutes < 60) {
+      return switch (this) {
+        _Strings.en => '${safe.inMinutes}m ago',
+        _ => '${safe.inMinutes} мин назад',
+      };
+    }
+    return switch (this) {
+      _Strings.en => '${safe.inHours}h ago',
+      _ => '${safe.inHours} ч назад',
+    };
+  }
+
+  String get autoRecoveryLabel => switch (this) {
+    _Strings.en => 'Recovery',
+    _ => 'Автовосстановление',
+  };
+
+  String get autoRecoveryOn => switch (this) {
+    _Strings.en => 'On',
+    _ => 'Включено',
+  };
+
+  String get autoRecoveryOff => switch (this) {
+    _Strings.en => 'Off',
+    _ => 'Выключено',
+  };
+
+  String get healthFailuresLabel => switch (this) {
+    _Strings.en => 'Failures',
+    _ => 'Сбои',
+  };
+
+  String get healthFailuresNone => switch (this) {
+    _Strings.en => 'None',
+    _ => 'Нет',
+  };
+
+  String healthFailuresCount(int count) => switch (this) {
+    _Strings.en => '$count in a row',
+    _ => '$count подряд',
+  };
 
   String noProfilesInTab(_ProfileTab tab) => switch (this) {
     _Strings.en => 'No profiles in this tab yet.',
