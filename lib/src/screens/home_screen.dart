@@ -761,6 +761,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _importText(String text) async {
     await _runBusy(() async {
+      final subscriptionSource = ProfileStore.subscriptionSourceKeyFromText(
+        text,
+      );
       final imported = _clientSupportedProfiles(
         await _importer.importFromText(text),
       );
@@ -768,6 +771,11 @@ class _HomeScreenState extends State<HomeScreen>
         throw ProfileImportException(s.supportedProtocolsOnly);
       }
 
+      if (subscriptionSource != null) {
+        await _store.clearDeletedProfilesForSubscriptionSource(
+          subscriptionSource,
+        );
+      }
       final importedWithCachedData = _profilesWithCachedData(imported);
       final merged = _mergeProfiles(importedWithCachedData);
 
@@ -824,14 +832,31 @@ class _HomeScreenState extends State<HomeScreen>
   List<String> _subscriptionSourcesFor(List<VpnProfile> profiles) {
     final sources = <String>{};
     for (final profile in profiles) {
-      final source = (profile.subscriptionSource ?? profile.originalInput)
-          .trim();
-      final uri = Uri.tryParse(source);
-      if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
+      final source = ProfileStore.subscriptionSourceKeyFor(profile);
+      if (source != null) {
         sources.add(source);
       }
     }
     return sources.toList(growable: false);
+  }
+
+  List<VpnProfile> _withoutDeletedSubscriptionProfiles(
+    List<VpnProfile> profiles,
+    Map<String, Set<String>> deletedBySource,
+  ) {
+    if (deletedBySource.isEmpty) {
+      return profiles;
+    }
+
+    return profiles
+        .where((profile) {
+          final source = ProfileStore.subscriptionSourceKeyFor(profile);
+          if (source == null) {
+            return true;
+          }
+          return !(deletedBySource[source]?.contains(profile.id) ?? false);
+        })
+        .toList(growable: false);
   }
 
   Future<void> _refreshSubscriptions() async {
@@ -852,6 +877,8 @@ class _HomeScreenState extends State<HomeScreen>
     });
 
     try {
+      final deletedBySource = await _store
+          .loadDeletedProfileIdsBySubscriptionSource();
       final imported = <VpnProfile>[];
       Object? lastError;
       for (final source in sources) {
@@ -877,7 +904,11 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       final importedWithCachedData = _profilesWithCachedData(imported);
-      final merged = _mergeProfiles(importedWithCachedData);
+      final visibleImported = _withoutDeletedSubscriptionProfiles(
+        importedWithCachedData,
+        deletedBySource,
+      );
+      final merged = _mergeProfiles(visibleImported);
       final selectedId =
           _selectedProfileId != null &&
               merged.any((profile) => profile.id == _selectedProfileId)
@@ -893,12 +924,12 @@ class _HomeScreenState extends State<HomeScreen>
       setState(() {
         _profiles = merged;
         _selectedProfileId = selectedId;
-        _message = s.subscriptionsUpdated(importedWithCachedData.length);
+        _message = s.subscriptionsUpdated(visibleImported.length);
       });
       unawaited(_pingProfiles(merged));
       unawaited(_resolveProfileCountries(merged));
       unawaited(_showSubscriptionRenewalReminder(merged, force: true));
-      _showSnack(s.subscriptionsUpdated(importedWithCachedData.length));
+      _showSnack(s.subscriptionsUpdated(visibleImported.length));
     } on Object catch (error) {
       final errorText = _redactSensitive('$error');
       if (mounted) {
@@ -2010,6 +2041,7 @@ class _HomeScreenState extends State<HomeScreen>
           ? (next.isEmpty ? null : next.first.id)
           : _selectedProfileId;
 
+      await _store.rememberDeletedSubscriptionProfile(profile);
       await _store.saveProfiles(next);
       await _store.saveSelectedProfileId(nextSelectedId);
       if (!mounted) {

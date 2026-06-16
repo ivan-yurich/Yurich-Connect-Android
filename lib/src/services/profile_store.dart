@@ -10,6 +10,8 @@ class ProfileStore {
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
   static const _subscriptionReminderStampKey = 'subscriptionReminderStamp';
+  static const _deletedProfileIdsBySubscriptionSourceKey =
+      'deletedProfileIdsBySubscriptionSource';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
 
@@ -33,6 +35,103 @@ class ProfileStore {
       profiles.map((profile) => profile.toJson()).toList(),
     );
     await prefs.setString(_profilesKey, encoded);
+  }
+
+  Future<Map<String, Set<String>>>
+  loadDeletedProfileIdsBySubscriptionSource() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_deletedProfileIdsBySubscriptionSourceKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    return decoded.map((key, value) {
+      final ids = value is List
+          ? value.whereType<String>().where((id) => id.isNotEmpty).toSet()
+          : <String>{};
+      return MapEntry('$key', ids);
+    })..removeWhere((key, value) => key.isEmpty || value.isEmpty);
+  }
+
+  Future<void> rememberDeletedSubscriptionProfile(VpnProfile profile) async {
+    final source = subscriptionSourceKeyFor(profile);
+    if (source == null || profile.id.isEmpty) {
+      return;
+    }
+
+    final deletedBySource = Map<String, Set<String>>.from(
+      await loadDeletedProfileIdsBySubscriptionSource(),
+    );
+    final deletedIds = deletedBySource.putIfAbsent(source, () => <String>{});
+    deletedIds.add(profile.id);
+    await _saveDeletedProfileIdsBySubscriptionSource(deletedBySource);
+  }
+
+  Future<void> clearDeletedProfilesForSubscriptionSource(String source) async {
+    final sourceKey = subscriptionSourceKeyFromText(source);
+    if (sourceKey == null) {
+      return;
+    }
+
+    final deletedBySource = Map<String, Set<String>>.from(
+      await loadDeletedProfileIdsBySubscriptionSource(),
+    );
+    if (deletedBySource.remove(sourceKey) == null) {
+      return;
+    }
+    await _saveDeletedProfileIdsBySubscriptionSource(deletedBySource);
+  }
+
+  Future<void> _saveDeletedProfileIdsBySubscriptionSource(
+    Map<String, Set<String>> deletedBySource,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, List<String>>{};
+    for (final entry in deletedBySource.entries) {
+      final source = subscriptionSourceKeyFromText(entry.key);
+      if (source == null) {
+        continue;
+      }
+      final ids = entry.value.where((id) => id.isNotEmpty).toSet().toList()
+        ..sort();
+      if (ids.isNotEmpty) {
+        normalized[source] = ids;
+      }
+    }
+
+    if (normalized.isEmpty) {
+      await prefs.remove(_deletedProfileIdsBySubscriptionSourceKey);
+      return;
+    }
+
+    await prefs.setString(
+      _deletedProfileIdsBySubscriptionSourceKey,
+      jsonEncode(normalized),
+    );
+  }
+
+  static String? subscriptionSourceKeyFor(VpnProfile profile) {
+    return subscriptionSourceKeyFromText(
+      profile.subscriptionSource ?? profile.originalInput,
+    );
+  }
+
+  static String? subscriptionSourceKeyFromText(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return null;
+    }
+    return trimmed;
   }
 
   Future<String?> loadSelectedProfileId() async {
