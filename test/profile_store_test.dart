@@ -69,4 +69,16 @@ void main() {
       expect(deleted, isEmpty);
     },
   );
+
+  test('stores Smart Route preference', () async {
+    final store = ProfileStore();
+
+    expect(await store.loadSmartRouteRuDirect(), isFalse);
+
+    await store.saveSmartRouteRuDirect(true);
+    expect(await store.loadSmartRouteRuDirect(), isTrue);
+
+    await store.saveSmartRouteRuDirect(false);
+    expect(await store.loadSmartRouteRuDirect(), isFalse);
+  });
 }

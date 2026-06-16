@@ -180,6 +180,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _batteryOptimizationIgnored = true;
   bool _batteryOptimizationCheckInFlight = false;
   bool _batteryOptimizationPromptShown = false;
+  bool _smartRouteRuDirect = false;
   DateTime? _nextAutoReconnectAt;
   DateTime? _nextTunnelHealthCheckAt;
   int _autoReconnectAttempts = 0;
@@ -412,6 +413,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
+    final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
     if (!mounted) {
       return;
     }
@@ -426,6 +428,7 @@ class _HomeScreenState extends State<HomeScreen>
       _appBuildNumber = appInfo.buildNumber;
       _profiles = profiles;
       _selectedProfileId = resolvedSelectedId;
+      _smartRouteRuDirect = smartRouteRuDirect;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -1167,7 +1170,11 @@ class _HomeScreenState extends State<HomeScreen>
       planIndex += 1
     ) {
       final plan = plans[planIndex];
-      final config = _configBuilder.build(profile, naiveMode: plan.naiveMode);
+      final config = _configBuilder.build(
+        profile,
+        naiveMode: plan.naiveMode,
+        smartRouteRuDirect: _smartRouteRuDirect,
+      );
       final configSummary = _summarizeSingBoxConfig(
         config,
         target: _vpnEngine.configTarget,
@@ -1996,6 +2003,33 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<void> _setSmartRouteRuDirect(bool enabled) async {
+    if (_smartRouteRuDirect == enabled || _busy) {
+      return;
+    }
+
+    final profile = _selectedProfile;
+    final shouldRestart = _connected && profile != null;
+    await _store.saveSmartRouteRuDirect(enabled);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _smartRouteRuDirect = enabled;
+      _message = enabled ? s.smartRouteEnabled : s.smartRouteDisabled;
+    });
+
+    if (!shouldRestart) {
+      return;
+    }
+
+    await _runBusy(() async {
+      await _stopVpnCore(updateMessage: false);
+      await _startVpnCore(profile);
+    }, message: s.smartRouteApplying);
+  }
+
   String _profileKindLabel(VpnProfileKind kind) {
     return ProtocolDisplayMapper.mapProtocolToDisplayName(
       switch (kind) {
@@ -2692,6 +2726,7 @@ class _HomeScreenState extends State<HomeScreen>
                       subscriptionStatus: _subscriptionTileStatus,
                       subscriptionNeedsAttention: _subscriptionNeedsAttention,
                       batteryOptimizationIgnored: _batteryOptimizationIgnored,
+                      smartRouteRuDirect: _smartRouteRuDirect,
                       keeperStatus: _keeperStatusLabel,
                       lastHealthStatus: _lastHealthStatusLabel,
                       autoRecoveryStatus: _autoRecoveryStatusLabel,
@@ -2706,6 +2741,8 @@ class _HomeScreenState extends State<HomeScreen>
                       onPing: (profile) => unawaited(_pingProfile(profile)),
                       onRequestBackgroundAccess: () =>
                           unawaited(_requestBackgroundPowerAccess()),
+                      onSmartRouteChanged: (enabled) =>
+                          unawaited(_setSmartRouteRuDirect(enabled)),
                     ),
                     const SizedBox(height: 16),
                     _AppCenterPanel(
@@ -3157,6 +3194,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.subscriptionStatus,
     required this.subscriptionNeedsAttention,
     required this.batteryOptimizationIgnored,
+    required this.smartRouteRuDirect,
     required this.keeperStatus,
     required this.lastHealthStatus,
     required this.autoRecoveryStatus,
@@ -3169,6 +3207,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.onPingAll,
     required this.onPing,
     required this.onRequestBackgroundAccess,
+    required this.onSmartRouteChanged,
   });
 
   final Animation<double> pulse;
@@ -3190,6 +3229,7 @@ class _ProfilePanel extends StatelessWidget {
   final String? Function(VpnProfile profile) subscriptionStatus;
   final bool Function(VpnProfile profile) subscriptionNeedsAttention;
   final bool batteryOptimizationIgnored;
+  final bool smartRouteRuDirect;
   final String keeperStatus;
   final String lastHealthStatus;
   final String autoRecoveryStatus;
@@ -3202,6 +3242,7 @@ class _ProfilePanel extends StatelessWidget {
   final VoidCallback onPingAll;
   final ValueChanged<VpnProfile> onPing;
   final VoidCallback onRequestBackgroundAccess;
+  final ValueChanged<bool> onSmartRouteChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -3313,6 +3354,7 @@ class _ProfilePanel extends StatelessWidget {
           canRefreshSubscriptions: hasSubscriptionSources,
           subscriptionRefreshBusy: subscriptionRefreshBusy,
           batteryOptimizationIgnored: batteryOptimizationIgnored,
+          smartRouteRuDirect: smartRouteRuDirect,
           keeperStatus: keeperStatus,
           lastHealthStatus: lastHealthStatus,
           autoRecoveryStatus: autoRecoveryStatus,
@@ -3320,6 +3362,7 @@ class _ProfilePanel extends StatelessWidget {
           stabilityNeedsAttention: stabilityNeedsAttention,
           onRefreshSubscriptions: onRefreshSubscriptions,
           onRequestBackgroundAccess: onRequestBackgroundAccess,
+          onSmartRouteChanged: onSmartRouteChanged,
           onPing: selectedProfile == null
               ? null
               : () => onPing(selectedProfile!),
@@ -3703,6 +3746,7 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.canRefreshSubscriptions,
     required this.subscriptionRefreshBusy,
     required this.batteryOptimizationIgnored,
+    required this.smartRouteRuDirect,
     required this.keeperStatus,
     required this.lastHealthStatus,
     required this.autoRecoveryStatus,
@@ -3710,6 +3754,7 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.stabilityNeedsAttention,
     required this.onRefreshSubscriptions,
     required this.onRequestBackgroundAccess,
+    required this.onSmartRouteChanged,
     required this.onPing,
   });
 
@@ -3723,6 +3768,7 @@ class _ProfileInsightPanel extends StatelessWidget {
   final bool canRefreshSubscriptions;
   final bool subscriptionRefreshBusy;
   final bool batteryOptimizationIgnored;
+  final bool smartRouteRuDirect;
   final String keeperStatus;
   final String lastHealthStatus;
   final String autoRecoveryStatus;
@@ -3730,6 +3776,7 @@ class _ProfileInsightPanel extends StatelessWidget {
   final bool stabilityNeedsAttention;
   final VoidCallback onRefreshSubscriptions;
   final VoidCallback onRequestBackgroundAccess;
+  final ValueChanged<bool> onSmartRouteChanged;
   final VoidCallback? onPing;
 
   @override
@@ -3792,6 +3839,19 @@ class _ProfileInsightPanel extends StatelessWidget {
                         icon: Icons.network_cell_outlined,
                         label: strings.networkLabel,
                         value: strings.mobileReady,
+                      ),
+                      _InsightRow(
+                        icon: Icons.hub_outlined,
+                        label: strings.smartRouteLabel,
+                        value: smartRouteRuDirect
+                            ? strings.smartRouteEnabledValue
+                            : strings.smartRouteDisabledValue,
+                        trailing: Switch.adaptive(
+                          value: smartRouteRuDirect,
+                          onChanged: onSmartRouteChanged,
+                          activeThumbColor: _cyanGlow,
+                        ),
+                        onTap: () => onSmartRouteChanged(!smartRouteRuDirect),
                       ),
                       _InsightRow(
                         icon: Icons.dns_outlined,
@@ -4570,6 +4630,12 @@ class _Strings {
     required this.networkLabel,
     required this.dnsLabel,
     required this.dnsCountryValue,
+    required this.smartRouteLabel,
+    required this.smartRouteEnabledValue,
+    required this.smartRouteDisabledValue,
+    required this.smartRouteEnabled,
+    required this.smartRouteDisabled,
+    required this.smartRouteApplying,
     required this.stabilityLabel,
     required this.stabilityValue,
     required this.backgroundModeLabel,
@@ -4659,6 +4725,12 @@ class _Strings {
   final String networkLabel;
   final String dnsLabel;
   final String dnsCountryValue;
+  final String smartRouteLabel;
+  final String smartRouteEnabledValue;
+  final String smartRouteDisabledValue;
+  final String smartRouteEnabled;
+  final String smartRouteDisabled;
+  final String smartRouteApplying;
   final String stabilityLabel;
   final String stabilityValue;
   final String backgroundModeLabel;
@@ -5055,6 +5127,12 @@ class _Strings {
     networkLabel: 'Сеть',
     dnsLabel: 'DNS',
     dnsCountryValue: 'Через профиль',
+    smartRouteLabel: 'Smart Route',
+    smartRouteEnabledValue: 'RU direct / Global VPN',
+    smartRouteDisabledValue: 'Всё через VPN',
+    smartRouteEnabled: 'Smart Route включён',
+    smartRouteDisabled: 'Smart Route выключен',
+    smartRouteApplying: 'Применяю Smart Route...',
     stabilityLabel: 'Стабильность',
     stabilityValue: 'Фоновый keeper',
     backgroundModeLabel: 'Фон',
@@ -5187,6 +5265,12 @@ class _Strings {
     networkLabel: 'Network',
     dnsLabel: 'DNS',
     dnsCountryValue: 'Through profile',
+    smartRouteLabel: 'Smart Route',
+    smartRouteEnabledValue: 'RU direct / Global VPN',
+    smartRouteDisabledValue: 'All traffic through VPN',
+    smartRouteEnabled: 'Smart Route enabled',
+    smartRouteDisabled: 'Smart Route disabled',
+    smartRouteApplying: 'Applying Smart Route...',
     stabilityLabel: 'Stability',
     stabilityValue: 'Background keeper',
     backgroundModeLabel: 'Background',

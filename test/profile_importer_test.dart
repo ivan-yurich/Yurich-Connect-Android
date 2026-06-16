@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/services/profile_importer.dart';
 import 'package:aurum_vpn/src/services/sing_box_config_builder.dart';
+import 'package:aurum_vpn/src/services/smart_route_rules.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -246,6 +247,55 @@ void main() {
     expect(httpFallbackProxy['server'], 'example.com');
     expect(httpFallbackProxy['username'], 'example.com');
     expect(httpFallbackProxy['password'], 'pass');
+  });
+
+  test('adds Smart Route direct rules for Russian apps and domains', () async {
+    const link =
+        'naive+https://user:pass@example.com:443#Naive%20Smart%20Route';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(profile, smartRouteRuDirect: true),
+            )
+            as Map<String, dynamic>;
+
+    final inbounds = (config['inbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final tunInbound = inbounds.firstWhere(
+      (inbound) => inbound['type'] == 'tun',
+    );
+    final excludedPackages = (tunInbound['exclude_package'] as List)
+        .whereType<String>()
+        .toList();
+    expect(excludedPackages, contains('online.dnsai.ivanvpn'));
+    expect(excludedPackages, contains('ru.yandex.browser'));
+    expect(excludedPackages, contains('ru.sberbankmobile'));
+    expect(excludedPackages, contains('ru.vk.android'));
+
+    final routeRules =
+        ((config['route'] as Map<String, dynamic>)['rules'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+    expect(
+      routeRules.any(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            (rule['domain_suffix'] as List?)?.contains('ru') == true &&
+            (rule['domain_suffix'] as List?)?.contains('рф') == true,
+      ),
+      isTrue,
+    );
+    expect(
+      routeRules.any(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            (rule['domain'] as List?)?.contains('gosuslugi.ru') == true,
+      ),
+      isTrue,
+    );
+    expect(SmartRouteRules.ruDirectPackageNames, isNotEmpty);
   });
 
   test('keeps native Naive outbound and normalizes TLS fields', () {

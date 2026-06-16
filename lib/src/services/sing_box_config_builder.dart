@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/vpn_profile.dart';
+import 'smart_route_rules.dart';
 
 enum SingBoxConfigTarget { android }
 
@@ -13,6 +14,7 @@ class SingBoxConfigBuilder {
   String build(
     VpnProfile profile, {
     NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
+    bool smartRouteRuDirect = false,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -45,7 +47,10 @@ class SingBoxConfigBuilder {
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
       'dns': _dnsConfig(profile),
-      'inbounds': [_tunInbound(), _mixedInbound()],
+      'inbounds': [
+        _tunInbound(smartRouteRuDirect: smartRouteRuDirect),
+        _mixedInbound(),
+      ],
       'outbounds': [
         proxyOutbound,
         {'type': 'direct', 'tag': 'direct'},
@@ -63,6 +68,7 @@ class SingBoxConfigBuilder {
             'action': 'hijack-dns',
           },
           _unsupportedUdpRule(rejectUnsupportedUdp),
+          if (smartRouteRuDirect) ..._smartRouteRules(),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
         'default_domain_resolver': 'local-dns',
@@ -74,7 +80,7 @@ class SingBoxConfigBuilder {
     return const JsonEncoder.withIndent('  ').convert(config);
   }
 
-  Map<String, dynamic> _tunInbound() {
+  Map<String, dynamic> _tunInbound({required bool smartRouteRuDirect}) {
     final inbound = <String, dynamic>{
       'type': 'tun',
       'tag': 'tun-in',
@@ -85,8 +91,21 @@ class SingBoxConfigBuilder {
       'stack': 'gvisor',
     };
     inbound['interface_name'] = 'tun0';
-    inbound['exclude_package'] = ['online.dnsai.ivanvpn'];
+    inbound['exclude_package'] = [
+      'online.dnsai.ivanvpn',
+      if (smartRouteRuDirect) ...SmartRouteRules.ruDirectPackageNames,
+    ];
     return inbound;
+  }
+
+  List<Map<String, dynamic>> _smartRouteRules() {
+    return [
+      {'domain': SmartRouteRules.ruDirectDomains, 'outbound': 'direct'},
+      {
+        'domain_suffix': SmartRouteRules.ruDirectDomainSuffixes,
+        'outbound': 'direct',
+      },
+    ];
   }
 
   Map<String, dynamic> _mixedInbound() {
