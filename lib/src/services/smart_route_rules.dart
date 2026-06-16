@@ -1,6 +1,8 @@
 class SmartRouteRules {
   const SmartRouteRules._();
 
+  static const _ruPackagePrefix = 'ru.';
+
   static const globalProxyDomainSuffixes = [
     'chatgpt.com',
     'openai.com',
@@ -86,6 +88,49 @@ class SmartRouteRules {
     'ru.megafon.mlk',
     'ru.tele2.mytele2',
   ];
+
+  static const globalProxyPackageNames = [
+    'com.openai.chatgpt',
+    'com.google.android.apps.bard',
+    'com.google.android.youtube',
+    'com.google.android.youtube.tv',
+    'org.telegram.messenger',
+    'org.thunderdog.challegram',
+    'com.instagram.android',
+    'com.facebook.katana',
+    'com.facebook.orca',
+    'com.whatsapp',
+    'com.twitter.android',
+    'com.zhiliaoapp.musically',
+    'com.discord',
+    'com.github.android',
+    'com.netflix.mediaclient',
+    'com.spotify.music',
+    'com.reddit.frontpage',
+  ];
+
+  static const ruBypassDenyPackageNames = [
+    ...globalProxyPackageNames,
+    'ru.yandex.browser',
+    'ru.yandex.searchplugin',
+  ];
+
+  static List<String> ruBypassPackages(Iterable<String> installedPackages) {
+    final denied = ruBypassDenyPackageNames.toSet();
+    final packages = <String>{...ruDirectPackageNames};
+    for (final packageName in installedPackages) {
+      final normalized = packageName.trim();
+      if (normalized.isEmpty || denied.contains(normalized)) {
+        continue;
+      }
+      if (normalized.startsWith(_ruPackagePrefix)) {
+        packages.add(normalized);
+      }
+    }
+    packages.removeAll(denied);
+    final sorted = packages.toList()..sort();
+    return sorted;
+  }
 
   static const ruDirectDomainSuffixes = [
     'ru',

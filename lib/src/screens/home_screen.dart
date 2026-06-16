@@ -12,6 +12,7 @@ import '../models/connection_status.dart';
 import '../models/connection_ui_state.dart';
 import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
+import '../services/installed_apps_service.dart';
 import '../services/power_manager_service.dart';
 import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
@@ -126,6 +127,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _updateService = AppUpdateService();
   final _powerManagerService = PowerManagerService();
   final _geoService = ProfileGeoService();
+  final _installedAppsService = InstalledAppsService();
   final _manualController = TextEditingController();
 
   StreamSubscription<Map<String, dynamic>>? _statusSubscription;
@@ -151,6 +153,7 @@ class _HomeScreenState extends State<HomeScreen>
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
   _ProfileTab _profileTab = _ProfileTab.all;
+  bool _profilesExpanded = false;
   _SupportTab _supportTab = _SupportTab.help;
   String _status = AurumVpnStatus.stopped;
   String _uplink = '0 B/s';
@@ -1163,6 +1166,7 @@ class _HomeScreenState extends State<HomeScreen>
     var connected = false;
     var startupProbeDegraded = false;
     final plans = _connectionPlans(profile);
+    final smartRouteBypassPackages = await _smartRouteBypassPackages();
 
     for (
       var planIndex = 0;
@@ -1174,6 +1178,7 @@ class _HomeScreenState extends State<HomeScreen>
         profile,
         naiveMode: plan.naiveMode,
         smartRouteRuDirect: _smartRouteRuDirect,
+        smartRouteRuBypassPackages: smartRouteBypassPackages,
       );
       final configSummary = _summarizeSingBoxConfig(
         config,
@@ -2030,6 +2035,13 @@ class _HomeScreenState extends State<HomeScreen>
     }, message: s.smartRouteApplying);
   }
 
+  Future<List<String>> _smartRouteBypassPackages() async {
+    if (!_smartRouteRuDirect) {
+      return const [];
+    }
+    return _installedAppsService.installedPackageNames();
+  }
+
   String _profileKindLabel(VpnProfileKind kind) {
     return ProtocolDisplayMapper.mapProtocolToDisplayName(
       switch (kind) {
@@ -2712,7 +2724,13 @@ class _HomeScreenState extends State<HomeScreen>
                       selectedId: selectedProfileId,
                       activeProfileId: activeProfileId,
                       selectedTab: _profileTab,
-                      onTabChanged: (tab) => setState(() => _profileTab = tab),
+                      profilesExpanded: _profilesExpanded,
+                      onTabChanged: (tab) => setState(() {
+                        _profileTab = tab;
+                        _profilesExpanded = false;
+                      }),
+                      onProfilesExpandedChanged: (expanded) =>
+                          setState(() => _profilesExpanded = expanded),
                       onSelect: _selectProfile,
                       onAdd: _showImportSheet,
                       onCopy: selected == null ? null : _copySelected,
@@ -3182,7 +3200,9 @@ class _ProfilePanel extends StatelessWidget {
     required this.selectedId,
     required this.activeProfileId,
     required this.selectedTab,
+    required this.profilesExpanded,
     required this.onTabChanged,
+    required this.onProfilesExpandedChanged,
     required this.onSelect,
     required this.onAdd,
     required this.onCopy,
@@ -3217,7 +3237,9 @@ class _ProfilePanel extends StatelessWidget {
   final String? selectedId;
   final String? activeProfileId;
   final _ProfileTab selectedTab;
+  final bool profilesExpanded;
   final ValueChanged<_ProfileTab> onTabChanged;
+  final ValueChanged<bool> onProfilesExpandedChanged;
   final ValueChanged<VpnProfile> onSelect;
   final VoidCallback onAdd;
   final VoidCallback? onCopy;
@@ -3246,9 +3268,18 @@ class _ProfilePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final visibleProfiles = profiles
+    const compactProfileLimit = 6;
+    final matchingProfiles = profiles
         .where((profile) => _profileMatchesTab(profile, selectedTab))
         .toList(growable: false);
+    final visibleProfiles = [
+      ...matchingProfiles.where((profile) => profile.id == selectedId),
+      ...matchingProfiles.where((profile) => profile.id != selectedId),
+    ];
+    final shownProfiles = profilesExpanded
+        ? visibleProfiles
+        : visibleProfiles.take(compactProfileLimit).toList(growable: false);
+    final hiddenProfiles = visibleProfiles.length - shownProfiles.length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3308,8 +3339,8 @@ class _ProfilePanel extends StatelessWidget {
           _EmptyProfiles(strings: strings)
         else if (visibleProfiles.isEmpty)
           _EmptyProfiles(message: strings.noProfilesInTab(selectedTab))
-        else
-          ...visibleProfiles.map(
+        else ...[
+          ...shownProfiles.map(
             (profile) => Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: _ProfileTile(
@@ -3332,6 +3363,26 @@ class _ProfilePanel extends StatelessWidget {
               ),
             ),
           ),
+          if (hiddenProfiles > 0 || profilesExpanded)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 10),
+              child: Center(
+                child: TextButton.icon(
+                  onPressed: () => onProfilesExpandedChanged(!profilesExpanded),
+                  icon: Icon(
+                    profilesExpanded
+                        ? Icons.keyboard_arrow_up
+                        : Icons.unfold_more,
+                  ),
+                  label: Text(
+                    profilesExpanded
+                        ? strings.collapseProfiles
+                        : strings.showMoreProfiles(hiddenProfiles),
+                  ),
+                ),
+              ),
+            ),
+        ],
         const SizedBox(height: 6),
         _ProfileInsightPanel(
           strings: strings,
@@ -4620,6 +4671,7 @@ class _Strings {
     required this.profiles,
     required this.activeProfile,
     required this.refreshPing,
+    required this.collapseProfiles,
     required this.showQr,
     required this.copy,
     required this.delete,
@@ -4715,6 +4767,7 @@ class _Strings {
   final String profiles;
   final String activeProfile;
   final String refreshPing;
+  final String collapseProfiles;
   final String showQr;
   final String copy;
   final String delete;
@@ -4934,6 +4987,11 @@ class _Strings {
     _ => 'В этой вкладке пока нет профилей.',
   };
 
+  String showMoreProfiles(int count) => switch (this) {
+    _Strings.en => 'Show $count more',
+    _ => 'Показать ещё: $count',
+  };
+
   String supportTabLabel(_SupportTab tab) => switch (tab) {
     _SupportTab.help => switch (this) {
       _Strings.en => 'Help',
@@ -5115,6 +5173,7 @@ class _Strings {
     profiles: 'Профили',
     activeProfile: 'Активен',
     refreshPing: 'Обновить пинг',
+    collapseProfiles: 'Свернуть список',
     showQr: 'Показать QR',
     copy: 'Скопировать',
     delete: 'Удалить',
@@ -5254,6 +5313,7 @@ class _Strings {
     profiles: 'Profiles',
     activeProfile: 'Active',
     refreshPing: 'Refresh ping',
+    collapseProfiles: 'Collapse list',
     showQr: 'Show QR',
     copy: 'Copy',
     delete: 'Delete',

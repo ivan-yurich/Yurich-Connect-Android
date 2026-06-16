@@ -256,7 +256,19 @@ void main() {
     final profile = (await ProfileImporter().importFromText(link)).first;
     final config =
         jsonDecode(
-              SingBoxConfigBuilder().build(profile, smartRouteRuDirect: true),
+              SingBoxConfigBuilder().build(
+                profile,
+                smartRouteRuDirect: true,
+                smartRouteRuBypassPackages: const [
+                  'ru.gosuslugi',
+                  'ru.some.newbank',
+                  'ru.yandex.browser',
+                  'ru.yandex.searchplugin',
+                  'com.openai.chatgpt',
+                  'com.google.android.youtube',
+                  'org.telegram.messenger',
+                ],
+              ),
             )
             as Map<String, dynamic>;
 
@@ -272,6 +284,11 @@ void main() {
     expect(excludedPackages, contains('online.dnsai.ivanvpn'));
     expect(excludedPackages, isNot(contains('ru.yandex.browser')));
     expect(excludedPackages, isNot(contains('ru.yandex.searchplugin')));
+    expect(excludedPackages, isNot(contains('com.openai.chatgpt')));
+    expect(excludedPackages, isNot(contains('com.google.android.youtube')));
+    expect(excludedPackages, isNot(contains('org.telegram.messenger')));
+    expect(excludedPackages, contains('ru.gosuslugi'));
+    expect(excludedPackages, contains('ru.some.newbank'));
     expect(excludedPackages, contains('ru.sberbankmobile'));
     expect(excludedPackages, contains('ru.vk.android'));
 
@@ -320,6 +337,27 @@ void main() {
       isTrue,
     );
     expect(SmartRouteRules.ruDirectPackageNames, isNotEmpty);
+  });
+
+  test('builds Hiddify-like RU app bypass list with global app denylist', () {
+    final packages = SmartRouteRules.ruBypassPackages(const [
+      'ru.gosuslugi',
+      'ru.some.newbank',
+      'ru.yandex.browser',
+      'ru.yandex.searchplugin',
+      'com.openai.chatgpt',
+      'org.telegram.messenger',
+      'com.google.android.youtube',
+    ]);
+
+    expect(packages, contains('ru.gosuslugi'));
+    expect(packages, contains('ru.some.newbank'));
+    expect(packages, contains('ru.sberbankmobile'));
+    expect(packages, isNot(contains('ru.yandex.browser')));
+    expect(packages, isNot(contains('ru.yandex.searchplugin')));
+    expect(packages, isNot(contains('com.openai.chatgpt')));
+    expect(packages, isNot(contains('org.telegram.messenger')));
+    expect(packages, isNot(contains('com.google.android.youtube')));
   });
 
   test('keeps native Naive outbound and normalizes TLS fields', () {

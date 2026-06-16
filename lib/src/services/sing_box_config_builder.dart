@@ -15,6 +15,7 @@ class SingBoxConfigBuilder {
     VpnProfile profile, {
     NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
     bool smartRouteRuDirect = false,
+    List<String> smartRouteRuBypassPackages = const [],
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -48,7 +49,10 @@ class SingBoxConfigBuilder {
       'log': {'level': 'warn', 'timestamp': true},
       'dns': _dnsConfig(profile),
       'inbounds': [
-        _tunInbound(smartRouteRuDirect: smartRouteRuDirect),
+        _tunInbound(
+          smartRouteRuDirect: smartRouteRuDirect,
+          smartRouteRuBypassPackages: smartRouteRuBypassPackages,
+        ),
         _mixedInbound(),
       ],
       'outbounds': [
@@ -80,7 +84,10 @@ class SingBoxConfigBuilder {
     return const JsonEncoder.withIndent('  ').convert(config);
   }
 
-  Map<String, dynamic> _tunInbound({required bool smartRouteRuDirect}) {
+  Map<String, dynamic> _tunInbound({
+    required bool smartRouteRuDirect,
+    required List<String> smartRouteRuBypassPackages,
+  }) {
     final inbound = <String, dynamic>{
       'type': 'tun',
       'tag': 'tun-in',
@@ -93,7 +100,8 @@ class SingBoxConfigBuilder {
     inbound['interface_name'] = 'tun0';
     inbound['exclude_package'] = [
       'online.dnsai.ivanvpn',
-      if (smartRouteRuDirect) ...SmartRouteRules.ruDirectPackageNames,
+      if (smartRouteRuDirect)
+        ...SmartRouteRules.ruBypassPackages(smartRouteRuBypassPackages),
     ];
     return inbound;
   }

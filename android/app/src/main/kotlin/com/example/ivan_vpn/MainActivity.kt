@@ -71,6 +71,33 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "online.dnsai.ivanvpn/apps",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getInstalledPackages" -> result.success(getInstalledPackages())
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun getInstalledPackages(): List<String> {
+        return try {
+            val apps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getInstalledApplications(
+                    PackageManager.ApplicationInfoFlags.of(0L),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getInstalledApplications(0)
+            }
+            apps.map { it.packageName }.distinct().sorted()
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to list installed packages", error)
+            emptyList()
+        }
     }
 
     private fun installApk(path: String?, result: MethodChannel.Result) {
