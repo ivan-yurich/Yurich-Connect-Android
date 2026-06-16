@@ -100,6 +100,10 @@ class SingBoxConfigBuilder {
 
   List<Map<String, dynamic>> _smartRouteRules() {
     return [
+      {
+        'domain_suffix': SmartRouteRules.globalProxyDomainSuffixes,
+        'outbound': 'proxy',
+      },
       {'domain': SmartRouteRules.ruDirectDomains, 'outbound': 'direct'},
       {
         'domain_suffix': SmartRouteRules.ruDirectDomainSuffixes,

@@ -270,7 +270,8 @@ void main() {
         .whereType<String>()
         .toList();
     expect(excludedPackages, contains('online.dnsai.ivanvpn'));
-    expect(excludedPackages, contains('ru.yandex.browser'));
+    expect(excludedPackages, isNot(contains('ru.yandex.browser')));
+    expect(excludedPackages, isNot(contains('ru.yandex.searchplugin')));
     expect(excludedPackages, contains('ru.sberbankmobile'));
     expect(excludedPackages, contains('ru.vk.android'));
 
@@ -278,6 +279,29 @@ void main() {
         ((config['route'] as Map<String, dynamic>)['rules'] as List)
             .whereType<Map<String, dynamic>>()
             .toList();
+    final globalProxyRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'proxy' &&
+          (rule['domain_suffix'] as List?)?.contains('chatgpt.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('openai.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('gemini.google.com') ==
+              true &&
+          (rule['domain_suffix'] as List?)?.contains('telegram.org') == true &&
+          (rule['domain_suffix'] as List?)?.contains('instagram.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('youtube.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('googlevideo.com') == true,
+    );
+    expect(globalProxyRuleIndex, isNonNegative);
+
+    final ruDirectRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'direct' &&
+          (rule['domain_suffix'] as List?)?.contains('ru') == true &&
+          (rule['domain_suffix'] as List?)?.contains('рф') == true,
+    );
+    expect(ruDirectRuleIndex, isNonNegative);
+    expect(globalProxyRuleIndex, lessThan(ruDirectRuleIndex));
+
     expect(
       routeRules.any(
         (rule) =>
