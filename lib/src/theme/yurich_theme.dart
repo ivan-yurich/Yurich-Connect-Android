@@ -75,6 +75,12 @@ class YurichGradients {
     colors: [YurichColors.surfaceSolid, Color(0xFF081D2C), Color(0xFF071522)],
   );
 
+  static const compactCard = LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [Color(0xFF09283D), Color(0xFF071C2C), YurichColors.background],
+  );
+
   static const selectedProfile = LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,

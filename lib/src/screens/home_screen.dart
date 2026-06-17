@@ -14,6 +14,7 @@ import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
 import '../services/installed_apps_service.dart';
 import '../services/power_manager_service.dart';
+import '../services/profile_auto_selector.dart';
 import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_store.dart';
@@ -124,6 +125,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _store = ProfileStore();
   final _importer = ProfileImporter();
   final _configBuilder = SingBoxConfigBuilder();
+  final _autoSelector = const ProfileAutoSelector();
   final _updateService = AppUpdateService();
   final _powerManagerService = PowerManagerService();
   final _geoService = ProfileGeoService();
@@ -1105,9 +1107,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _connect() async {
-    final profile = _selectedProfile;
+    final profile = _autoConnectProfile();
     if (profile == null) {
-      _showSnack(s.importFirst);
+      _showSnack(
+        _profiles.isEmpty ? s.importFirst : s.autoConnectNoStableProfile,
+      );
       return;
     }
 
@@ -1126,12 +1130,30 @@ class _HomeScreenState extends State<HomeScreen>
     _autoRecoveryArmed = true;
     await _runBusy(() async {
       try {
+        if (_selectedProfileId != profile.id) {
+          setState(() {
+            _selectedProfileId = profile.id;
+            _profileTab = _profileTabForKind(profile.kind);
+            _profilesExpanded = false;
+            _message = s.autoSelectedProfile(profile.name);
+          });
+          await _store.saveSelectedProfileId(profile.id);
+        }
         await _startVpnCore(profile);
       } on Object {
         _autoRecoveryArmed = false;
         rethrow;
       }
     }, message: s.connectingTo(profile.name));
+  }
+
+  VpnProfile? _autoConnectProfile() {
+    return _autoSelector.choose(
+      _profiles,
+      selectedProfileId: _selectedProfileId,
+      pingMs: _profilePingMs,
+      offlineProfileIds: _profilePingError.keys.toSet(),
+    );
   }
 
   Future<void> _startVpnCore(VpnProfile profile) async {
@@ -2666,7 +2688,12 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   Widget build(BuildContext context) {
     final selected = _selectedProfile;
-    final selectedProfileId = _selectedProfileId ?? selected?.id;
+    final connectCandidate = _connected
+        ? selected
+        : (_autoConnectProfile() ?? selected);
+    final selectedProfileId = _connected
+        ? (_selectedProfileId ?? selected?.id)
+        : (connectCandidate?.id ?? _selectedProfileId ?? selected?.id);
     final activeProfileId = _connected ? selectedProfileId : null;
 
     return Scaffold(
@@ -2709,7 +2736,7 @@ class _HomeScreenState extends State<HomeScreen>
                   uptime: _formatDuration(_connectedDuration),
                   total: _sessionTotal,
                   onToggle: _toggleVpn,
-                  toggleEnabled: !_busy && selected != null,
+                  toggleEnabled: !_busy && _profiles.isNotEmpty,
                 ),
               ),
               Expanded(
@@ -2720,7 +2747,7 @@ class _HomeScreenState extends State<HomeScreen>
                       pulse: _glowPulse,
                       strings: s,
                       profiles: _profiles,
-                      selectedProfile: selected,
+                      selectedProfile: connectCandidate,
                       selectedId: selectedProfileId,
                       activeProfileId: activeProfileId,
                       selectedTab: _profileTab,
@@ -3326,62 +3353,83 @@ class _ProfilePanel extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 8),
-        _ProfileTabBar(
-          pulse: pulse,
-          strings: strings,
-          profiles: profiles,
-          selectedTab: selectedTab,
-          onChanged: onTabChanged,
-        ),
-        const SizedBox(height: 10),
         if (profiles.isEmpty)
           _EmptyProfiles(strings: strings)
-        else if (visibleProfiles.isEmpty)
-          _EmptyProfiles(message: strings.noProfilesInTab(selectedTab))
         else ...[
-          ...shownProfiles.map(
-            (profile) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: _ProfileTile(
-                pulse: pulse,
-                profile: profile,
-                selected: profile.id == selectedId,
-                active: profile.id == activeProfileId,
-                onTap: () => onSelect(profile),
-                kindLabel: kindLabel,
-                displayName: displayName(profile),
-                countryFlag: countryFlag(profile),
-                pingLabel: pingLabel(profile),
-                subscriptionStatus: subscriptionStatus(profile),
-                subscriptionNeedsAttention: subscriptionNeedsAttention(profile),
-                subscriptionLabel: strings.subscriptionLabel,
-                activeLabel: strings.activeProfile,
-                onPing: () => onPing(profile),
-                onDelete: () => onDeleteProfile(profile),
-                deleteTooltip: strings.delete,
-              ),
-            ),
+          const SizedBox(height: 8),
+          _ServerPickerSummary(
+            strings: strings,
+            selectedProfile: selectedProfile,
+            totalCount: profiles.length,
+            visibleCount: visibleProfiles.length,
+            profilesExpanded: profilesExpanded,
+            onToggle: () => onProfilesExpandedChanged(!profilesExpanded),
+            kindLabel: kindLabel,
+            displayName: displayName,
+            countryFlag: countryFlag,
+            pingLabel: pingLabel,
           ),
-          if (hiddenProfiles > 0 || profilesExpanded)
-            Padding(
-              padding: const EdgeInsets.only(top: 2, bottom: 10),
-              child: Center(
-                child: TextButton.icon(
-                  onPressed: () => onProfilesExpandedChanged(!profilesExpanded),
-                  icon: Icon(
-                    profilesExpanded
-                        ? Icons.keyboard_arrow_up
-                        : Icons.unfold_more,
-                  ),
-                  label: Text(
-                    profilesExpanded
-                        ? strings.collapseProfiles
-                        : strings.showMoreProfiles(hiddenProfiles),
+          if (profilesExpanded) ...[
+            const SizedBox(height: 10),
+            _ProfileTabBar(
+              pulse: pulse,
+              strings: strings,
+              profiles: profiles,
+              selectedTab: selectedTab,
+              onChanged: onTabChanged,
+            ),
+            const SizedBox(height: 10),
+            if (visibleProfiles.isEmpty)
+              _EmptyProfiles(message: strings.noProfilesInTab(selectedTab))
+            else ...[
+              ...shownProfiles.map(
+                (profile) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _ProfileTile(
+                    pulse: pulse,
+                    profile: profile,
+                    selected: profile.id == selectedId,
+                    active: profile.id == activeProfileId,
+                    onTap: () => onSelect(profile),
+                    kindLabel: kindLabel,
+                    displayName: displayName(profile),
+                    countryFlag: countryFlag(profile),
+                    pingLabel: pingLabel(profile),
+                    subscriptionStatus: subscriptionStatus(profile),
+                    subscriptionNeedsAttention: subscriptionNeedsAttention(
+                      profile,
+                    ),
+                    subscriptionLabel: strings.subscriptionLabel,
+                    activeLabel: strings.activeProfile,
+                    onPing: () => onPing(profile),
+                    onDelete: () => onDeleteProfile(profile),
+                    deleteTooltip: strings.delete,
                   ),
                 ),
               ),
+              if (hiddenProfiles > 0)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2, bottom: 10),
+                  child: Center(
+                    child: TextButton.icon(
+                      onPressed: () => onProfilesExpandedChanged(true),
+                      icon: const Icon(Icons.unfold_more),
+                      label: Text(strings.showMoreProfiles(hiddenProfiles)),
+                    ),
+                  ),
+                ),
+            ],
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 8),
+              child: Center(
+                child: TextButton.icon(
+                  onPressed: () => onProfilesExpandedChanged(false),
+                  icon: const Icon(Icons.keyboard_arrow_up),
+                  label: Text(strings.collapseProfiles),
+                ),
+              ),
             ),
+          ],
         ],
         const SizedBox(height: 6),
         _ProfileInsightPanel(
@@ -3419,6 +3467,148 @@ class _ProfilePanel extends StatelessWidget {
               : () => onPing(selectedProfile!),
         ),
       ],
+    );
+  }
+}
+
+class _ServerPickerSummary extends StatelessWidget {
+  const _ServerPickerSummary({
+    required this.strings,
+    required this.selectedProfile,
+    required this.totalCount,
+    required this.visibleCount,
+    required this.profilesExpanded,
+    required this.onToggle,
+    required this.kindLabel,
+    required this.displayName,
+    required this.countryFlag,
+    required this.pingLabel,
+  });
+
+  final _Strings strings;
+  final VpnProfile? selectedProfile;
+  final int totalCount;
+  final int visibleCount;
+  final bool profilesExpanded;
+  final VoidCallback onToggle;
+  final String Function(VpnProfileKind kind) kindLabel;
+  final String Function(VpnProfile profile) displayName;
+  final String? Function(VpnProfile profile) countryFlag;
+  final String Function(VpnProfile profile) pingLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = selectedProfile;
+    final title = profile == null
+        ? strings.serverPickerEmpty
+        : displayName(profile);
+    final flag = profile == null ? null : countryFlag(profile);
+    final details = profile == null
+        ? strings.autoConnectMode
+        : [
+            if (flag != null && flag.isNotEmpty) flag,
+            kindLabel(profile.kind),
+            profile.endpoint,
+            pingLabel(profile),
+          ].where((value) => value.trim().isNotEmpty).join(' · ');
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(YurichRadii.card),
+      onTap: onToggle,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: YurichGradients.compactCard,
+          borderRadius: BorderRadius.circular(YurichRadii.card),
+          border: Border.all(color: _cyanGlow.withValues(alpha: 0.34)),
+          boxShadow: [
+            BoxShadow(
+              color: _cyanGlow.withValues(alpha: 0.08),
+              blurRadius: 18,
+              spreadRadius: 1,
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _cyanGlow.withValues(alpha: 0.14),
+                  border: Border.all(color: _cyanGlow.withValues(alpha: 0.38)),
+                ),
+                child: const Icon(Icons.storage_rounded),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      strings.serverPickerTitle(totalCount),
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: _mutedGold,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      details,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: _mutedGold),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    profilesExpanded
+                        ? strings.hideServers
+                        : strings.openServers,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: _cyanGlow,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    strings.visibleServers(visibleCount),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: _mutedGold),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 4),
+              Icon(
+                profilesExpanded
+                    ? Icons.keyboard_arrow_up
+                    : Icons.keyboard_arrow_down,
+                color: _cyanGlow,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -4639,6 +4829,7 @@ class _Strings {
     required this.supportedProtocolsOnly,
     required this.switchingProfile,
     required this.importFirst,
+    required this.autoConnectNoStableProfile,
     required this.configSaveFailed,
     required this.vpnStartFailed,
     required this.connectionProbeFailed,
@@ -4672,6 +4863,10 @@ class _Strings {
     required this.activeProfile,
     required this.refreshPing,
     required this.collapseProfiles,
+    required this.serverPickerEmpty,
+    required this.autoConnectMode,
+    required this.openServers,
+    required this.hideServers,
     required this.showQr,
     required this.copy,
     required this.delete,
@@ -4735,6 +4930,7 @@ class _Strings {
   final String supportedProtocolsOnly;
   final String switchingProfile;
   final String importFirst;
+  final String autoConnectNoStableProfile;
   final String configSaveFailed;
   final String vpnStartFailed;
   final String connectionProbeFailed;
@@ -4768,6 +4964,10 @@ class _Strings {
   final String activeProfile;
   final String refreshPing;
   final String collapseProfiles;
+  final String serverPickerEmpty;
+  final String autoConnectMode;
+  final String openServers;
+  final String hideServers;
   final String showQr;
   final String copy;
   final String delete;
@@ -5008,6 +5208,21 @@ class _Strings {
     _ => 'Выбран профиль: $name',
   };
 
+  String autoSelectedProfile(String name) => switch (this) {
+    _Strings.en => 'Auto selected: $name',
+    _ => 'Автовыбор: $name',
+  };
+
+  String serverPickerTitle(int count) => switch (this) {
+    _Strings.en => 'Servers: $count',
+    _ => 'Серверы: $count',
+  };
+
+  String visibleServers(int count) => switch (this) {
+    _Strings.en => 'In tab: $count',
+    _ => 'В разделе: $count',
+  };
+
   String connectingTo(String name) => switch (this) {
     _Strings.en => 'Connecting to $name...',
     _ => 'Подключаю $name...',
@@ -5139,6 +5354,8 @@ class _Strings {
         'В этой сборке поддерживаются VLESS Reality, NaiveProxy и Hysteria/Hysteria2.',
     switchingProfile: 'Переключаю профиль...',
     importFirst: 'Сначала импортируй профиль.',
+    autoConnectNoStableProfile:
+        'Для авто-подключения нужен рабочий Reality или HTTPS профиль. Turbo/Hysteria не запускается автоматически.',
     configSaveFailed: 'sing-box не сохранил config.',
     vpnStartFailed: 'VPN не стартовал. Открой логи ниже.',
     connectionProbeFailed:
@@ -5174,6 +5391,10 @@ class _Strings {
     activeProfile: 'Активен',
     refreshPing: 'Обновить пинг',
     collapseProfiles: 'Свернуть список',
+    serverPickerEmpty: 'Сервер не выбран',
+    autoConnectMode: 'Автовыбор Reality/HTTPS, Turbo только вручную',
+    openServers: 'Открыть',
+    hideServers: 'Скрыть',
     showQr: 'Показать QR',
     copy: 'Скопировать',
     delete: 'Удалить',
@@ -5279,6 +5500,8 @@ class _Strings {
         'This build supports VLESS Reality, NaiveProxy, and Hysteria/Hysteria2.',
     switchingProfile: 'Switching profile...',
     importFirst: 'Import a profile first.',
+    autoConnectNoStableProfile:
+        'Auto connect needs a working Reality or HTTPS profile. Turbo/Hysteria is not started automatically.',
     configSaveFailed: 'sing-box did not save the config.',
     vpnStartFailed: 'VPN did not start. Check the logs below.',
     connectionProbeFailed:
@@ -5314,6 +5537,10 @@ class _Strings {
     activeProfile: 'Active',
     refreshPing: 'Refresh ping',
     collapseProfiles: 'Collapse list',
+    serverPickerEmpty: 'No server selected',
+    autoConnectMode: 'Auto selects Reality/HTTPS; Turbo is manual only',
+    openServers: 'Open',
+    hideServers: 'Hide',
     showQr: 'Show QR',
     copy: 'Copy',
     delete: 'Delete',
