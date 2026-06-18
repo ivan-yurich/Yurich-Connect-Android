@@ -1,4 +1,5 @@
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
+import 'package:aurum_vpn/src/models/profile_stability.dart';
 import 'package:aurum_vpn/src/services/profile_auto_selector.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -75,6 +76,55 @@ void main() {
     );
 
     expect(selected?.id, 'https');
+  });
+
+  test('penalizes recently unstable profiles', () {
+    final now = DateTime.utc(2026, 6, 18, 8);
+    final profiles = [
+      _profile('reality-a', VpnProfileKind.vlessReality, 'a.example'),
+      _profile('reality-b', VpnProfileKind.vlessReality, 'b.example'),
+    ];
+
+    final selected = selector.choose(
+      profiles,
+      pingMs: const {'reality-a': 80, 'reality-b': 140},
+      stabilityStats: {
+        'reality-a': ProfileStabilityStats(
+          failedStarts: 2,
+          recoveries: 1,
+          healthFailures: 2,
+          lastFailureAt: now.subtract(const Duration(minutes: 5)),
+        ),
+      },
+      now: now,
+    );
+
+    expect(selected?.id, 'reality-b');
+  });
+
+  test('allows previously unstable profiles after cooldown', () {
+    final now = DateTime.utc(2026, 6, 18, 8);
+    final profiles = [
+      _profile('reality-a', VpnProfileKind.vlessReality, 'a.example'),
+      _profile('reality-b', VpnProfileKind.vlessReality, 'b.example'),
+    ];
+
+    final selected = selector.choose(
+      profiles,
+      pingMs: const {'reality-a': 60, 'reality-b': 250},
+      stabilityStats: {
+        'reality-a': ProfileStabilityStats(
+          failedStarts: 2,
+          recoveries: 1,
+          healthFailures: 2,
+          lastFailureAt: now.subtract(const Duration(hours: 2)),
+          lastHealthyAt: now.subtract(const Duration(minutes: 10)),
+        ),
+      },
+      now: now,
+    );
+
+    expect(selected?.id, 'reality-a');
   });
 }
 

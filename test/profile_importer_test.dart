@@ -264,7 +264,9 @@ void main() {
                   'ru.some.newbank',
                   'ru.yandex.browser',
                   'ru.yandex.searchplugin',
+                  'com.yandex.browser',
                   'com.openai.chatgpt',
+                  'com.google.android.apps.gemini',
                   'com.google.android.youtube',
                   'org.telegram.messenger',
                 ],
@@ -284,7 +286,9 @@ void main() {
     expect(excludedPackages, contains('online.dnsai.ivanvpn'));
     expect(excludedPackages, isNot(contains('ru.yandex.browser')));
     expect(excludedPackages, isNot(contains('ru.yandex.searchplugin')));
+    expect(excludedPackages, isNot(contains('com.yandex.browser')));
     expect(excludedPackages, isNot(contains('com.openai.chatgpt')));
+    expect(excludedPackages, isNot(contains('com.google.android.apps.gemini')));
     expect(excludedPackages, isNot(contains('com.google.android.youtube')));
     expect(excludedPackages, isNot(contains('org.telegram.messenger')));
     expect(excludedPackages, contains('ru.gosuslugi'));
@@ -296,6 +300,15 @@ void main() {
         ((config['route'] as Map<String, dynamic>)['rules'] as List)
             .whereType<Map<String, dynamic>>()
             .toList();
+    final globalExactRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'proxy' &&
+          (rule['domain'] as List?)?.contains('chat.openai.com') == true &&
+          (rule['domain'] as List?)?.contains('gemini.google.com') == true &&
+          (rule['domain'] as List?)?.contains('web.telegram.org') == true,
+    );
+    expect(globalExactRuleIndex, isNonNegative);
+
     final globalProxyRuleIndex = routeRules.indexWhere(
       (rule) =>
           rule['outbound'] == 'proxy' &&
@@ -309,6 +322,7 @@ void main() {
           (rule['domain_suffix'] as List?)?.contains('googlevideo.com') == true,
     );
     expect(globalProxyRuleIndex, isNonNegative);
+    expect(globalExactRuleIndex, lessThan(globalProxyRuleIndex));
 
     final ruDirectRuleIndex = routeRules.indexWhere(
       (rule) =>
@@ -345,7 +359,9 @@ void main() {
       'ru.some.newbank',
       'ru.yandex.browser',
       'ru.yandex.searchplugin',
+      'com.yandex.browser',
       'com.openai.chatgpt',
+      'com.google.android.apps.gemini',
       'org.telegram.messenger',
       'com.google.android.youtube',
     ]);
@@ -355,7 +371,9 @@ void main() {
     expect(packages, contains('ru.sberbankmobile'));
     expect(packages, isNot(contains('ru.yandex.browser')));
     expect(packages, isNot(contains('ru.yandex.searchplugin')));
+    expect(packages, isNot(contains('com.yandex.browser')));
     expect(packages, isNot(contains('com.openai.chatgpt')));
+    expect(packages, isNot(contains('com.google.android.apps.gemini')));
     expect(packages, isNot(contains('org.telegram.messenger')));
     expect(packages, isNot(contains('com.google.android.youtube')));
   });

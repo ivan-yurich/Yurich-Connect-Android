@@ -1,3 +1,4 @@
+import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 
 class ProfileAutoSelector {
@@ -8,21 +9,34 @@ class ProfileAutoSelector {
     String? selectedProfileId,
     Map<String, int> pingMs = const {},
     Set<String> offlineProfileIds = const {},
+    Map<String, ProfileStabilityStats> stabilityStats = const {},
+    DateTime? now,
   }) {
     final selected = _findSelected(profiles, selectedProfileId);
-    if (selected != null && _isAutoCandidate(selected, offlineProfileIds)) {
+    if (selected != null &&
+        _isAutoCandidate(selected, offlineProfileIds, stabilityStats, now)) {
       return selected;
     }
 
     final candidates = profiles
-        .where((profile) => _isAutoCandidate(profile, offlineProfileIds))
+        .where(
+          (profile) =>
+              _isAutoCandidate(profile, offlineProfileIds, stabilityStats, now),
+        )
         .toList(growable: false);
     if (candidates.isEmpty) {
       return null;
     }
 
     final sorted = [...candidates]
-      ..sort((a, b) => _score(a, pingMs).compareTo(_score(b, pingMs)));
+      ..sort(
+        (a, b) => _score(
+          a,
+          pingMs,
+          stabilityStats,
+          now,
+        ).compareTo(_score(b, pingMs, stabilityStats, now)),
+      );
     return sorted.first;
   }
 
@@ -38,7 +52,12 @@ class ProfileAutoSelector {
     return null;
   }
 
-  bool _isAutoCandidate(VpnProfile profile, Set<String> offlineProfileIds) {
+  bool _isAutoCandidate(
+    VpnProfile profile,
+    Set<String> offlineProfileIds,
+    Map<String, ProfileStabilityStats> stabilityStats,
+    DateTime? now,
+  ) {
     if (!profile.kind.isClientSupported) {
       return false;
     }
@@ -47,6 +66,9 @@ class ProfileAutoSelector {
       return false;
     }
     if (offlineProfileIds.contains(profile.id)) {
+      return false;
+    }
+    if (stabilityStats[profile.id]?.isTemporarilyUnstable(now: now) == true) {
       return false;
     }
 
@@ -59,7 +81,12 @@ class ProfileAutoSelector {
     return true;
   }
 
-  int _score(VpnProfile profile, Map<String, int> pingMs) {
+  int _score(
+    VpnProfile profile,
+    Map<String, int> pingMs,
+    Map<String, ProfileStabilityStats> stabilityStats,
+    DateTime? now,
+  ) {
     final kindScore = switch (profile.kind) {
       VpnProfileKind.vlessReality => 0,
       VpnProfileKind.naive => 160,
@@ -67,7 +94,9 @@ class ProfileAutoSelector {
     };
     final pingScore = pingMs[profile.id] ?? 900;
     final expiryScore = _expiryScore(profile.subscriptionExpiresAt);
-    return kindScore + pingScore + expiryScore;
+    final stabilityScore =
+        stabilityStats[profile.id]?.autoSelectPenalty(now: now) ?? 0;
+    return kindScore + pingScore + expiryScore + stabilityScore;
   }
 
   int _expiryScore(DateTime? expiresAt) {

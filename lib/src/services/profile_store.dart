@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 
 class ProfileStore {
@@ -15,6 +16,7 @@ class ProfileStore {
       'deletedProfileIdsBySubscriptionSource';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
+  static const _profileStabilityKey = 'profileStabilityStats';
 
   Future<List<VpnProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -197,5 +199,52 @@ class ProfileStore {
   Future<void> saveSplitTunnelExcludedProcesses(List<String> processes) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_splitTunnelExcludedProcessesKey, processes);
+  }
+
+  Future<Map<String, ProfileStabilityStats>> loadProfileStabilityStats() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_profileStabilityKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    final stats = <String, ProfileStabilityStats>{};
+    for (final entry in decoded.entries) {
+      final profileId = '${entry.key}'.trim();
+      final value = entry.value;
+      if (profileId.isEmpty || value is! Map) {
+        continue;
+      }
+      stats[profileId] = ProfileStabilityStats.fromJson(
+        value.cast<String, dynamic>(),
+      );
+    }
+    return stats;
+  }
+
+  Future<void> saveProfileStabilityStats(
+    Map<String, ProfileStabilityStats> stats,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, Map<String, dynamic>>{};
+    for (final entry in stats.entries) {
+      final profileId = entry.key.trim();
+      if (profileId.isEmpty) {
+        continue;
+      }
+      normalized[profileId] = entry.value.toJson();
+    }
+
+    if (normalized.isEmpty) {
+      await prefs.remove(_profileStabilityKey);
+      return;
+    }
+
+    await prefs.setString(_profileStabilityKey, jsonEncode(normalized));
   }
 }

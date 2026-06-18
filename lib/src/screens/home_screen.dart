@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/connection_status.dart';
 import '../models/connection_ui_state.dart';
+import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
 import '../services/installed_apps_service.dart';
@@ -19,6 +20,7 @@ import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_store.dart';
 import '../services/protocol_display_mapper.dart';
+import '../services/smart_route_rules.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
 import '../theme/yurich_theme.dart';
@@ -152,6 +154,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _profilePingText = <String, String>{};
   final _profilePingBusy = <String, bool>{};
   final _profilePingError = <String, String>{};
+  Map<String, ProfileStabilityStats> _profileStabilityStats = const {};
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
   _ProfileTab _profileTab = _ProfileTab.all;
@@ -413,6 +416,7 @@ class _HomeScreenState extends State<HomeScreen>
     final appInfo = await _loadAppInfo();
     final storedProfiles = await _store.loadProfiles();
     final profiles = _clientSupportedProfiles(storedProfiles);
+    final loadedStabilityStats = await _store.loadProfileStabilityStats();
     if (profiles.length != storedProfiles.length) {
       await _store.saveProfiles(profiles);
     }
@@ -423,6 +427,18 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     final strings = _Strings.forLanguage(language);
+    final profileIds = profiles.map((profile) => profile.id).toSet();
+    final stabilityStats = Map<String, ProfileStabilityStats>.fromEntries(
+      loadedStabilityStats.entries.where(
+        (entry) => profileIds.contains(entry.key),
+      ),
+    );
+    if (stabilityStats.length != loadedStabilityStats.length) {
+      await _store.saveProfileStabilityStats(stabilityStats);
+      if (!mounted) {
+        return;
+      }
+    }
     final resolvedSelectedId =
         profiles.any((profile) => profile.id == selectedId)
         ? selectedId
@@ -432,6 +448,7 @@ class _HomeScreenState extends State<HomeScreen>
       _appVersion = appInfo.version;
       _appBuildNumber = appInfo.buildNumber;
       _profiles = profiles;
+      _profileStabilityStats = stabilityStats;
       _selectedProfileId = resolvedSelectedId;
       _smartRouteRuDirect = smartRouteRuDirect;
       _message = profiles.isEmpty
@@ -1140,8 +1157,14 @@ class _HomeScreenState extends State<HomeScreen>
           await _store.saveSelectedProfileId(profile.id);
         }
         await _startVpnCore(profile);
-      } on Object {
+      } on Object catch (error) {
         _autoRecoveryArmed = false;
+        unawaited(
+          _recordProfileStability(
+            profile,
+            (stats) => stats.recordStartFailure(_redactSensitive('$error')),
+          ),
+        );
         rethrow;
       }
     }, message: s.connectingTo(profile.name));
@@ -1153,7 +1176,43 @@ class _HomeScreenState extends State<HomeScreen>
       selectedProfileId: _selectedProfileId,
       pingMs: _profilePingMs,
       offlineProfileIds: _profilePingError.keys.toSet(),
+      stabilityStats: _profileStabilityStats,
     );
+  }
+
+  ProfileStabilityStats _profileStabilityFor(String profileId) {
+    return _profileStabilityStats[profileId] ?? const ProfileStabilityStats();
+  }
+
+  Future<void> _recordProfileStability(
+    VpnProfile profile,
+    ProfileStabilityStats Function(ProfileStabilityStats current) update,
+  ) async {
+    final nextStats = Map<String, ProfileStabilityStats>.from(
+      _profileStabilityStats,
+    );
+    nextStats[profile.id] = update(_profileStabilityFor(profile.id));
+    if (mounted) {
+      setState(() => _profileStabilityStats = nextStats);
+    } else {
+      _profileStabilityStats = nextStats;
+    }
+    await _store.saveProfileStabilityStats(nextStats);
+  }
+
+  String _profileStabilityLabel(VpnProfile profile) {
+    final stats = _profileStabilityFor(profile.id);
+    if (stats.isTemporarilyUnstable()) {
+      return s.profileStabilityCoolingDown;
+    }
+    final penalty = stats.autoSelectPenalty();
+    if (penalty >= 420) {
+      return s.profileStabilityWeak;
+    }
+    if (stats.successfulStarts > 0 && penalty <= 80) {
+      return s.profileStabilityGood;
+    }
+    return s.profileStabilityLearning;
   }
 
   Future<void> _startVpnCore(VpnProfile profile) async {
@@ -1322,6 +1381,9 @@ class _HomeScreenState extends State<HomeScreen>
       });
       unawaited(_syncConnectionNotification());
     }
+    unawaited(
+      _recordProfileStability(profile, (stats) => stats.recordStartSuccess()),
+    );
     unawaited(_refreshConnectedCountry(profile.id));
   }
 
@@ -1458,6 +1520,14 @@ class _HomeScreenState extends State<HomeScreen>
 
     final profile = _selectedProfile;
     _queueLog('VPN watchdog: unexpected stop detected from $source.');
+    if (profile != null) {
+      unawaited(
+        _recordProfileStability(
+          profile,
+          (stats) => stats.recordStartFailure('unexpected-stop:$source'),
+        ),
+      );
+    }
     setState(() {
       _lastError = s.vpnStoppedUnexpectedly;
       _message = profile == null
@@ -1506,10 +1576,19 @@ class _HomeScreenState extends State<HomeScreen>
       if (healthy) {
         _tunnelHealthFailures = 0;
         _lastHealthyAt = DateTime.now();
+        unawaited(
+          _recordProfileStability(profile, (stats) => stats.recordHealthy()),
+        );
         return;
       }
 
       _tunnelHealthFailures += 1;
+      unawaited(
+        _recordProfileStability(
+          profile,
+          (stats) => stats.recordHealthFailure('health-probe:$source'),
+        ),
+      );
       _queueLog(
         'VPN watchdog: health probe failed #$_tunnelHealthFailures from $source '
         'for ${profile.name}.',
@@ -1621,9 +1700,18 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       await _startVpnCore(profile);
+      unawaited(
+        _recordProfileStability(profile, (stats) => stats.recordRecovery()),
+      );
     } on Object catch (error) {
       final errorText = _redactSensitive('$error');
       _queueLog('VPN watchdog reconnect failed: $errorText');
+      unawaited(
+        _recordProfileStability(
+          profile,
+          (stats) => stats.recordStartFailure(errorText),
+        ),
+      );
       if (mounted) {
         setState(() {
           _lastError = errorText;
@@ -2429,6 +2517,13 @@ class _HomeScreenState extends State<HomeScreen>
       'locale: ${Platform.localeName}',
       'config_target: ${_vpnEngine.configTarget.name}',
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
+      'smart_route_enabled: $_smartRouteRuDirect',
+      if (_smartRouteRuDirect) ...[
+        'smart_route_mode: ru-apps-direct/global-vpn',
+        'smart_route_global_packages: ${SmartRouteRules.globalProxyPackageNames.length}',
+        'smart_route_ru_packages_builtin: ${SmartRouteRules.ruDirectPackageNames.length}',
+        'smart_route_global_domains: ${SmartRouteRules.globalProxyDomains.length + SmartRouteRules.globalProxyDomainSuffixes.length}',
+      ],
       'battery_optimization_ignored: $_batteryOptimizationIgnored',
       'status: $_status',
       'connection_degraded: $_connectionDegraded',
@@ -2450,6 +2545,18 @@ class _HomeScreenState extends State<HomeScreen>
             '${profile.countryCode == null ? '' : ' ${profile.countryCode}'}'
             '${profile.countryName == null ? '' : ' ${profile.countryName}'}',
         'profile_ping: ${_profilePingLabel(profile)}',
+        'profile_stability: ${_profileStabilityLabel(profile)}',
+        'profile_stability_penalty: '
+            '${_profileStabilityFor(profile.id).autoSelectPenalty()}',
+        'profile_successful_starts: '
+            '${_profileStabilityFor(profile.id).successfulStarts}',
+        'profile_failed_starts: '
+            '${_profileStabilityFor(profile.id).failedStarts}',
+        'profile_recoveries: ${_profileStabilityFor(profile.id).recoveries}',
+        'profile_health_failures: '
+            '${_profileStabilityFor(profile.id).healthFailures}',
+        if (_profileStabilityFor(profile.id).lastFailureReason != null)
+          'profile_last_failure: ${_redactSensitive(_profileStabilityFor(profile.id).lastFailureReason!)}',
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
       '',
@@ -2466,6 +2573,7 @@ class _HomeScreenState extends State<HomeScreen>
             'country=${_profileCountryFlag(item) ?? 'unknown'}'
                 '${item.countryCode == null ? '' : ' ${item.countryCode}'}',
             'ping=${_profilePingLabel(item)}',
+            'stability=${_profileStabilityLabel(item)}',
             if (expires != null) 'expires=$expires',
           ].join(' | ');
         }),
@@ -2503,12 +2611,33 @@ class _HomeScreenState extends State<HomeScreen>
         (inbound) => inbound['type'] == 'tun',
         orElse: () => const <String, dynamic>{},
       );
+      final excludedPackages = ((tun['exclude_package'] as List?) ?? const [])
+          .whereType<String>()
+          .toList();
       final hasMixedProxy = inbounds.any(
         (inbound) =>
             inbound['type'] == 'mixed' &&
             inbound['listen'] == '127.0.0.1' &&
             inbound['listen_port'] == SingBoxConfigBuilder.localMixedProxyPort,
       );
+      final route = (map['route'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final routeRules = ((route['rules'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((item) => item.cast<String, dynamic>())
+          .toList();
+      final smartRouteEnabled = routeRules.any(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            (rule['domain_suffix'] as List?)?.contains('ru') == true,
+      );
+      final smartRouteProxyRules = routeRules
+          .where(
+            (rule) =>
+                rule['outbound'] == 'proxy' &&
+                (rule.containsKey('domain') ||
+                    rule.containsKey('domain_suffix')),
+          )
+          .length;
       final outbounds = ((map['outbounds'] as List?) ?? const [])
           .whereType<Map>()
           .map((item) => item.cast<String, dynamic>())
@@ -2537,6 +2666,10 @@ class _HomeScreenState extends State<HomeScreen>
         'mtu=${tun['mtu'] ?? 'unknown'}',
         'strict_route=${tun['strict_route'] ?? 'unknown'}',
         'stack=${tun['stack'] ?? 'unknown'}',
+        'smart_route=$smartRouteEnabled',
+        if (smartRouteEnabled)
+          'ru_bypass_packages=${excludedPackages.where((item) => item != "online.dnsai.ivanvpn").length}',
+        if (smartRouteEnabled) 'global_proxy_rules=$smartRouteProxyRules',
         'network=${proxy['network_strategy'] ?? 'default'}',
         if (proxy['type'] == 'http') 'mode=https-connect',
         if (proxy['type'] == 'naive') 'mode=naive-native',
@@ -2782,6 +2915,7 @@ class _HomeScreenState extends State<HomeScreen>
                       displayName: _profileDisplayName,
                       countryFlag: _profileCountryFlag,
                       pingLabel: _profilePingLabel,
+                      profileStabilityLabel: _profileStabilityLabel,
                       onPingAll: () => unawaited(_pingProfiles(_profiles)),
                       onPing: (profile) => unawaited(_pingProfile(profile)),
                       onRequestBackgroundAccess: () =>
@@ -3251,6 +3385,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.displayName,
     required this.countryFlag,
     required this.pingLabel,
+    required this.profileStabilityLabel,
     required this.onPingAll,
     required this.onPing,
     required this.onRequestBackgroundAccess,
@@ -3288,6 +3423,7 @@ class _ProfilePanel extends StatelessWidget {
   final String Function(VpnProfile profile) displayName;
   final String? Function(VpnProfile profile) countryFlag;
   final String Function(VpnProfile profile) pingLabel;
+  final String Function(VpnProfile profile) profileStabilityLabel;
   final VoidCallback onPingAll;
   final ValueChanged<VpnProfile> onPing;
   final VoidCallback onRequestBackgroundAccess;
@@ -3459,6 +3595,9 @@ class _ProfilePanel extends StatelessWidget {
           autoRecoveryStatus: autoRecoveryStatus,
           healthFailuresStatus: healthFailuresStatus,
           stabilityNeedsAttention: stabilityNeedsAttention,
+          profileStabilityStatus: selectedProfile == null
+              ? null
+              : profileStabilityLabel(selectedProfile!),
           onRefreshSubscriptions: onRefreshSubscriptions,
           onRequestBackgroundAccess: onRequestBackgroundAccess,
           onSmartRouteChanged: onSmartRouteChanged,
@@ -3993,6 +4132,7 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.autoRecoveryStatus,
     required this.healthFailuresStatus,
     required this.stabilityNeedsAttention,
+    required this.profileStabilityStatus,
     required this.onRefreshSubscriptions,
     required this.onRequestBackgroundAccess,
     required this.onSmartRouteChanged,
@@ -4015,6 +4155,7 @@ class _ProfileInsightPanel extends StatelessWidget {
   final String autoRecoveryStatus;
   final String healthFailuresStatus;
   final bool stabilityNeedsAttention;
+  final String? profileStabilityStatus;
   final VoidCallback onRefreshSubscriptions;
   final VoidCallback onRequestBackgroundAccess;
   final ValueChanged<bool> onSmartRouteChanged;
@@ -4109,6 +4250,19 @@ class _ProfileInsightPanel extends StatelessWidget {
                             ? _dangerSoft
                             : null,
                       ),
+                      if (profileStabilityStatus != null)
+                        _InsightRow(
+                          icon: Icons.verified_outlined,
+                          label: strings.profileStabilityLabel,
+                          value: profileStabilityStatus!,
+                          valueColor:
+                              profileStabilityStatus ==
+                                      strings.profileStabilityWeak ||
+                                  profileStabilityStatus ==
+                                      strings.profileStabilityCoolingDown
+                              ? _dangerSoft
+                              : null,
+                        ),
                       _InsightRow(
                         icon: Icons.monitor_heart_outlined,
                         label: strings.keeperLabel,
@@ -5089,6 +5243,31 @@ class _Strings {
   String get stabilityNeedsAttention => switch (this) {
     _Strings.en => 'Needs attention',
     _ => 'Требует внимания',
+  };
+
+  String get profileStabilityLabel => switch (this) {
+    _Strings.en => 'Profile rating',
+    _ => 'Рейтинг профиля',
+  };
+
+  String get profileStabilityGood => switch (this) {
+    _Strings.en => 'Stable',
+    _ => 'Стабильный',
+  };
+
+  String get profileStabilityLearning => switch (this) {
+    _Strings.en => 'Learning',
+    _ => 'Наблюдение',
+  };
+
+  String get profileStabilityWeak => switch (this) {
+    _Strings.en => 'Weak',
+    _ => 'Слабый',
+  };
+
+  String get profileStabilityCoolingDown => switch (this) {
+    _Strings.en => 'Cooling down',
+    _ => 'Остывает',
   };
 
   String get keeperLabel => switch (this) {

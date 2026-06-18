@@ -1,4 +1,5 @@
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
+import 'package:aurum_vpn/src/models/profile_stability.dart';
 import 'package:aurum_vpn/src/services/profile_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -80,5 +81,29 @@ void main() {
 
     await store.saveSmartRouteRuDirect(false);
     expect(await store.loadSmartRouteRuDirect(), isFalse);
+  });
+
+  test('stores profile stability stats', () async {
+    final store = ProfileStore();
+    final lastFailureAt = DateTime.utc(2026, 6, 18, 8);
+
+    await store.saveProfileStabilityStats({
+      'profile-1': ProfileStabilityStats(
+        successfulStarts: 3,
+        failedStarts: 1,
+        recoveries: 2,
+        healthFailures: 4,
+        lastFailureAt: lastFailureAt,
+        lastFailureReason: 'health-probe',
+      ),
+    });
+
+    final loaded = await store.loadProfileStabilityStats();
+    expect(loaded['profile-1']?.successfulStarts, 3);
+    expect(loaded['profile-1']?.failedStarts, 1);
+    expect(loaded['profile-1']?.recoveries, 2);
+    expect(loaded['profile-1']?.healthFailures, 4);
+    expect(loaded['profile-1']?.lastFailureAt, lastFailureAt);
+    expect(loaded['profile-1']?.lastFailureReason, 'health-probe');
   });
 }
