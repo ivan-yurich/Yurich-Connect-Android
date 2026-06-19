@@ -42,7 +42,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersionFallback = '1.0.60';
+const _appVersionFallback = '1.0.74';
 const _nativeShortTimeout = Duration(seconds: 3);
 const _nativeConfigTimeout = Duration(seconds: 5);
 const _nativeStartTimeout = Duration(seconds: 8);
@@ -51,6 +51,7 @@ const _tunnelHealthProbeInterval = Duration(seconds: 105);
 const _startupProbeRecheckDelay = Duration(seconds: 8);
 const _recentTrafficGrace = Duration(seconds: 120);
 const _resumeHealthCheckDelay = Duration(seconds: 2);
+const _staleTunnelGrace = Duration(minutes: 5);
 const _tunnelHealthFailureThreshold = 4;
 const _autoReconnectMaxAttempts = 6;
 const _maxStoredLogs = 180;
@@ -146,6 +147,7 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _connectedSince;
   DateTime? _lastTrafficAt;
   DateTime? _lastHealthyAt;
+  DateTime? _lastKeeperActionAt;
   DateTime _clockNow = DateTime.now();
   Map<String, dynamic>? _latestTrafficEvent;
 
@@ -181,6 +183,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _countryResolveInFlight = false;
   bool _logsExpanded = false;
   String? _lastConfigSummary;
+  String? _lastKeeperAction;
   String? _updateMessage;
   AppUpdateInfo? _availableUpdate;
   double? _updateProgress;
@@ -267,14 +270,47 @@ class _HomeScreenState extends State<HomeScreen>
       return true;
     }
     if (_status == AurumVpnStatus.started) {
-      final lastHealthyAt = _lastHealthyAt;
-      if (lastHealthyAt != null &&
-          DateTime.now().difference(lastHealthyAt) >
-              const Duration(minutes: 4)) {
+      if (_isTunnelStale(DateTime.now())) {
         return true;
       }
     }
     return false;
+  }
+
+  bool _isTunnelStale(DateTime now) {
+    if (_status != AurumVpnStatus.started || !_autoRecoveryArmed) {
+      return false;
+    }
+
+    final lastHealthyAt = _lastHealthyAt;
+    if (lastHealthyAt != null) {
+      return now.difference(lastHealthyAt) > _staleTunnelGrace;
+    }
+
+    final lastTrafficAt = _lastTrafficAt;
+    if (lastTrafficAt != null) {
+      return now.difference(lastTrafficAt) > _staleTunnelGrace;
+    }
+
+    final connectedSince = _connectedSince;
+    if (connectedSince == null) {
+      return true;
+    }
+    return now.difference(connectedSince) > _staleTunnelGrace;
+  }
+
+  int _healthProbeAttemptsFor(String source) {
+    if (source == 'app-resume' ||
+        source.contains('stale') ||
+        _tunnelHealthFailures > 0) {
+      return 2;
+    }
+    return 1;
+  }
+
+  void _setKeeperAction(String action, {DateTime? at}) {
+    _lastKeeperAction = action;
+    _lastKeeperActionAt = at ?? DateTime.now();
   }
 
   ConnectionUiState get _connectionUiState {
@@ -1506,7 +1542,16 @@ class _HomeScreenState extends State<HomeScreen>
           _autoRecoveryArmed &&
           !_stoppingByUser &&
           !ignoreStopped) {
-        await _refreshTunnelHealth(source: 'watchdog');
+        final now = DateTime.now();
+        final stale = _isTunnelStale(now);
+        if (stale) {
+          _nextTunnelHealthCheckAt = now;
+          _setKeeperAction('watchdog-stale-check');
+          _queueLog('VPN watchdog: stale tunnel check forced.');
+        }
+        await _refreshTunnelHealth(
+          source: stale ? 'watchdog-stale' : 'watchdog',
+        );
       }
     } finally {
       _statusWatchdogInFlight = false;
@@ -1558,7 +1603,14 @@ class _HomeScreenState extends State<HomeScreen>
         now.difference(lastTrafficAt) < _recentTrafficGrace) {
       _tunnelHealthFailures = 0;
       _lastHealthyAt = lastTrafficAt;
+      _setKeeperAction('traffic-ok:$source', at: lastTrafficAt);
       _nextTunnelHealthCheckAt = now.add(_tunnelHealthProbeInterval);
+      unawaited(
+        _recordProfileStability(
+          profile,
+          (stats) => stats.recordHealthy(at: lastTrafficAt),
+        ),
+      );
       return;
     }
 
@@ -1566,7 +1618,7 @@ class _HomeScreenState extends State<HomeScreen>
     _tunnelHealthCheckInFlight = true;
     try {
       final healthy = await _probeLocalMixedProxy(
-        attempts: source == 'app-resume' ? 2 : 1,
+        attempts: _healthProbeAttemptsFor(source),
         logFailures: false,
       );
       if (!mounted || _status != AurumVpnStatus.started) {
@@ -1576,6 +1628,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (healthy) {
         _tunnelHealthFailures = 0;
         _lastHealthyAt = DateTime.now();
+        _setKeeperAction('probe-ok:$source', at: _lastHealthyAt);
         unawaited(
           _recordProfileStability(profile, (stats) => stats.recordHealthy()),
         );
@@ -1583,6 +1636,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       _tunnelHealthFailures += 1;
+      _setKeeperAction('probe-failed:$source');
       unawaited(
         _recordProfileStability(
           profile,
@@ -1605,6 +1659,7 @@ class _HomeScreenState extends State<HomeScreen>
             _message = s.connectingStatus(profile.name);
           });
         }
+        _setKeeperAction('reconnect:health-probe');
         unawaited(_recoverConnection('health-probe', forceRestart: true));
       }
     } finally {
@@ -1673,6 +1728,7 @@ class _HomeScreenState extends State<HomeScreen>
     _queueLog(
       'VPN watchdog: auto reconnect #$attempt from $source for ${profile.name}.',
     );
+    _setKeeperAction('reconnect-attempt:$source#$attempt');
 
     try {
       await Future<void>.delayed(delay);
@@ -1684,6 +1740,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (!forceRestart && status != AurumVpnStatus.stopped) {
         _autoReconnectAttempts = 0;
         _nextAutoReconnectAt = null;
+        _setKeeperAction('reconnect-skip:$source#$attempt');
         return;
       }
 
@@ -1700,12 +1757,14 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       await _startVpnCore(profile);
+      _setKeeperAction('reconnect-ok:$source#$attempt');
       unawaited(
         _recordProfileStability(profile, (stats) => stats.recordRecovery()),
       );
     } on Object catch (error) {
       final errorText = _redactSensitive('$error');
       _queueLog('VPN watchdog reconnect failed: $errorText');
+      _setKeeperAction('reconnect-error:$source#$attempt');
       unawaited(
         _recordProfileStability(
           profile,
@@ -2533,6 +2592,13 @@ class _HomeScreenState extends State<HomeScreen>
       'auto_recovery_armed: $_autoRecoveryArmed',
       'auto_reconnect_attempts: $_autoReconnectAttempts',
       'health_failures: $_tunnelHealthFailures',
+      if (_lastKeeperAction != null) 'keeper_last_action: $_lastKeeperAction',
+      if (_lastKeeperActionAt != null)
+        'keeper_last_action_local: ${_lastKeeperActionAt!.toIso8601String()}',
+      if (_nextTunnelHealthCheckAt != null)
+        'next_health_check_local: ${_nextTunnelHealthCheckAt!.toIso8601String()}',
+      if (_nextAutoReconnectAt != null)
+        'next_reconnect_local: ${_nextAutoReconnectAt!.toIso8601String()}',
       if (_lastTrafficAt != null)
         'last_traffic_local: ${_lastTrafficAt!.toIso8601String()}',
       if (_lastHealthyAt != null)
