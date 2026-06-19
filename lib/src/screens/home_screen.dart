@@ -42,7 +42,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersionFallback = '1.0.75';
+const _appVersionFallback = '1.0.76';
 const _nativeShortTimeout = Duration(seconds: 3);
 const _nativeConfigTimeout = Duration(seconds: 5);
 const _nativeStartTimeout = Duration(seconds: 8);
@@ -199,6 +199,7 @@ class _HomeScreenState extends State<HomeScreen>
   int _lastSessionTrafficBytes = 0;
   final _logs = <String>[];
   final _pendingLogs = <String>[];
+  final _stabilityEvents = <String>[];
   late final AnimationController _glowController;
   late final Animation<double> _glowPulse;
 
@@ -311,6 +312,19 @@ class _HomeScreenState extends State<HomeScreen>
   void _setKeeperAction(String action, {DateTime? at}) {
     _lastKeeperAction = action;
     _lastKeeperActionAt = at ?? DateTime.now();
+    _recordStabilityEvent('keeper:$action', at: _lastKeeperActionAt);
+  }
+
+  void _recordStabilityEvent(String message, {DateTime? at}) {
+    final eventAt = at ?? DateTime.now();
+    final cleaned = _redactSensitive(_cleanLog(message));
+    if (cleaned.isEmpty) {
+      return;
+    }
+    _stabilityEvents.add('${eventAt.toIso8601String()} $cleaned');
+    if (_stabilityEvents.length > 60) {
+      _stabilityEvents.removeRange(0, _stabilityEvents.length - 60);
+    }
   }
 
   ConnectionUiState get _connectionUiState {
@@ -684,6 +698,7 @@ class _HomeScreenState extends State<HomeScreen>
     StackTrace? stackTrace,
   ]) {
     final errorText = _redactSensitive('$error');
+    _recordStabilityEvent('engine-stream-error:$source:$errorText');
     _queueLog('Engine stream error [$source]: $errorText');
     if (stackTrace != null) {
       _queueLog('Engine stream stack [$source]: $stackTrace');
@@ -1609,6 +1624,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final profile = _selectedProfile;
+    _recordStabilityEvent('unexpected-stop:$source');
     _queueLog('VPN watchdog: unexpected stop detected from $source.');
     if (profile != null) {
       unawaited(
@@ -2611,6 +2627,10 @@ class _HomeScreenState extends State<HomeScreen>
   String _buildDiagnosticReport() {
     final profile = _selectedProfile;
     final now = DateTime.now();
+    final stabilityEventStart = _stabilityEvents.length > 30
+        ? _stabilityEvents.length - 30
+        : 0;
+    final recentStabilityEvents = _stabilityEvents.skip(stabilityEventStart);
     final lines = <String>[
       '$_appName diagnostic',
       'app_version: $_appVersion',
@@ -2670,6 +2690,9 @@ class _HomeScreenState extends State<HomeScreen>
           'profile_last_failure: ${_redactSensitive(_profileStabilityFor(profile.id).lastFailureReason!)}',
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
+      '',
+      'stability_events:',
+      if (recentStabilityEvents.isEmpty) 'none' else ...recentStabilityEvents,
       '',
       'profiles:',
       if (_profiles.isEmpty)

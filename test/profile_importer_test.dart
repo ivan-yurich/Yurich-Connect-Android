@@ -370,6 +370,9 @@ void main() {
       'ru.yandex.searchplugin',
       'com.yandex.browser',
       'com.openai.chatgpt',
+      'com.microsoft.copilot',
+      'com.microsoft.bing',
+      'ai.perplexity.app.android',
       'com.android.chrome',
       'com.google.android.gm',
       'com.google.android.gms',
@@ -385,6 +388,9 @@ void main() {
     expect(packages, isNot(contains('ru.yandex.searchplugin')));
     expect(packages, isNot(contains('com.yandex.browser')));
     expect(packages, isNot(contains('com.openai.chatgpt')));
+    expect(packages, isNot(contains('com.microsoft.copilot')));
+    expect(packages, isNot(contains('com.microsoft.bing')));
+    expect(packages, isNot(contains('ai.perplexity.app.android')));
     expect(packages, isNot(contains('com.android.chrome')));
     expect(packages, isNot(contains('com.google.android.gm')));
     expect(packages, isNot(contains('com.google.android.gms')));

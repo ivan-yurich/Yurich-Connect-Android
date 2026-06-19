@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.76 - 2026-06-19
+
+- Added a compact stability event trail to diagnostics so keeper actions,
+  unexpected stops, and native stream errors are visible in support reports.
+- Expanded Smart Route global safeguards for AI/Copilot/Bing/Perplexity
+  domains and apps so they stay on the VPN path instead of RU direct bypass.
+- Added regression coverage for the new Smart Route global app denylist.
+- Kept the supported stable protocol set unchanged: VLESS Reality, NaiveProxy,
+  and Hysteria/Hysteria2.
+
 ## 1.0.75 - 2026-06-19
 
 - Added a global Flutter error guard so uncaught Dart, platform dispatcher, and
