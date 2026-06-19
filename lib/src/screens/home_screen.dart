@@ -42,7 +42,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersionFallback = '1.0.74';
+const _appVersionFallback = '1.0.75';
 const _nativeShortTimeout = Duration(seconds: 3);
 const _nativeConfigTimeout = Duration(seconds: 5);
 const _nativeStartTimeout = Duration(seconds: 8);
@@ -516,91 +516,115 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _initVpn() async {
-    _statusSubscription = _vpnEngine.onStatusChanged.listen((event) {
-      if (event['type'] == 'alert') {
-        final message = event['message'] as String?;
-        if (message != null && message.isNotEmpty && mounted) {
-          setState(() => _message = message);
-          _showSnack(message);
-        }
-        return;
-      }
+    _statusSubscription = _vpnEngine.onStatusChanged.listen(
+      (event) {
+        try {
+          if (event['type'] == 'alert') {
+            final message = event['message'] as String?;
+            if (message != null && message.isNotEmpty && mounted) {
+              setState(() => _message = message);
+              _showSnack(message);
+            }
+            return;
+          }
 
-      final status = event['status'] as String?;
-      if (status != null && mounted) {
-        final now = DateTime.now();
-        var recoverUnexpectedStop = false;
-        setState(() {
-          _status = status;
-          if (status == AurumVpnStatus.started) {
-            _lastError = null;
-            _autoReconnectAttempts = 0;
-            _nextAutoReconnectAt = null;
-            _autoRecoveryArmed = true;
-            _connectedSince ??= now;
-            _lastHealthyAt = now;
-            _lastTrafficAt ??= now;
-            _clockNow = now;
-            _ignoreStoppedUntil = now.add(const Duration(seconds: 4));
+          final status = event['status'] as String?;
+          if (status != null && mounted) {
+            final now = DateTime.now();
+            var recoverUnexpectedStop = false;
+            setState(() {
+              _status = status;
+              if (status == AurumVpnStatus.started) {
+                _lastError = null;
+                _autoReconnectAttempts = 0;
+                _nextAutoReconnectAt = null;
+                _autoRecoveryArmed = true;
+                _connectedSince ??= now;
+                _lastHealthyAt = now;
+                _lastTrafficAt ??= now;
+                _clockNow = now;
+                _ignoreStoppedUntil = now.add(const Duration(seconds: 4));
+              }
+              if (status == AurumVpnStatus.stopped && !_autoRecoveryArmed) {
+                _connectedSince = null;
+                _lastTrafficAt = null;
+                _lastHealthyAt = null;
+              }
+              final ignoreStopped =
+                  _ignoreStoppedUntil != null &&
+                  now.isBefore(_ignoreStoppedUntil!);
+              if (status == AurumVpnStatus.stopped &&
+                  _autoRecoveryArmed &&
+                  !_stoppingByUser &&
+                  !ignoreStopped) {
+                recoverUnexpectedStop = true;
+              }
+            });
+            if (recoverUnexpectedStop) {
+              _markUnexpectedStop('status-event');
+            }
+            unawaited(_syncConnectionNotification());
           }
-          if (status == AurumVpnStatus.stopped && !_autoRecoveryArmed) {
-            _connectedSince = null;
-            _lastTrafficAt = null;
-            _lastHealthyAt = null;
-          }
-          final ignoreStopped =
-              _ignoreStoppedUntil != null && now.isBefore(_ignoreStoppedUntil!);
-          if (status == AurumVpnStatus.stopped &&
-              _autoRecoveryArmed &&
-              !_stoppingByUser &&
-              !ignoreStopped) {
-            recoverUnexpectedStop = true;
-          }
-        });
-        if (recoverUnexpectedStop) {
-          _markUnexpectedStop('status-event');
+        } on Object catch (error, stackTrace) {
+          _handleEngineStreamError('status', error, stackTrace);
         }
-        unawaited(_syncConnectionNotification());
-      }
-    });
+      },
+      onError: (Object error, StackTrace stackTrace) =>
+          _handleEngineStreamError('status', error, stackTrace),
+      cancelOnError: false,
+    );
 
-    _trafficSubscription = _vpnEngine.onTrafficUpdate.listen((event) {
-      if (!mounted) {
-        return;
-      }
-      _latestTrafficEvent = event;
-      _trafficFlushTimer ??= Timer(const Duration(milliseconds: 500), () {
-        _trafficFlushTimer = null;
-        final latest = _latestTrafficEvent;
-        _latestTrafficEvent = null;
-        if (!mounted || latest == null) {
-          return;
+    _trafficSubscription = _vpnEngine.onTrafficUpdate.listen(
+      (event) {
+        try {
+          if (!mounted) {
+            return;
+          }
+          _latestTrafficEvent = event;
+          _trafficFlushTimer ??= Timer(const Duration(milliseconds: 500), () {
+            try {
+              _trafficFlushTimer = null;
+              final latest = _latestTrafficEvent;
+              _latestTrafficEvent = null;
+              if (!mounted || latest == null) {
+                return;
+              }
+              final uplinkSpeed = _eventInt(latest['uplinkSpeed']);
+              final downlinkSpeed = _eventInt(latest['downlinkSpeed']);
+              final sessionTotal = _eventInt(latest['sessionTotal']);
+              final hasTraffic =
+                  uplinkSpeed > 0 ||
+                  downlinkSpeed > 0 ||
+                  sessionTotal > _lastSessionTrafficBytes;
+              final now = DateTime.now();
+              setState(() {
+                _uplink = latest['formattedUplinkSpeed'] as String? ?? _uplink;
+                _downlink =
+                    latest['formattedDownlinkSpeed'] as String? ?? _downlink;
+                _sessionTotal =
+                    latest['formattedSessionTotal'] as String? ?? _sessionTotal;
+                if (sessionTotal >= _lastSessionTrafficBytes) {
+                  _lastSessionTrafficBytes = sessionTotal;
+                }
+                if (hasTraffic && _status == AurumVpnStatus.started) {
+                  _lastTrafficAt = now;
+                  _lastHealthyAt = now;
+                  _tunnelHealthFailures = 0;
+                }
+              });
+              unawaited(_syncConnectionNotification());
+            } on Object catch (error, stackTrace) {
+              _handleEngineStreamError('traffic-flush', error, stackTrace);
+            }
+          });
+        } on Object catch (error, stackTrace) {
+          _handleEngineStreamError('traffic', error, stackTrace);
         }
-        final uplinkSpeed = _eventInt(latest['uplinkSpeed']);
-        final downlinkSpeed = _eventInt(latest['downlinkSpeed']);
-        final sessionTotal = _eventInt(latest['sessionTotal']);
-        final hasTraffic =
-            uplinkSpeed > 0 ||
-            downlinkSpeed > 0 ||
-            sessionTotal > _lastSessionTrafficBytes;
-        final now = DateTime.now();
-        setState(() {
-          _uplink = latest['formattedUplinkSpeed'] as String? ?? _uplink;
-          _downlink = latest['formattedDownlinkSpeed'] as String? ?? _downlink;
-          _sessionTotal =
-              latest['formattedSessionTotal'] as String? ?? _sessionTotal;
-          if (sessionTotal >= _lastSessionTrafficBytes) {
-            _lastSessionTrafficBytes = sessionTotal;
-          }
-          if (hasTraffic && _status == AurumVpnStatus.started) {
-            _lastTrafficAt = now;
-            _lastHealthyAt = now;
-            _tunnelHealthFailures = 0;
-          }
-        });
-        unawaited(_syncConnectionNotification());
-      });
-    });
+      },
+      onError: (Object error, StackTrace stackTrace) =>
+          _handleEngineStreamError('traffic', error, stackTrace),
+      cancelOnError: false,
+    );
 
     try {
       await _bestEffortNative(
@@ -652,6 +676,27 @@ class _HomeScreenState extends State<HomeScreen>
     } on Object {
       // In widget tests and desktop preview the native Android plugin is absent.
     }
+  }
+
+  void _handleEngineStreamError(
+    String source,
+    Object error, [
+    StackTrace? stackTrace,
+  ]) {
+    final errorText = _redactSensitive('$error');
+    _queueLog('Engine stream error [$source]: $errorText');
+    if (stackTrace != null) {
+      _queueLog('Engine stream stack [$source]: $stackTrace');
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _lastError = errorText;
+      if (_status == AurumVpnStatus.started) {
+        _tunnelHealthFailures += 1;
+      }
+    });
   }
 
   Future<void> _syncConnectionNotification() async {
@@ -2784,16 +2829,25 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    _logSubscription = _vpnEngine.onLogMessage.listen((event) {
-      if (!mounted || !_logsExpanded || event['type'] != 'log') {
-        return;
-      }
-      final message = event['message'] as String?;
-      if (message == null || message.isEmpty) {
-        return;
-      }
-      _queueLog(message);
-    });
+    _logSubscription = _vpnEngine.onLogMessage.listen(
+      (event) {
+        try {
+          if (!mounted || !_logsExpanded || event['type'] != 'log') {
+            return;
+          }
+          final message = event['message'] as String?;
+          if (message == null || message.isEmpty) {
+            return;
+          }
+          _queueLog(message);
+        } on Object catch (error, stackTrace) {
+          _handleEngineStreamError('log', error, stackTrace);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) =>
+          _handleEngineStreamError('log', error, stackTrace),
+      cancelOnError: false,
+    );
   }
 
   Future<void> _loadBufferedLogs() async {
@@ -2865,18 +2919,22 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     _logFlushTimer ??= Timer(const Duration(milliseconds: 250), () {
-      _logFlushTimer = null;
-      if (!mounted || _pendingLogs.isEmpty) {
-        return;
-      }
-
-      setState(() {
-        _logs.addAll(_pendingLogs);
-        _pendingLogs.clear();
-        if (_logs.length > _maxStoredLogs) {
-          _logs.removeRange(0, _logs.length - _maxStoredLogs);
+      try {
+        _logFlushTimer = null;
+        if (!mounted || _pendingLogs.isEmpty) {
+          return;
         }
-      });
+
+        setState(() {
+          _logs.addAll(_pendingLogs);
+          _pendingLogs.clear();
+          if (_logs.length > _maxStoredLogs) {
+            _logs.removeRange(0, _logs.length - _maxStoredLogs);
+          }
+        });
+      } on Object catch (error, stackTrace) {
+        _handleEngineStreamError('log-flush', error, stackTrace);
+      }
     });
   }
 

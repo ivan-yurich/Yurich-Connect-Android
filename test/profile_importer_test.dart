@@ -266,6 +266,9 @@ void main() {
                   'ru.yandex.searchplugin',
                   'com.yandex.browser',
                   'com.openai.chatgpt',
+                  'com.android.chrome',
+                  'com.google.android.gm',
+                  'com.google.android.gms',
                   'com.google.android.apps.gemini',
                   'com.google.android.youtube',
                   'org.telegram.messenger',
@@ -288,6 +291,9 @@ void main() {
     expect(excludedPackages, isNot(contains('ru.yandex.searchplugin')));
     expect(excludedPackages, isNot(contains('com.yandex.browser')));
     expect(excludedPackages, isNot(contains('com.openai.chatgpt')));
+    expect(excludedPackages, isNot(contains('com.android.chrome')));
+    expect(excludedPackages, isNot(contains('com.google.android.gm')));
+    expect(excludedPackages, isNot(contains('com.google.android.gms')));
     expect(excludedPackages, isNot(contains('com.google.android.apps.gemini')));
     expect(excludedPackages, isNot(contains('com.google.android.youtube')));
     expect(excludedPackages, isNot(contains('org.telegram.messenger')));
@@ -305,7 +311,10 @@ void main() {
           rule['outbound'] == 'proxy' &&
           (rule['domain'] as List?)?.contains('chat.openai.com') == true &&
           (rule['domain'] as List?)?.contains('gemini.google.com') == true &&
-          (rule['domain'] as List?)?.contains('web.telegram.org') == true,
+          (rule['domain'] as List?)?.contains('accounts.google.com') == true &&
+          (rule['domain'] as List?)?.contains('mtalk.google.com') == true &&
+          (rule['domain'] as List?)?.contains('web.telegram.org') == true &&
+          (rule['domain'] as List?)?.contains('t.me') == true,
     );
     expect(globalExactRuleIndex, isNonNegative);
 
@@ -361,6 +370,9 @@ void main() {
       'ru.yandex.searchplugin',
       'com.yandex.browser',
       'com.openai.chatgpt',
+      'com.android.chrome',
+      'com.google.android.gm',
+      'com.google.android.gms',
       'com.google.android.apps.gemini',
       'org.telegram.messenger',
       'com.google.android.youtube',
@@ -373,6 +385,9 @@ void main() {
     expect(packages, isNot(contains('ru.yandex.searchplugin')));
     expect(packages, isNot(contains('com.yandex.browser')));
     expect(packages, isNot(contains('com.openai.chatgpt')));
+    expect(packages, isNot(contains('com.android.chrome')));
+    expect(packages, isNot(contains('com.google.android.gm')));
+    expect(packages, isNot(contains('com.google.android.gms')));
     expect(packages, isNot(contains('com.google.android.apps.gemini')));
     expect(packages, isNot(contains('org.telegram.messenger')));
     expect(packages, isNot(contains('com.google.android.youtube')));

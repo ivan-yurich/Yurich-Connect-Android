@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.75 - 2026-06-19
+
+- Added a global Flutter error guard so uncaught Dart, platform dispatcher, and
+  stream errors are logged instead of closing the app.
+- Hardened VPN status, traffic, and log streams with explicit error handlers and
+  safe timer flushes.
+- Expanded Smart Route global routing for Google, OpenAI, Telegram, YouTube,
+  browser, and Google core packages while keeping Russian app bypass
+  conservative.
+- Kept the supported stable protocol set unchanged: VLESS Reality, NaiveProxy,
+  and Hysteria/Hysteria2.
+
 ## 1.0.74 - 2026-06-19
 
 - Усилен фоновый keeper: если VPN формально включён, но туннель давно не
