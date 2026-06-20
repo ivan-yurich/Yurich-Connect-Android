@@ -44,6 +44,7 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "getSupportedAbis" -> result.success(Build.SUPPORTED_ABIS.toList())
+                "inspectApk" -> inspectApk(call.argument<String>("path"), result)
                 "installApk" -> installApk(call.argument<String>("path"), result)
                 "openInstallSettings" -> {
                     openInstallSettings()
@@ -80,6 +81,37 @@ class MainActivity : FlutterActivity() {
                 "getInstalledPackages" -> result.success(getInstalledPackages())
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    private fun inspectApk(path: String?, result: MethodChannel.Result) {
+        if (path.isNullOrBlank()) {
+            result.error("BAD_PATH", "APK path is empty", null)
+            return
+        }
+
+        val apkFile = File(path)
+        if (!apkFile.exists() || !apkFile.canRead() || apkFile.length() <= 0L) {
+            result.error("APK_NOT_READABLE", "APK file is empty or not readable", null)
+            return
+        }
+
+        try {
+            val packageInfo = getArchivePackageInfo(apkFile)
+                ?: throw IllegalStateException("Android cannot parse update APK")
+            result.success(
+                mapOf(
+                    "packageName" to (packageInfo.packageName ?: ""),
+                    "versionName" to (packageInfo.versionName ?: ""),
+                    "versionCode" to packageInfo.versionCodeCompat(),
+                ),
+            )
+        } catch (error: Exception) {
+            result.error(
+                "APK_INVALID",
+                "${error.javaClass.simpleName}: ${error.message}",
+                null,
+            )
         }
     }
 
@@ -331,24 +363,57 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun validateUpdatePackage(file: File) {
-        val archivePackageName = getArchivePackageName(file)
+        val packageInfo = getArchivePackageInfo(file)
             ?: throw IllegalStateException("Android cannot parse update APK")
+        val archivePackageName = packageInfo.packageName
         if (archivePackageName != packageName) {
             throw IllegalStateException(
                 "Update package mismatch: expected $packageName, got $archivePackageName",
             )
         }
+        val currentVersionCode = currentVersionCode()
+        val updateVersionCode = packageInfo.versionCodeCompat()
+        if (currentVersionCode > 0L && updateVersionCode <= currentVersionCode) {
+            throw IllegalStateException(
+                "Update package is not newer: installed build $currentVersionCode, " +
+                    "downloaded build $updateVersionCode",
+            )
+        }
     }
 
-    private fun getArchivePackageName(file: File): String? =
+    private fun getArchivePackageInfo(file: File): android.content.pm.PackageInfo? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             packageManager.getPackageArchiveInfo(
                 file.absolutePath,
                 PackageManager.PackageInfoFlags.of(0),
-            )?.packageName
+            )
         } else {
             @Suppress("DEPRECATION")
-            packageManager.getPackageArchiveInfo(file.absolutePath, 0)?.packageName
+            packageManager.getPackageArchiveInfo(file.absolutePath, 0)
+        }
+
+    private fun android.content.pm.PackageInfo.versionCodeCompat(): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            versionCode.toLong()
+        }
+
+    private fun currentVersionCode(): Long =
+        try {
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(0),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+            info.versionCodeCompat()
+        } catch (_: Exception) {
+            0L
         }
 
     private fun openInstallSettings() {

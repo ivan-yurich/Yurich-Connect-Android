@@ -2628,7 +2628,10 @@ class _HomeScreenState extends State<HomeScreen>
       if (mounted) {
         setState(() => _updateMessage = s.updateInstalling(update.version));
       }
-      await _updateService.installApk(file);
+      await _updateService.installApk(
+        file,
+        currentBuildNumber: int.tryParse(_appBuildNumber),
+      );
       if (mounted) {
         setState(() => _updateMessage = s.updateInstallerOpened);
       }

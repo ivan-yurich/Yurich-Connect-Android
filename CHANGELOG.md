@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.84 - 2026-06-21
+
+- Fixed Android auto-update downgrade failures by moving the app to a high
+  monotonic `versionCode` line above previous universal and ABI split builds.
+- Added native APK inspection before update installation: package name,
+  version name, and version code are checked before Android's installer opens.
+- The updater now rejects downloaded APKs whose `versionCode` is not newer than
+  the installed app, preventing repeat download/install loops.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
 ## 1.0.83 - 2026-06-20
 
 - Hardened VLESS Reality profile validation before VPN startup.
