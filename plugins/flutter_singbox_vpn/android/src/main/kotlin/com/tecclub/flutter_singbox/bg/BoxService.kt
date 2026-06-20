@@ -52,10 +52,13 @@ class BoxService(
         private const val WATCHDOG_MIXED_PROXY_PORT = 20808
         private const val WATCHDOG_INITIAL_GRACE_MS = 30_000L
         private const val WATCHDOG_INTERVAL_MS = 60_000L
+        private const val WATCHDOG_IDLE_INTERVAL_MS = 90_000L
         private const val WATCHDOG_RESTART_COOLDOWN_MS = 90_000L
         private const val WATCHDOG_FAILURE_LIMIT = 3
         private const val KEEPER_WAKE_LOCK_MS = 10 * 60 * 1000L
         private const val STICKY_RESTART_DELAY_MS = 2_500L
+        private const val NETWORK_SETTLE_DELAY_MS = 6_000L
+        private const val WAKE_SETTLE_DELAY_MS = 3_000L
 
         fun start() {
             val intent = runBlocking {
@@ -117,6 +120,7 @@ class BoxService(
                         serviceUpdateIdleMode()
                     }
                     refreshKeeperWakeLock("idle-mode")
+                    handleNetworkWakeEvent("idle-mode")
                 }
 
                 ConnectivityManager.CONNECTIVITY_ACTION,
@@ -562,7 +566,7 @@ class BoxService(
                     }
                 }
 
-                delay(WATCHDOG_INTERVAL_MS)
+                delay(watchdogDelayMs())
             }
         }
     }
@@ -598,7 +602,7 @@ class BoxService(
                 return@launch
             }
 
-            delay(2_500L)
+            delay(settleDelayFor(reason))
             if (status.value != Status.Started || !hasDefaultNetwork()) {
                 return@launch
             }
@@ -648,7 +652,8 @@ class BoxService(
     private fun probeMixedProxy(): Boolean {
         val targets = arrayOf(
             "cp.cloudflare.com" to "/generate_204",
-            "www.gstatic.com" to "/generate_204"
+            "www.gstatic.com" to "/generate_204",
+            "connectivitycheck.gstatic.com" to "/generate_204"
         )
 
         for ((host, path) in targets) {
@@ -719,6 +724,32 @@ class BoxService(
             }
         }
         return false
+    }
+
+    private fun watchdogDelayMs(): Long {
+        return if (isDeviceIdleMode()) WATCHDOG_IDLE_INTERVAL_MS else WATCHDOG_INTERVAL_MS
+    }
+
+    private fun settleDelayFor(reason: String): Long {
+        return if (
+            reason.contains("CONNECTIVITY_ACTION") ||
+            reason.contains("network", ignoreCase = true) ||
+            reason.contains("idle", ignoreCase = true)
+        ) {
+            NETWORK_SETTLE_DELAY_MS
+        } else {
+            WAKE_SETTLE_DELAY_MS
+        }
+    }
+
+    private fun isDeviceIdleMode(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return false
+        }
+        return runCatching {
+            val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerManager.isDeviceIdleMode
+        }.getOrDefault(false)
     }
 
     private fun refreshKeeperWakeLock(reason: String) {

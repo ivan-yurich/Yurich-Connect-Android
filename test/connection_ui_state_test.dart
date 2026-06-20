@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:aurum_vpn/src/models/connection_status.dart';
+import 'package:aurum_vpn/src/models/connection_ui_state.dart';
 import 'package:aurum_vpn/src/services/protocol_display_mapper.dart';
 import 'package:aurum_vpn/src/utils/traffic_formatter.dart';
 
@@ -57,6 +59,36 @@ void main() {
       expect(
         ProtocolDisplayMapper.mapProtocolToDisplayName('hy2'),
         'Hysteria 2 / Турбо',
+      );
+    });
+  });
+
+  group('ConnectionUiState', () {
+    test('serializes idle, degraded, reconnecting and failed states', () {
+      expect(
+        ConnectionUiState.idle(
+          uploadSpeed: '0 B/s',
+          downloadSpeed: '0 B/s',
+          totalTraffic: '1 MB',
+          profileName: 'idle-profile',
+        ).toJson()['status'],
+        ConnectionStatus.idle.name,
+      );
+      expect(
+        ConnectionUiState.degraded(
+          uploadSpeed: '0 B/s',
+          downloadSpeed: '0 B/s',
+          totalTraffic: '1 MB',
+        ).toJson()['status'],
+        ConnectionStatus.degraded.name,
+      );
+      expect(
+        ConnectionUiState.reconnecting().toJson()['status'],
+        ConnectionStatus.reconnecting.name,
+      );
+      expect(
+        ConnectionUiState.failed().toJson()['status'],
+        ConnectionStatus.failed.name,
       );
     });
   });

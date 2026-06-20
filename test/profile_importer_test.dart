@@ -671,6 +671,39 @@ void main() {
     expect(profiles.first.subscriptionExpiresAt, isNotNull);
   });
 
+  test('tries links.txt for root /s/token/ subscriptions', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) {
+      if (request.uri.path.endsWith('/links.txt')) {
+        request.response.headers.set(
+          'subscription-userinfo',
+          'upload=0; download=0; total=0; expire=1893456000',
+        );
+        request.response.write(
+          'naive+https://user:pass@example.com:443#Naive\n'
+          'hy2://secret@example.com:443#Turbo',
+        );
+      } else {
+        request.response
+          ..headers.contentType = ContentType.html
+          ..write('<html><body>subscription landing</body></html>');
+      }
+      unawaited(request.response.close());
+    });
+
+    final source = 'http://${server.address.host}:${server.port}/s/token/';
+    final profiles = await ProfileImporter().importFromText(source);
+
+    expect(profiles, hasLength(2));
+    expect(profiles.map((profile) => profile.kind), [
+      VpnProfileKind.naive,
+      VpnProfileKind.hysteria2,
+    ]);
+    expect(profiles.first.subscriptionSource, source);
+    expect(profiles.first.subscriptionExpiresAt, isNotNull);
+  });
+
   test('imports Remnawave Xray JSON subscription', () async {
     final payload = jsonEncode([
       {

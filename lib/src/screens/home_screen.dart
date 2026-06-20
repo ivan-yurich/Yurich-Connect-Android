@@ -42,7 +42,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersionFallback = '1.0.76';
+const _appVersionFallback = '1.0.78';
 const _nativeShortTimeout = Duration(seconds: 3);
 const _nativeConfigTimeout = Duration(seconds: 5);
 const _nativeStartTimeout = Duration(seconds: 8);
@@ -50,6 +50,9 @@ const _subscriptionReminderWindow = Duration(days: 5);
 const _tunnelHealthProbeInterval = Duration(seconds: 105);
 const _startupProbeRecheckDelay = Duration(seconds: 8);
 const _recentTrafficGrace = Duration(seconds: 120);
+const _idleTunnelGrace = Duration(minutes: 3);
+const _idleHealthProbeInterval = Duration(minutes: 5);
+const _degradedHealthProbeInterval = Duration(seconds: 45);
 const _resumeHealthCheckDelay = Duration(seconds: 2);
 const _staleTunnelGrace = Duration(minutes: 5);
 const _tunnelHealthFailureThreshold = 4;
@@ -147,6 +150,8 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _connectedSince;
   DateTime? _lastTrafficAt;
   DateTime? _lastHealthyAt;
+  DateTime? _lastIdleHealthCheckAt;
+  DateTime? _lastResumeRecoveryAt;
   DateTime? _lastKeeperActionAt;
   DateTime _clockNow = DateTime.now();
   Map<String, dynamic>? _latestTrafficEvent;
@@ -197,6 +202,10 @@ class _HomeScreenState extends State<HomeScreen>
   int _autoReconnectAttempts = 0;
   int _tunnelHealthFailures = 0;
   int _lastSessionTrafficBytes = 0;
+  int _idleHealthChecks = 0;
+  int _idleRecoveryCount = 0;
+  String? _lastRecoverySource;
+  String? _lastNetworkEvent;
   final _logs = <String>[];
   final _pendingLogs = <String>[];
   final _stabilityEvents = <String>[];
@@ -244,6 +253,14 @@ class _HomeScreenState extends State<HomeScreen>
   String get _healthFailuresStatusLabel => _tunnelHealthFailures == 0
       ? s.healthFailuresNone
       : s.healthFailuresCount(_tunnelHealthFailures);
+
+  String get _idleKeeperStatusLabel {
+    final lastIdleAt = _lastIdleHealthCheckAt;
+    if (lastIdleAt == null) {
+      return s.idleKeeperReady;
+    }
+    return '${s.idleKeeperActive} · ${s.lastCheckAgo(_clockNow.difference(lastIdleAt))}';
+  }
 
   VpnProfile? get _selectedProfile {
     for (final profile in _profiles) {
@@ -300,13 +317,52 @@ class _HomeScreenState extends State<HomeScreen>
     return now.difference(connectedSince) > _staleTunnelGrace;
   }
 
+  bool _isTunnelIdle(DateTime now) {
+    if (_status != AurumVpnStatus.started ||
+        _autoReconnectInFlight ||
+        _tunnelHealthCheckInFlight) {
+      return false;
+    }
+    final lastTrafficAt = _lastTrafficAt;
+    if (lastTrafficAt == null) {
+      final connectedSince = _connectedSince;
+      return connectedSince != null &&
+          now.difference(connectedSince) > _idleTunnelGrace &&
+          !_isTunnelStale(now);
+    }
+    return now.difference(lastTrafficAt) > _idleTunnelGrace &&
+        !_isTunnelStale(now);
+  }
+
+  bool _shouldRunIdleHealthCheck(DateTime now) {
+    if (!_isTunnelIdle(now)) {
+      return false;
+    }
+    final lastIdleAt = _lastIdleHealthCheckAt;
+    return lastIdleAt == null ||
+        now.difference(lastIdleAt) > _idleHealthProbeInterval;
+  }
+
   int _healthProbeAttemptsFor(String source) {
     if (source == 'app-resume' ||
+        source.contains('idle') ||
         source.contains('stale') ||
         _tunnelHealthFailures > 0) {
       return 2;
     }
     return 1;
+  }
+
+  Duration _healthProbeIntervalFor(String source) {
+    if (_tunnelHealthFailures > 0 ||
+        source.contains('stale') ||
+        source.contains('resume')) {
+      return _degradedHealthProbeInterval;
+    }
+    if (source.contains('idle')) {
+      return _idleHealthProbeInterval;
+    }
+    return _tunnelHealthProbeInterval;
   }
 
   void _setKeeperAction(String action, {DateTime? at}) {
@@ -329,12 +385,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   ConnectionUiState get _connectionUiState {
     final profile = _selectedProfile;
-    final connectionStatus = switch (_status) {
-      AurumVpnStatus.started => ConnectionStatus.connected,
-      AurumVpnStatus.starting ||
-      AurumVpnStatus.stopping => ConnectionStatus.connecting,
-      _ => ConnectionStatus.disconnected,
-    };
+    final connectionStatus = _effectiveConnectionStatus;
 
     if (connectionStatus == ConnectionStatus.disconnected) {
       return ConnectionUiState.disconnected();
@@ -356,6 +407,29 @@ class _HomeScreenState extends State<HomeScreen>
           ? null
           : TrafficFormatter.formatDuration(_connectedDuration!),
     );
+  }
+
+  ConnectionStatus get _effectiveConnectionStatus {
+    if (_autoReconnectInFlight) {
+      return ConnectionStatus.reconnecting;
+    }
+    if (_status == AurumVpnStatus.starting ||
+        _status == AurumVpnStatus.stopping) {
+      return ConnectionStatus.connecting;
+    }
+    if (_status == AurumVpnStatus.started) {
+      if (_connectionDegraded) {
+        return ConnectionStatus.degraded;
+      }
+      if (_isTunnelIdle(DateTime.now())) {
+        return ConnectionStatus.idle;
+      }
+      return ConnectionStatus.connected;
+    }
+    if (_autoRecoveryArmed && (_lastError?.isNotEmpty ?? false)) {
+      return ConnectionStatus.failed;
+    }
+    return ConnectionStatus.disconnected;
   }
 
   String? _profileCountryName(VpnProfile? profile) {
@@ -435,12 +509,14 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _lastNetworkEvent = 'app-resume';
       unawaited(_refreshBatteryOptimizationStatus());
       unawaited(_handleResumeRecovery());
     }
   }
 
   Future<void> _handleResumeRecovery() async {
+    _lastResumeRecoveryAt = DateTime.now();
     await Future<void>.delayed(_resumeHealthCheckDelay);
     if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
       return;
@@ -458,6 +534,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     if (status == AurumVpnStatus.started) {
       _nextTunnelHealthCheckAt = DateTime.now();
+      _setKeeperAction('resume-check');
       unawaited(_refreshTunnelHealth(source: 'app-resume'));
     }
   }
@@ -554,7 +631,7 @@ class _HomeScreenState extends State<HomeScreen>
                 _nextAutoReconnectAt = null;
                 _autoRecoveryArmed = true;
                 _connectedSince ??= now;
-                _lastHealthyAt = now;
+                _lastHealthyAt ??= now;
                 _lastTrafficAt ??= now;
                 _clockNow = now;
                 _ignoreStoppedUntil = now.add(const Duration(seconds: 4));
@@ -563,6 +640,7 @@ class _HomeScreenState extends State<HomeScreen>
                 _connectedSince = null;
                 _lastTrafficAt = null;
                 _lastHealthyAt = null;
+                _lastIdleHealthCheckAt = null;
               }
               final ignoreStopped =
                   _ignoreStoppedUntil != null &&
@@ -1247,7 +1325,6 @@ class _HomeScreenState extends State<HomeScreen>
           setState(() {
             _selectedProfileId = profile.id;
             _profileTab = _profileTabForKind(profile.kind);
-            _profilesExpanded = false;
             _message = s.autoSelectedProfile(profile.name);
           });
           await _store.saveSelectedProfileId(profile.id);
@@ -1330,7 +1407,12 @@ class _HomeScreenState extends State<HomeScreen>
     _lastError = null;
     _lastTrafficAt = null;
     _lastHealthyAt = null;
+    _lastIdleHealthCheckAt = null;
+    _lastRecoverySource = null;
+    _lastNetworkEvent = 'manual-start';
     _lastSessionTrafficBytes = 0;
+    _idleHealthChecks = 0;
+    _idleRecoveryCount = 0;
     _tunnelHealthFailures = 0;
     await _bestEffortNative('clearLogs', _vpnEngine.clearLogs());
 
@@ -1532,7 +1614,12 @@ class _HomeScreenState extends State<HomeScreen>
             _connectedSince = null;
             _lastTrafficAt = null;
             _lastHealthyAt = null;
+            _lastIdleHealthCheckAt = null;
+            _lastRecoverySource = null;
+            _lastNetworkEvent = 'manual-stop';
             _lastSessionTrafficBytes = 0;
+            _idleHealthChecks = 0;
+            _idleRecoveryCount = 0;
             _tunnelHealthFailures = 0;
           }
           _lastError = null;
@@ -1604,13 +1691,24 @@ class _HomeScreenState extends State<HomeScreen>
           !ignoreStopped) {
         final now = DateTime.now();
         final stale = _isTunnelStale(now);
+        final idleCheck = _shouldRunIdleHealthCheck(now);
         if (stale) {
           _nextTunnelHealthCheckAt = now;
           _setKeeperAction('watchdog-stale-check');
           _queueLog('VPN watchdog: stale tunnel check forced.');
+        } else if (idleCheck) {
+          _lastIdleHealthCheckAt = now;
+          _idleHealthChecks += 1;
+          _nextTunnelHealthCheckAt = now;
+          _setKeeperAction('watchdog-idle-check');
+          _queueLog('VPN watchdog: idle tunnel check forced.');
         }
         await _refreshTunnelHealth(
-          source: stale ? 'watchdog-stale' : 'watchdog',
+          source: stale
+              ? 'watchdog-stale'
+              : idleCheck
+              ? 'watchdog-idle'
+              : 'watchdog',
         );
       }
     } finally {
@@ -1665,7 +1763,7 @@ class _HomeScreenState extends State<HomeScreen>
       _tunnelHealthFailures = 0;
       _lastHealthyAt = lastTrafficAt;
       _setKeeperAction('traffic-ok:$source', at: lastTrafficAt);
-      _nextTunnelHealthCheckAt = now.add(_tunnelHealthProbeInterval);
+      _nextTunnelHealthCheckAt = now.add(_healthProbeIntervalFor(source));
       unawaited(
         _recordProfileStability(
           profile,
@@ -1675,7 +1773,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    _nextTunnelHealthCheckAt = now.add(_tunnelHealthProbeInterval);
+    _nextTunnelHealthCheckAt = now.add(_healthProbeIntervalFor(source));
     _tunnelHealthCheckInFlight = true;
     try {
       final healthy = await _probeLocalMixedProxy(
@@ -1689,6 +1787,9 @@ class _HomeScreenState extends State<HomeScreen>
       if (healthy) {
         _tunnelHealthFailures = 0;
         _lastHealthyAt = DateTime.now();
+        if (source.contains('idle')) {
+          _lastIdleHealthCheckAt = _lastHealthyAt;
+        }
         _setKeeperAction('probe-ok:$source', at: _lastHealthyAt);
         unawaited(
           _recordProfileStability(profile, (stats) => stats.recordHealthy()),
@@ -1714,6 +1815,9 @@ class _HomeScreenState extends State<HomeScreen>
         _queueLog(
           'VPN watchdog: tunnel is unhealthy, reconnecting ${profile.name}.',
         );
+        if (source.contains('idle') || source.contains('stale')) {
+          _idleRecoveryCount += 1;
+        }
         if (mounted) {
           setState(() {
             _lastError = null;
@@ -1767,6 +1871,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     _autoReconnectInFlight = true;
+    _lastRecoverySource = source;
     _autoReconnectAttempts += 1;
     if (mounted) {
       setState(() => _busy = true);
@@ -1819,6 +1924,9 @@ class _HomeScreenState extends State<HomeScreen>
 
       await _startVpnCore(profile);
       _setKeeperAction('reconnect-ok:$source#$attempt');
+      _lastHealthyAt = DateTime.now();
+      _lastError = null;
+      _tunnelHealthFailures = 0;
       unawaited(
         _recordProfileStability(profile, (stats) => stats.recordRecovery()),
       );
@@ -2650,16 +2758,28 @@ class _HomeScreenState extends State<HomeScreen>
       ],
       'battery_optimization_ignored: $_batteryOptimizationIgnored',
       'status: $_status',
+      'connection_state: ${_effectiveConnectionStatus.name}',
       'connection_degraded: $_connectionDegraded',
+      'connection_idle: ${_isTunnelIdle(now)}',
+      'connection_stale: ${_isTunnelStale(now)}',
       'message: ${_redactSensitive(_message)}',
       if (_lastError != null) 'last_error: $_lastError',
       'uptime: ${_formatDuration(_connectedDuration)}',
       'auto_recovery_armed: $_autoRecoveryArmed',
       'auto_reconnect_attempts: $_autoReconnectAttempts',
       'health_failures: $_tunnelHealthFailures',
+      'idle_health_checks: $_idleHealthChecks',
+      'idle_recoveries: $_idleRecoveryCount',
+      if (_lastRecoverySource != null)
+        'last_recovery_source: $_lastRecoverySource',
+      if (_lastNetworkEvent != null) 'last_network_event: $_lastNetworkEvent',
       if (_lastKeeperAction != null) 'keeper_last_action: $_lastKeeperAction',
       if (_lastKeeperActionAt != null)
         'keeper_last_action_local: ${_lastKeeperActionAt!.toIso8601String()}',
+      if (_lastResumeRecoveryAt != null)
+        'last_resume_recovery_local: ${_lastResumeRecoveryAt!.toIso8601String()}',
+      if (_lastIdleHealthCheckAt != null)
+        'last_idle_health_check_local: ${_lastIdleHealthCheckAt!.toIso8601String()}',
       if (_nextTunnelHealthCheckAt != null)
         'next_health_check_local: ${_nextTunnelHealthCheckAt!.toIso8601String()}',
       if (_nextAutoReconnectAt != null)
@@ -3034,7 +3154,6 @@ class _HomeScreenState extends State<HomeScreen>
                       profilesExpanded: _profilesExpanded,
                       onTabChanged: (tab) => setState(() {
                         _profileTab = tab;
-                        _profilesExpanded = false;
                       }),
                       onProfilesExpandedChanged: (expanded) =>
                           setState(() => _profilesExpanded = expanded),
@@ -3053,6 +3172,7 @@ class _HomeScreenState extends State<HomeScreen>
                       batteryOptimizationIgnored: _batteryOptimizationIgnored,
                       smartRouteRuDirect: _smartRouteRuDirect,
                       keeperStatus: _keeperStatusLabel,
+                      idleKeeperStatus: _idleKeeperStatusLabel,
                       lastHealthStatus: _lastHealthStatusLabel,
                       autoRecoveryStatus: _autoRecoveryStatusLabel,
                       healthFailuresStatus: _healthFailuresStatusLabel,
@@ -3147,12 +3267,17 @@ class _StatusPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final connected = status == AurumVpnStatus.started;
-    final statusLabel = switch (status) {
-      AurumVpnStatus.started =>
-        degraded ? strings.connectionProblem : strings.connected,
-      AurumVpnStatus.starting => strings.connecting,
-      AurumVpnStatus.stopping => strings.disconnecting,
-      _ => strings.stopped,
+    final statusLabel = switch (connectionState.status) {
+      ConnectionStatus.connected => strings.connected,
+      ConnectionStatus.idle => strings.idleConnection,
+      ConnectionStatus.degraded => strings.connectionProblem,
+      ConnectionStatus.reconnecting => strings.reconnectingConnection,
+      ConnectionStatus.failed => strings.connectionProblem,
+      ConnectionStatus.connecting =>
+        status == AurumVpnStatus.stopping
+            ? strings.disconnecting
+            : strings.connecting,
+      ConnectionStatus.disconnected => strings.stopped,
     };
     final accent = degraded
         ? _danger
@@ -3524,6 +3649,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.batteryOptimizationIgnored,
     required this.smartRouteRuDirect,
     required this.keeperStatus,
+    required this.idleKeeperStatus,
     required this.lastHealthStatus,
     required this.autoRecoveryStatus,
     required this.healthFailuresStatus,
@@ -3562,6 +3688,7 @@ class _ProfilePanel extends StatelessWidget {
   final bool batteryOptimizationIgnored;
   final bool smartRouteRuDirect;
   final String keeperStatus;
+  final String idleKeeperStatus;
   final String lastHealthStatus;
   final String autoRecoveryStatus;
   final String healthFailuresStatus;
@@ -3738,6 +3865,7 @@ class _ProfilePanel extends StatelessWidget {
           batteryOptimizationIgnored: batteryOptimizationIgnored,
           smartRouteRuDirect: smartRouteRuDirect,
           keeperStatus: keeperStatus,
+          idleKeeperStatus: idleKeeperStatus,
           lastHealthStatus: lastHealthStatus,
           autoRecoveryStatus: autoRecoveryStatus,
           healthFailuresStatus: healthFailuresStatus,
@@ -4275,6 +4403,7 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.batteryOptimizationIgnored,
     required this.smartRouteRuDirect,
     required this.keeperStatus,
+    required this.idleKeeperStatus,
     required this.lastHealthStatus,
     required this.autoRecoveryStatus,
     required this.healthFailuresStatus,
@@ -4298,6 +4427,7 @@ class _ProfileInsightPanel extends StatelessWidget {
   final bool batteryOptimizationIgnored;
   final bool smartRouteRuDirect;
   final String keeperStatus;
+  final String idleKeeperStatus;
   final String lastHealthStatus;
   final String autoRecoveryStatus;
   final String healthFailuresStatus;
@@ -4417,6 +4547,11 @@ class _ProfileInsightPanel extends StatelessWidget {
                         valueColor: stabilityNeedsAttention
                             ? _dangerSoft
                             : null,
+                      ),
+                      _InsightRow(
+                        icon: Icons.nightlight_round_outlined,
+                        label: strings.idleKeeperLabel,
+                        value: idleKeeperStatus,
                       ),
                       _InsightRow(
                         icon: Icons.schedule_outlined,
@@ -5445,6 +5580,31 @@ class _Strings {
   String get keeperDegraded => switch (this) {
     _Strings.en => 'Degraded',
     _ => 'Нестабильно',
+  };
+
+  String get idleKeeperLabel => switch (this) {
+    _Strings.en => 'Idle keeper',
+    _ => 'Ночной keeper',
+  };
+
+  String get idleKeeperReady => switch (this) {
+    _Strings.en => 'Ready',
+    _ => 'Готов',
+  };
+
+  String get idleKeeperActive => switch (this) {
+    _Strings.en => 'Checked',
+    _ => 'Проверено',
+  };
+
+  String get idleConnection => switch (this) {
+    _Strings.en => 'Idle',
+    _ => 'Ожидание',
+  };
+
+  String get reconnectingConnection => switch (this) {
+    _Strings.en => 'Reconnecting',
+    _ => 'Переподключение',
   };
 
   String get lastCheckLabel => switch (this) {

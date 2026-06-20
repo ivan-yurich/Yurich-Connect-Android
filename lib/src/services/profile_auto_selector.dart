@@ -73,8 +73,8 @@ class ProfileAutoSelector {
     }
 
     final expiresAt = profile.subscriptionExpiresAt;
-    if (expiresAt != null &&
-        expiresAt.toUtc().isBefore(DateTime.now().toUtc())) {
+    final current = (now ?? DateTime.now()).toUtc();
+    if (expiresAt != null && expiresAt.toUtc().isBefore(current)) {
       return false;
     }
 
@@ -89,21 +89,33 @@ class ProfileAutoSelector {
   ) {
     final kindScore = switch (profile.kind) {
       VpnProfileKind.vlessReality => 0,
-      VpnProfileKind.naive => 160,
+      VpnProfileKind.naive => 120,
       _ => 10000,
     };
-    final pingScore = pingMs[profile.id] ?? 900;
-    final expiryScore = _expiryScore(profile.subscriptionExpiresAt);
+    final pingScore = _pingScore(pingMs[profile.id]);
+    final expiryScore = _expiryScore(profile.subscriptionExpiresAt, now);
     final stabilityScore =
         stabilityStats[profile.id]?.autoSelectPenalty(now: now) ?? 0;
     return kindScore + pingScore + expiryScore + stabilityScore;
   }
 
-  int _expiryScore(DateTime? expiresAt) {
+  int _pingScore(int? ping) {
+    if (ping == null || ping <= 0) {
+      return 900;
+    }
+    if (ping > 1600) {
+      return 1600;
+    }
+    return ping;
+  }
+
+  int _expiryScore(DateTime? expiresAt, DateTime? now) {
     if (expiresAt == null) {
       return 40;
     }
-    final remaining = expiresAt.toUtc().difference(DateTime.now().toUtc());
+    final remaining = expiresAt.toUtc().difference(
+      (now ?? DateTime.now()).toUtc(),
+    );
     if (remaining.inDays < 5) {
       return 220;
     }

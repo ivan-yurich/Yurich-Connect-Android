@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.79 - 2026-06-20
+
+- Strengthened the native VPN keeper for night idle and mobile network changes.
+- Added a cellular/idle settle delay before native health probes to avoid
+  premature reconnects while LTE is switching towers or waking from Doze.
+- Android idle-mode events now trigger a soft tunnel check through the native
+  keeper instead of waiting for the next regular watchdog tick.
+- Native mixed-proxy health checks now include an additional Google
+  connectivity endpoint as a fallback.
+
+## 1.0.78 - 2026-06-20
+
+- Added explicit connection states for long-running sessions: Connected, Idle,
+  Degraded, Reconnecting, and Failed.
+- Strengthened the background keeper for night/idle phone use with a separate
+  idle health-check path, softer recovery, and detailed diagnostics for resume,
+  stale tunnel, and idle recovery events.
+- Improved `/s/<token>/` subscription import by automatically trying
+  `links.txt`, `hiddify.txt`, `nekobox.txt`, and `v2rayng.txt` variants while
+  preserving the original subscription source for refresh.
+- Expanded Smart Route package safeguards so Russian apps can stay direct while
+  global AI, Google, Telegram, YouTube, Instagram, and browser traffic remains
+  on the VPN path.
+- Added regression coverage for the new connection UI states and root
+  subscription fallback import.
+
+## 1.0.77 - 2026-06-19
+
+- Fixed the server picker UX: switching profile tabs or auto-selecting a
+  profile no longer collapses the expanded server list.
+- The server list now closes only when the user taps the explicit hide action,
+  which keeps bulk profile switching predictable.
+
 ## 1.0.76 - 2026-06-19
 
 - Added a compact stability event trail to diagnostics so keeper actions,
