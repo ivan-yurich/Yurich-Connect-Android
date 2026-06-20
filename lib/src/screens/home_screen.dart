@@ -2652,7 +2652,11 @@ class _HomeScreenState extends State<HomeScreen>
           action: SnackBarAction(
             label: s.downloadApk,
             onPressed: () => unawaited(
-              _openUrl(AppUpdateService.latestApkDownloadUri.toString()),
+              _openUrl(
+                (_availableUpdate?.downloadUrl ??
+                        AppUpdateService.latestApkDownloadUri)
+                    .toString(),
+              ),
             ),
           ),
         );

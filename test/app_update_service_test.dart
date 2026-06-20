@@ -91,6 +91,44 @@ void main() {
     expect(update.assetName, 'YurichConnect-android-arm64-v8a-v1.0.62.apk');
   });
 
+  test('accepts versioned GitHub release APK name', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+
+    server.listen((request) async {
+      final payload = {
+        'tag_name': 'v1.0.80',
+        'assets': [
+          {
+            'name': 'Yurich-Connect-Android-v1.0.80.apk',
+            'browser_download_url':
+                'http://127.0.0.1:${server.port}/versioned.apk',
+            'size': 199738363,
+          },
+        ],
+      };
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode(payload));
+      await request.response.close();
+    });
+
+    final service = AppUpdateService(
+      releaseApiUris: [Uri.parse('http://127.0.0.1:${server.port}/latest')],
+    );
+
+    final update = await service.findLatest(
+      currentVersion: '1.0.79',
+      supportedAbis: const ['arm64-v8a'],
+    );
+
+    expect(update, isNotNull);
+    expect(update!.version, '1.0.80');
+    expect(update.assetName, 'Yurich-Connect-Android-v1.0.80.apk');
+    expect(update.downloadUrl.path, '/versioned.apk');
+  });
+
   test(
     'reuses a complete downloaded APK instead of downloading again',
     () async {

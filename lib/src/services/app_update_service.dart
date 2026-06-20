@@ -11,10 +11,14 @@ const _releaseApiUrls = [
 const _githubRepository = 'ivan-yurich/Yurich-Connect-Android';
 const _githubReleaseAssetName = 'YurichConnect-android-release.apk';
 const _updaterUserAgent = 'YurichConnect-Updater';
+const _updateConnectTimeout = Duration(seconds: 30);
+const _updateMetadataTimeout = Duration(seconds: 25);
+const _updateDownloadOpenTimeout = Duration(seconds: 60);
 const _updateRetryDelays = [
-  Duration(seconds: 1),
-  Duration(seconds: 3),
-  Duration(seconds: 6),
+  Duration(seconds: 2),
+  Duration(seconds: 5),
+  Duration(seconds: 10),
+  Duration(seconds: 20),
 ];
 
 class AppUpdateInfo {
@@ -55,7 +59,7 @@ class AppUpdateService {
       _releaseApiUris =
           releaseApiUris ??
           _releaseApiUrls.map(Uri.parse).toList(growable: false) {
-    _client.connectionTimeout = const Duration(seconds: 7);
+    _client.connectionTimeout = _updateConnectTimeout;
   }
 
   static const _channel = MethodChannel('online.dnsai.ivanvpn/updater');
@@ -180,7 +184,7 @@ class AppUpdateService {
       'application/vnd.android.package-archive, application/octet-stream, */*',
     );
     request.followRedirects = true;
-    final response = await request.close().timeout(const Duration(seconds: 30));
+    final response = await request.close().timeout(_updateDownloadOpenTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       await response.drain<void>();
       throw _UpdateHttpException(response.statusCode);
@@ -297,9 +301,7 @@ class AppUpdateService {
         request.headers.set(HttpHeaders.acceptHeader, 'application/json');
         request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
         request.followRedirects = true;
-        final response = await request.close().timeout(
-          const Duration(seconds: 14),
-        );
+        final response = await request.close().timeout(_updateMetadataTimeout);
         if (response.statusCode == HttpStatus.notFound) {
           await response.drain<void>();
           return null;
@@ -360,9 +362,7 @@ class AppUpdateService {
         final request = await _client.getUrl(uri);
         request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
         request.followRedirects = false;
-        final response = await request.close().timeout(
-          const Duration(seconds: 14),
-        );
+        final response = await request.close().timeout(_updateMetadataTimeout);
         final location = response.headers.value(HttpHeaders.locationHeader);
         await response.drain<void>();
 
@@ -403,9 +403,7 @@ class AppUpdateService {
       final request = await _client.headUrl(uri);
       request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
       request.followRedirects = true;
-      final response = await request.close().timeout(
-        const Duration(seconds: 14),
-      );
+      final response = await request.close().timeout(_updateMetadataTimeout);
       final length = response.contentLength;
       await response.drain<void>();
       return length > 0 ? length : null;
@@ -439,6 +437,7 @@ class AppUpdateService {
         'YurichConnect-android-armeabi-v7a-v$normalized.apk',
       if (supportedAbis.contains('x86_64'))
         'YurichConnect-android-x86_64-v$normalized.apk',
+      'Yurich-Connect-Android-v$normalized.apk',
       _githubReleaseAssetName,
     ];
   }

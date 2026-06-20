@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.80 - 2026-06-20
+
+- Increased GitHub Releases updater network timeouts and retry backoff for
+  slow or filtered mobile networks.
+- Added support for the current versioned APK asset name
+  `Yurich-Connect-Android-vX.Y.Z.apk`.
+- The manual APK fallback now opens the exact APK found by the update check
+  instead of an older static release filename.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
 ## 1.0.79 - 2026-06-20
 
 - Strengthened the native VPN keeper for night idle and mobile network changes.
