@@ -38,6 +38,18 @@ class AppUpdateInfo {
   final List<Uri> fallbackDownloadUrls;
 }
 
+class AppUpdateApkInfo {
+  const AppUpdateApkInfo({
+    required this.packageName,
+    required this.version,
+    required this.buildNumber,
+  });
+
+  final String packageName;
+  final String version;
+  final int buildNumber;
+}
+
 class _UpdateHttpException implements Exception {
   const _UpdateHttpException(this.statusCode);
 
@@ -52,6 +64,21 @@ class AppUpdatePermissionException implements Exception {
 
   @override
   String toString() => 'Install permission is required.';
+}
+
+class AppUpdateDowngradeException implements Exception {
+  const AppUpdateDowngradeException({
+    required this.currentBuildNumber,
+    required this.updateBuildNumber,
+  });
+
+  final int currentBuildNumber;
+  final int updateBuildNumber;
+
+  @override
+  String toString() =>
+      'Update APK is not newer: installed build $currentBuildNumber, '
+      'downloaded build $updateBuildNumber.';
 }
 
 class AppUpdateService {
@@ -255,7 +282,31 @@ class AppUpdateService {
     }
   }
 
-  Future<void> installApk(File file) async {
+  Future<AppUpdateApkInfo> inspectApk(File file) async {
+    final value = await _channel.invokeMethod<Map<Object?, Object?>>(
+      'inspectApk',
+      {'path': file.path},
+    );
+    if (value == null) {
+      throw StateError('Android cannot inspect update APK.');
+    }
+    return AppUpdateApkInfo(
+      packageName: value['packageName']?.toString() ?? '',
+      version: value['versionName']?.toString() ?? '',
+      buildNumber: _toInt(value['versionCode']),
+    );
+  }
+
+  Future<void> installApk(File file, {int? currentBuildNumber}) async {
+    final apkInfo = await inspectApk(file);
+    if (currentBuildNumber != null &&
+        currentBuildNumber > 0 &&
+        apkInfo.buildNumber <= currentBuildNumber) {
+      throw AppUpdateDowngradeException(
+        currentBuildNumber: currentBuildNumber,
+        updateBuildNumber: apkInfo.buildNumber,
+      );
+    }
     try {
       await _channel.invokeMethod<void>('installApk', {'path': file.path});
     } on PlatformException catch (error) {
@@ -264,6 +315,15 @@ class AppUpdateService {
       }
       rethrow;
     }
+  }
+
+  int _toInt(Object? value) {
+    return switch (value) {
+      int() => value,
+      num() => value.round(),
+      String() => int.tryParse(value) ?? 0,
+      _ => 0,
+    };
   }
 
   Future<void> openInstallSettings() async {
