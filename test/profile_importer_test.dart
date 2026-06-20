@@ -20,7 +20,44 @@ void main() {
     expect(profiles.first.outbound?['type'], 'vless');
     expect(profiles.first.outbound?['network'], isNull);
     expect(profiles.first.outbound?['packet_encoding'], 'xudp');
+    expect(profiles.first.outbound?['flow'], 'xtls-rprx-vision');
+    expect(profiles.first.outbound?['tls']['server_name'], 'www.example.com');
+    expect(profiles.first.outbound?['tls']['utls'], {
+      'enabled': true,
+      'fingerprint': 'chrome',
+    });
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
+  });
+
+  test('normalizes VLESS Reality defaults for stable Android config', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&pbk=abc123#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(SingBoxConfigBuilder().build(profile))
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessReality);
+    expect(proxy['network'], isNull);
+    expect(proxy['flow'], 'xtls-rprx-vision');
+    expect(proxy['packet_encoding'], 'xudp');
+    expect(proxy['tls']['enabled'], true);
+    expect(proxy['tls']['server_name'], 'example.com');
+    expect(proxy['tls']['utls'], {'enabled': true, 'fingerprint': 'chrome'});
+    expect(proxy['tls']['reality']['enabled'], true);
+    expect(proxy['tls']['reality']['public_key'], 'abc123');
+  });
+
+  test('rejects VLESS Reality without public key', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp#Broken';
+
+    await expectLater(
+      ProfileImporter().importFromText(link),
+      throwsA(isA<ProfileImportException>()),
+    );
   });
 
   test('imports VLESS XHTTP link as unsupported legacy profile', () async {
@@ -540,7 +577,36 @@ void main() {
     expect(proxy['password'], 'secret-for-test');
   });
 
-  test('normalizes legacy VLESS tcp-only outbounds from saved profiles', () {
+  test('normalizes standalone sing-box VLESS Reality outbound', () async {
+    final payload = jsonEncode({
+      'type': 'vless',
+      'tag': 'proxy',
+      'server': 'example.com',
+      'server_port': 443,
+      'uuid': '11111111-1111-4111-8111-111111111111',
+      'network': 'tcp',
+      'tls': {
+        'enabled': true,
+        'reality': {'enabled': true, 'public_key': 'abc123'},
+      },
+    });
+
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+    final config =
+        jsonDecode(SingBoxConfigBuilder().build(profile))
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessReality);
+    expect(proxy['network'], isNull);
+    expect(proxy['flow'], 'xtls-rprx-vision');
+    expect(proxy['packet_encoding'], 'xudp');
+    expect(proxy['tls']['server_name'], 'example.com');
+    expect(proxy['tls']['utls'], {'enabled': true, 'fingerprint': 'chrome'});
+    expect(proxy['tls']['reality']['public_key'], 'abc123');
+  });
+
+  test('rejects legacy VLESS Reality outbounds without Reality fields', () {
     const profile = VpnProfile(
       id: 'legacy-vless',
       name: 'Legacy VLESS',
@@ -557,26 +623,9 @@ void main() {
       },
     );
 
-    final config =
-        jsonDecode(SingBoxConfigBuilder().build(profile))
-            as Map<String, dynamic>;
-    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
-
-    expect(proxy['network'], isNull);
-    expect(proxy['packet_encoding'], 'xudp');
-    final routeRules =
-        ((config['route'] as Map<String, dynamic>)['rules'] as List)
-            .whereType<Map<String, dynamic>>()
-            .toList();
-    final rejectRule = routeRules.firstWhere(
-      (rule) => rule['action'] == 'reject',
-    );
-
     expect(
-      (rejectRule['rules'] as List).whereType<Map>().any(
-        (nested) => nested['network'] == 'udp' && nested.length == 1,
-      ),
-      isFalse,
+      () => SingBoxConfigBuilder().build(profile),
+      throwsA(isA<StateError>()),
     );
   });
 

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../models/vpn_profile.dart';
 import 'smart_route_rules.dart';
+import 'vless_profile_validator.dart';
 
 enum SingBoxConfigTarget { android }
 
@@ -201,6 +202,15 @@ class SingBoxConfigBuilder {
   ) {
     if (profile.kind == VpnProfileKind.vlessReality ||
         profile.kind == VpnProfileKind.vlessTls) {
+      if (profile.kind == VpnProfileKind.vlessReality) {
+        final normalized = VlessProfileValidator.normalizeRealityTcpOutbound(
+          proxyOutbound,
+        );
+        proxyOutbound
+          ..clear()
+          ..addAll(normalized);
+        return;
+      }
       if (proxyOutbound['network'] == 'tcp') {
         proxyOutbound.remove('network');
       }

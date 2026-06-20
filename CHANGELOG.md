@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.83 - 2026-06-20
+
+- Hardened VLESS Reality profile validation before VPN startup.
+- Normalized VLESS Reality TCP profiles to stable Android defaults:
+  `xtls-rprx-vision`, `xudp`, uTLS Chrome, SNI, and Reality enabled fields.
+- Added clearer failures for incomplete Reality profiles instead of starting a
+  broken tunnel.
+- Extended diagnostics with VLESS mode, flow, SNI, uTLS, and packet encoding.
+- Kept NaiveProxy, Hysteria/Hysteria2, Smart Route, and routing behavior
+  unchanged.
+
 ## 1.0.82 - 2026-06-20
 
 - Reworked Android update installation to prefer `PackageInstaller` sessions

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../models/vpn_profile.dart';
 import 'sing_box_config_builder.dart';
+import 'vless_profile_validator.dart';
 
 class ProfileImportException implements Exception {
   const ProfileImportException(this.message);
@@ -547,17 +548,21 @@ class ProfileImporter {
           (reality['enabled'] == true || _truthy('${reality['enabled']}'));
       final transportType =
           (_asMap(normalized['transport'])?['type'] as String?)?.toLowerCase();
+      final kind = _vlessKind(
+        security: hasReality ? 'reality' : 'tls',
+        transportType: transportType,
+      );
+      final outbound = kind == VpnProfileKind.vlessReality
+          ? VlessProfileValidator.normalizeRealityTcpOutbound(normalized)
+          : normalized;
       return VpnProfile(
         id: _stableId(originalText),
         name: _displayName('', fallback: server),
-        kind: _vlessKind(
-          security: hasReality ? 'reality' : 'tls',
-          transportType: transportType,
-        ),
+        kind: kind,
         originalInput: source.isEmpty ? originalText : source,
         server: server,
         port: port,
-        outbound: normalized,
+        outbound: outbound,
       );
     }
 
@@ -800,7 +805,7 @@ class ProfileImporter {
       }
     }
 
-    final outbound = <String, dynamic>{
+    var outbound = <String, dynamic>{
       'type': 'vless',
       'tag': 'proxy',
       'server': uri.host,
@@ -821,10 +826,15 @@ class ProfileImporter {
       }
     }
 
+    final kind = _vlessKind(security: security, transportType: transportType);
+    if (kind == VpnProfileKind.vlessReality) {
+      outbound = VlessProfileValidator.normalizeRealityTcpOutbound(outbound);
+    }
+
     return VpnProfile(
       id: _stableId(link),
       name: name,
-      kind: _vlessKind(security: security, transportType: transportType),
+      kind: kind,
       originalInput: link,
       server: uri.host,
       port: port,

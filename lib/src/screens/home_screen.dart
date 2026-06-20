@@ -2905,6 +2905,10 @@ class _HomeScreenState extends State<HomeScreen>
         orElse: () =>
             outbounds.isEmpty ? const <String, dynamic>{} : outbounds.first,
       );
+      final proxyTls = (proxy['tls'] as Map?)?.cast<String, dynamic>();
+      final proxyReality = (proxyTls?['reality'] as Map?)
+          ?.cast<String, dynamic>();
+      final proxyUtls = (proxyTls?['utls'] as Map?)?.cast<String, dynamic>();
       final dns = (map['dns'] as Map?)?.cast<String, dynamic>() ?? const {};
       final dnsFinal = dns['final'] ?? 'unknown';
       final dnsServers = ((dns['servers'] as List?) ?? const [])
@@ -2937,6 +2941,13 @@ class _HomeScreenState extends State<HomeScreen>
           'transport=${proxy['quic'] == true ? 'h3/quic' : 'h2'}',
         if (proxy['type'] == 'vless')
           'packet=${proxy['packet_encoding'] ?? 'default'}',
+        if (proxy['type'] == 'vless')
+          'mode=${proxyReality?['enabled'] == true ? 'reality-tcp' : 'tls'}',
+        if (proxy['type'] == 'vless') 'flow=${proxy['flow'] ?? 'default'}',
+        if (proxy['type'] == 'vless')
+          'sni=${proxyTls?['server_name'] ?? 'unknown'}',
+        if (proxy['type'] == 'vless')
+          'utls=${proxyUtls?['fingerprint'] ?? 'default'}',
         if (proxy['type'] == 'hysteria2' || proxy['type'] == 'hysteria')
           'transport=udp',
         'mixed_proxy=$hasMixedProxy',
