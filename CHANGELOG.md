@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.82 - 2026-06-20
+
+- Reworked Android update installation to prefer `PackageInstaller` sessions
+  instead of the fragile `ACTION_VIEW` APK handoff.
+- Added native package-name validation before an update APK is handed to
+  Android, preventing wrong or unreadable APKs from reaching the installer.
+- Prepared ABI split APK release assets so phones can download a smaller
+  update package when supported.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
 ## 1.0.81 - 2026-06-20
 
 - Hardened Android in-app updates against corrupted or partial APK downloads.

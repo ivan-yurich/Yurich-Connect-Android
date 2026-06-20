@@ -134,13 +134,13 @@ class MainActivity : FlutterActivity() {
 
         try {
             val installFile = prepareInstallFile(apkFile)
-            openInstallIntent(installFile)
+            installWithPackageInstaller(installFile)
             result.success(null)
         } catch (error: Exception) {
-            Log.w(TAG, "ACTION_VIEW update failed, falling back to PackageInstaller", error)
+            Log.w(TAG, "PackageInstaller update failed, falling back to ACTION_VIEW", error)
             try {
                 val installFile = prepareInstallFile(apkFile)
-                installWithPackageInstaller(installFile)
+                openInstallIntent(installFile)
                 result.success(null)
             } catch (fallbackError: ActivityNotFoundException) {
                 result.error("INSTALL_FAILED", "Android package installer was not found", null)
@@ -310,6 +310,7 @@ class MainActivity : FlutterActivity() {
         if (!isReadableApk(target)) {
             throw IllegalStateException("Prepared update file is not a valid APK")
         }
+        validateUpdatePackage(target)
         return target
     }
 
@@ -328,6 +329,27 @@ class MainActivity : FlutterActivity() {
             false
         }
     }
+
+    private fun validateUpdatePackage(file: File) {
+        val archivePackageName = getArchivePackageName(file)
+            ?: throw IllegalStateException("Android cannot parse update APK")
+        if (archivePackageName != packageName) {
+            throw IllegalStateException(
+                "Update package mismatch: expected $packageName, got $archivePackageName",
+            )
+        }
+    }
+
+    private fun getArchivePackageName(file: File): String? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageArchiveInfo(
+                file.absolutePath,
+                PackageManager.PackageInfoFlags.of(0),
+            )?.packageName
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageArchiveInfo(file.absolutePath, 0)?.packageName
+        }
 
     private fun openInstallSettings() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
