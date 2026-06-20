@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.85 - 2026-06-21
+
+- Added an engine selector layer for VPN profiles: supported protocols stay on
+  sing-box, while Xray-only VLESS transports fail clearly instead of starting a
+  broken tunnel.
+- Hardened VLESS Reality TCP normalization and validation for Android startup.
+- Removed unsafe `tls.insecure` from normalized Reality outbounds.
+- Kept NaiveProxy, Hysteria/Hysteria2, Smart Route, and routing behavior
+  unchanged.
+
 ## 1.0.84 - 2026-06-21
 
 - Fixed Android auto-update downgrade failures by moving the app to a high
