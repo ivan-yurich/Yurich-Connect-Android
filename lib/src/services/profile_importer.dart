@@ -53,30 +53,33 @@ class ProfileImporter {
     ];
 
     Object? lastError;
+    final uris = _subscriptionCandidates(uri);
     final candidates = <String>[];
     for (final userAgent in clients) {
-      for (final viaLocalProxy in const [false, true]) {
-        try {
-          final fetched = await _get(
-            uri,
-            userAgent: userAgent,
-            viaLocalProxy: viaLocalProxy,
-          );
-          final body = fetched.body;
-          if (_canParsePayload(body)) {
-            return fetched;
-          }
-          if (_looksLikeHtml(body)) {
-            lastError = ProfileImportException(
-              '${_fetchModeLabel(viaLocalProxy)}: сервер вернул HTML-страницу без поддерживаемых ключей.',
+      for (final candidateUri in uris) {
+        for (final viaLocalProxy in const [false, true]) {
+          try {
+            final fetched = await _get(
+              candidateUri,
+              userAgent: userAgent,
+              viaLocalProxy: viaLocalProxy,
             );
-            continue;
+            final body = fetched.body;
+            if (_canParsePayload(body)) {
+              return fetched;
+            }
+            if (_looksLikeHtml(body)) {
+              lastError = ProfileImportException(
+                '${_fetchModeLabel(viaLocalProxy)} ${candidateUri.path}: сервер вернул HTML-страницу без поддерживаемых ключей.',
+              );
+              continue;
+            }
+            candidates.add(body);
+          } on Object catch (error) {
+            lastError = ProfileImportException(
+              '${_fetchModeLabel(viaLocalProxy)} ${candidateUri.path}: $error',
+            );
           }
-          candidates.add(body);
-        } on Object catch (error) {
-          lastError = ProfileImportException(
-            '${_fetchModeLabel(viaLocalProxy)}: $error',
-          );
         }
       }
     }
@@ -88,6 +91,33 @@ class ProfileImporter {
     throw ProfileImportException(
       'Не смог получить raw-подписку. Проверь, что в Remnawave включён Base64/Xray-json/Sing-box template. Деталь: $lastError',
     );
+  }
+
+  List<Uri> _subscriptionCandidates(Uri uri) {
+    final result = <Uri>[];
+    void add(Uri candidate) {
+      if (!result.any((item) => item.toString() == candidate.toString())) {
+        result.add(candidate);
+      }
+    }
+
+    add(uri);
+    final path = uri.path;
+    final lowerPath = path.toLowerCase();
+    final looksLikeRootSubscription =
+        lowerPath.contains('/s/') && !lowerPath.endsWith('.txt');
+    if (looksLikeRootSubscription) {
+      final base = path.endsWith('/') ? uri : uri.replace(path: '$path/');
+      for (final file in const [
+        'links.txt',
+        'hiddify.txt',
+        'nekobox.txt',
+        'v2rayng.txt',
+      ]) {
+        add(base.resolve(file));
+      }
+    }
+    return result;
   }
 
   bool _canParsePayload(String body) {

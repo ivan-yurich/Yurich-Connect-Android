@@ -50,13 +50,23 @@ class AppUpdatePermissionException implements Exception {
 }
 
 class AppUpdateService {
-  AppUpdateService({HttpClient? client}) : _client = client ?? HttpClient() {
+  AppUpdateService({HttpClient? client, List<Uri>? releaseApiUris})
+    : _client = client ?? HttpClient(),
+      _releaseApiUris =
+          releaseApiUris ??
+          _releaseApiUrls.map(Uri.parse).toList(growable: false) {
     _client.connectionTimeout = const Duration(seconds: 7);
   }
 
   static const _channel = MethodChannel('online.dnsai.ivanvpn/updater');
 
+  static Uri get latestApkDownloadUri => Uri.parse(
+    'https://github.com/$_githubRepository/releases/latest/download/'
+    '$_githubReleaseAssetName',
+  );
+
   final HttpClient _client;
+  final List<Uri> _releaseApiUris;
 
   Future<List<String>> supportedAbis() async {
     if (!Platform.isAndroid) {
@@ -74,16 +84,18 @@ class AppUpdateService {
   }) async {
     Object? lastError;
     var sawEmptyEndpoint = false;
-    for (final value in _releaseApiUrls) {
+    var sawNotNewerRelease = false;
+    for (final uri in _releaseApiUris) {
       try {
-        final release = await _fetchRelease(Uri.parse(value), supportedAbis);
+        final release = await _fetchRelease(uri, supportedAbis);
         if (release == null) {
           sawEmptyEndpoint = true;
           continue;
         }
-        return _isVersionNewer(release.version, currentVersion)
-            ? release
-            : null;
+        if (_isVersionNewer(release.version, currentVersion)) {
+          return release;
+        }
+        sawNotNewerRelease = true;
       } on Object catch (error) {
         lastError = error;
       }
@@ -92,15 +104,16 @@ class AppUpdateService {
     try {
       final release = await _fetchLatestGitHubReleaseViaRedirect(supportedAbis);
       if (release != null) {
-        return _isVersionNewer(release.version, currentVersion)
-            ? release
-            : null;
+        if (_isVersionNewer(release.version, currentVersion)) {
+          return release;
+        }
+        sawNotNewerRelease = true;
       }
     } on Object catch (error) {
       lastError = error;
     }
 
-    if (lastError != null && !sawEmptyEndpoint) {
+    if (lastError != null && !sawEmptyEndpoint && !sawNotNewerRelease) {
       throw StateError('$lastError');
     }
     return null;
@@ -110,10 +123,20 @@ class AppUpdateService {
     AppUpdateInfo update, {
     required void Function(double? progress) onProgress,
   }) async {
-    final tempDir = await Directory.systemTemp.createTemp('yurich_connect_');
+    final tempDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}'
+      'yurich_connect_updates',
+    );
+    if (!await tempDir.exists()) {
+      await tempDir.create(recursive: true);
+    }
     final file = File(
       '${tempDir.path}${Platform.pathSeparator}${update.assetName}',
     );
+    if (await _isCompleteDownloadedFile(file, update.size)) {
+      onProgress(1);
+      return file;
+    }
 
     Object? lastError;
     final urls = <Uri>{
@@ -182,6 +205,29 @@ class AppUpdateService {
       await sink.close();
     }
     onProgress(1);
+
+    final expectedSize = update.size;
+    if (expectedSize != null && expectedSize > 0) {
+      final actualSize = await file.length();
+      if (actualSize != expectedSize) {
+        throw StateError(
+          'APK size mismatch: expected $expectedSize bytes, got $actualSize.',
+        );
+      }
+    }
+  }
+
+  Future<bool> _isCompleteDownloadedFile(File file, int? expectedSize) async {
+    if (!await file.exists()) {
+      return false;
+    }
+    final actualSize = await file.length();
+    if (actualSize <= 0) {
+      return false;
+    }
+    return expectedSize == null ||
+        expectedSize <= 0 ||
+        actualSize == expectedSize;
   }
 
   Future<void> installApk(File file) async {
@@ -286,15 +332,22 @@ class AppUpdateService {
       return null;
     }
 
-    final assetName = _githubReleaseAssetName;
-    final urls = _githubDownloadUrls(tag, assetName);
-    return AppUpdateInfo(
-      version: _normalizeVersion(tag),
-      assetName: assetName,
-      downloadUrl: urls.first,
-      fallbackDownloadUrls: urls.skip(1).toList(growable: false),
-      size: await _tryFetchContentLength(urls.first),
-    );
+    for (final assetName in _githubAssetNameCandidates(tag, supportedAbis)) {
+      final urls = _githubDownloadUrls(tag, assetName);
+      final size = await _tryFetchContentLength(urls.first);
+      if (size == null && assetName != _githubReleaseAssetName) {
+        continue;
+      }
+      return AppUpdateInfo(
+        version: _normalizeVersion(tag),
+        assetName: assetName,
+        downloadUrl: urls.first,
+        fallbackDownloadUrls: urls.skip(1).toList(growable: false),
+        size: size,
+      );
+    }
+
+    return null;
   }
 
   Future<String?> _fetchLatestGitHubTag() async {
@@ -371,6 +424,22 @@ class AppUpdateService {
       Uri.parse(
         'https://github.com/$_githubRepository/releases/latest/download/$assetName',
       ),
+    ];
+  }
+
+  List<String> _githubAssetNameCandidates(
+    String version,
+    List<String> supportedAbis,
+  ) {
+    final normalized = _normalizeVersion(version);
+    return [
+      if (supportedAbis.contains('arm64-v8a'))
+        'YurichConnect-android-arm64-v8a-v$normalized.apk',
+      if (supportedAbis.contains('armeabi-v7a'))
+        'YurichConnect-android-armeabi-v7a-v$normalized.apk',
+      if (supportedAbis.contains('x86_64'))
+        'YurichConnect-android-x86_64-v$normalized.apk',
+      _githubReleaseAssetName,
     ];
   }
 

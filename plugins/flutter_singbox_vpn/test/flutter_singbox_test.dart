@@ -119,6 +119,10 @@ class MockFlutterSingboxPlatform
   }
 
   @override
+  Future<bool> updateConnectionNotification(Map<String, Object?> state) =>
+      Future.value(true);
+
+  @override
   Future<bool> requestNotificationPermission() => Future.value(true);
 }
 

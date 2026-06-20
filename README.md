@@ -28,6 +28,14 @@ published and verified by Play Protect.
 - Two languages: Russian and English.
 - Built-in diagnostics report with sensitive values redacted before sharing.
 
+## Screenshots
+
+| Connection and Smart Route | Profile and network | Compact profile picker |
+| --- | --- | --- |
+| ![Yurich Connect Smart Route](promo/screenshots/yurich-connect-smart-route.png) | ![Yurich Connect profile and network](promo/screenshots/yurich-connect-profile-network.jpg) | ![Yurich Connect compact profiles](promo/screenshots/yurich-connect-compact-profiles.jpg) |
+
+![Yurich Connect contact section](promo/screenshots/yurich-connect-contact.jpg)
+
 ## Build
 
 Install Flutter and Android SDK, then run:
@@ -74,6 +82,12 @@ Yurich Connect Android — Android-клиент VPN в золотом стиле
 - Шторка Android со статусом подключения и трафиком.
 - Русский и английский интерфейс.
 - Диагностический отчёт с автоматическим скрытием чувствительных данных.
+
+### Скриншоты
+
+Скриншоты интерфейса лежат в [`promo/screenshots`](promo/screenshots): экран
+подключения, Smart Route, профиль и сеть, компактный список серверов и блок
+связи.
 
 ### Сборка
 

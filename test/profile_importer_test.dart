@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/services/profile_importer.dart';
 import 'package:aurum_vpn/src/services/sing_box_config_builder.dart';
+import 'package:aurum_vpn/src/services/smart_route_rules.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -22,7 +23,7 @@ void main() {
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
   });
 
-  test('imports VLESS XHTTP link as Xray-only profile', () async {
+  test('imports VLESS XHTTP link as unsupported legacy profile', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=xhttp&sni=example.com&path=%2Fxhttp#XHTTP';
 
@@ -34,17 +35,11 @@ void main() {
     expect(profile.outbound?['transport_options']['path'], '/xhttp');
     expect(
       () => SingBoxConfigBuilder().build(profile),
-      throwsA(
-        isA<UnsupportedError>().having(
-          (error) => error.message,
-          'message',
-          contains('Xray/libXray'),
-        ),
-      ),
+      throwsA(isA<UnsupportedError>()),
     );
   });
 
-  test('imports VLESS mKCP link as Xray-only profile', () async {
+  test('imports VLESS mKCP link as unsupported legacy profile', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:8446?security=none&type=mkcp&headerType=wechat-video#MKCP';
 
@@ -252,6 +247,156 @@ void main() {
     expect(httpFallbackProxy['server'], 'example.com');
     expect(httpFallbackProxy['username'], 'example.com');
     expect(httpFallbackProxy['password'], 'pass');
+  });
+
+  test('adds Smart Route direct rules for Russian apps and domains', () async {
+    const link =
+        'naive+https://user:pass@example.com:443#Naive%20Smart%20Route';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                smartRouteRuDirect: true,
+                smartRouteRuBypassPackages: const [
+                  'ru.gosuslugi',
+                  'ru.some.newbank',
+                  'ru.yandex.browser',
+                  'ru.yandex.searchplugin',
+                  'com.yandex.browser',
+                  'com.openai.chatgpt',
+                  'com.android.chrome',
+                  'com.google.android.gm',
+                  'com.google.android.gms',
+                  'com.google.android.apps.gemini',
+                  'com.google.android.youtube',
+                  'org.telegram.messenger',
+                ],
+              ),
+            )
+            as Map<String, dynamic>;
+
+    final inbounds = (config['inbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final tunInbound = inbounds.firstWhere(
+      (inbound) => inbound['type'] == 'tun',
+    );
+    final excludedPackages = (tunInbound['exclude_package'] as List)
+        .whereType<String>()
+        .toList();
+    expect(excludedPackages, contains('online.dnsai.ivanvpn'));
+    expect(excludedPackages, isNot(contains('ru.yandex.browser')));
+    expect(excludedPackages, isNot(contains('ru.yandex.searchplugin')));
+    expect(excludedPackages, isNot(contains('com.yandex.browser')));
+    expect(excludedPackages, isNot(contains('com.openai.chatgpt')));
+    expect(excludedPackages, isNot(contains('com.android.chrome')));
+    expect(excludedPackages, isNot(contains('com.google.android.gm')));
+    expect(excludedPackages, isNot(contains('com.google.android.gms')));
+    expect(excludedPackages, isNot(contains('com.google.android.apps.gemini')));
+    expect(excludedPackages, isNot(contains('com.google.android.youtube')));
+    expect(excludedPackages, isNot(contains('org.telegram.messenger')));
+    expect(excludedPackages, contains('ru.gosuslugi'));
+    expect(excludedPackages, contains('ru.some.newbank'));
+    expect(excludedPackages, contains('ru.sberbankmobile'));
+    expect(excludedPackages, contains('ru.vk.android'));
+
+    final routeRules =
+        ((config['route'] as Map<String, dynamic>)['rules'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+    final globalExactRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'proxy' &&
+          (rule['domain'] as List?)?.contains('chat.openai.com') == true &&
+          (rule['domain'] as List?)?.contains('gemini.google.com') == true &&
+          (rule['domain'] as List?)?.contains('accounts.google.com') == true &&
+          (rule['domain'] as List?)?.contains('mtalk.google.com') == true &&
+          (rule['domain'] as List?)?.contains('web.telegram.org') == true &&
+          (rule['domain'] as List?)?.contains('t.me') == true,
+    );
+    expect(globalExactRuleIndex, isNonNegative);
+
+    final globalProxyRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'proxy' &&
+          (rule['domain_suffix'] as List?)?.contains('chatgpt.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('openai.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('gemini.google.com') ==
+              true &&
+          (rule['domain_suffix'] as List?)?.contains('telegram.org') == true &&
+          (rule['domain_suffix'] as List?)?.contains('instagram.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('youtube.com') == true &&
+          (rule['domain_suffix'] as List?)?.contains('googlevideo.com') == true,
+    );
+    expect(globalProxyRuleIndex, isNonNegative);
+    expect(globalExactRuleIndex, lessThan(globalProxyRuleIndex));
+
+    final ruDirectRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'direct' &&
+          (rule['domain_suffix'] as List?)?.contains('ru') == true &&
+          (rule['domain_suffix'] as List?)?.contains('рф') == true,
+    );
+    expect(ruDirectRuleIndex, isNonNegative);
+    expect(globalProxyRuleIndex, lessThan(ruDirectRuleIndex));
+
+    expect(
+      routeRules.any(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            (rule['domain_suffix'] as List?)?.contains('ru') == true &&
+            (rule['domain_suffix'] as List?)?.contains('рф') == true,
+      ),
+      isTrue,
+    );
+    expect(
+      routeRules.any(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            (rule['domain'] as List?)?.contains('gosuslugi.ru') == true,
+      ),
+      isTrue,
+    );
+    expect(SmartRouteRules.ruDirectPackageNames, isNotEmpty);
+  });
+
+  test('builds Hiddify-like RU app bypass list with global app denylist', () {
+    final packages = SmartRouteRules.ruBypassPackages(const [
+      'ru.gosuslugi',
+      'ru.some.newbank',
+      'ru.yandex.browser',
+      'ru.yandex.searchplugin',
+      'com.yandex.browser',
+      'com.openai.chatgpt',
+      'com.microsoft.copilot',
+      'com.microsoft.bing',
+      'ai.perplexity.app.android',
+      'com.android.chrome',
+      'com.google.android.gm',
+      'com.google.android.gms',
+      'com.google.android.apps.gemini',
+      'org.telegram.messenger',
+      'com.google.android.youtube',
+    ]);
+
+    expect(packages, contains('ru.gosuslugi'));
+    expect(packages, contains('ru.some.newbank'));
+    expect(packages, contains('ru.sberbankmobile'));
+    expect(packages, isNot(contains('ru.yandex.browser')));
+    expect(packages, isNot(contains('ru.yandex.searchplugin')));
+    expect(packages, isNot(contains('com.yandex.browser')));
+    expect(packages, isNot(contains('com.openai.chatgpt')));
+    expect(packages, isNot(contains('com.microsoft.copilot')));
+    expect(packages, isNot(contains('com.microsoft.bing')));
+    expect(packages, isNot(contains('ai.perplexity.app.android')));
+    expect(packages, isNot(contains('com.android.chrome')));
+    expect(packages, isNot(contains('com.google.android.gm')));
+    expect(packages, isNot(contains('com.google.android.gms')));
+    expect(packages, isNot(contains('com.google.android.apps.gemini')));
+    expect(packages, isNot(contains('org.telegram.messenger')));
+    expect(packages, isNot(contains('com.google.android.youtube')));
   });
 
   test('keeps native Naive outbound and normalizes TLS fields', () {
@@ -523,6 +668,39 @@ void main() {
     expect(profiles, hasLength(2));
     expect(profiles.first.subscriptionSource, source);
     expect(profiles.first.originalInput, startsWith('naive+https://'));
+    expect(profiles.first.subscriptionExpiresAt, isNotNull);
+  });
+
+  test('tries links.txt for root /s/token/ subscriptions', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) {
+      if (request.uri.path.endsWith('/links.txt')) {
+        request.response.headers.set(
+          'subscription-userinfo',
+          'upload=0; download=0; total=0; expire=1893456000',
+        );
+        request.response.write(
+          'naive+https://user:pass@example.com:443#Naive\n'
+          'hy2://secret@example.com:443#Turbo',
+        );
+      } else {
+        request.response
+          ..headers.contentType = ContentType.html
+          ..write('<html><body>subscription landing</body></html>');
+      }
+      unawaited(request.response.close());
+    });
+
+    final source = 'http://${server.address.host}:${server.port}/s/token/';
+    final profiles = await ProfileImporter().importFromText(source);
+
+    expect(profiles, hasLength(2));
+    expect(profiles.map((profile) => profile.kind), [
+      VpnProfileKind.naive,
+      VpnProfileKind.hysteria2,
+    ]);
+    expect(profiles.first.subscriptionSource, source);
     expect(profiles.first.subscriptionExpiresAt, isNotNull);
   });
 

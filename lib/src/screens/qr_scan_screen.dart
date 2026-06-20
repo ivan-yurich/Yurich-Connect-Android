@@ -59,7 +59,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
               child: const Padding(
                 padding: EdgeInsets.all(14),
                 child: Text(
-                  'Наведи камеру на QR с подпиской, vless://, naive+https:// или hy2:// ссылкой.',
+                  'Наведи камеру на QR с подпиской, VLESS Reality, NaiveProxy или Hysteria ссылкой.',
                   textAlign: TextAlign.center,
                 ),
               ),

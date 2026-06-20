@@ -132,6 +132,14 @@ abstract class FlutterSingboxPlatform extends PlatformInterface {
     );
   }
 
+  /// Update the persistent VPN foreground notification with the current
+  /// connection snapshot.
+  Future<bool> updateConnectionNotification(Map<String, Object?> state) {
+    throw UnimplementedError(
+      'updateConnectionNotification() has not been implemented.',
+    );
+  }
+
   /// Ask Android 13+ for notification permission so the VPN foreground
   /// notification is visible in the notification shade.
   Future<bool> requestNotificationPermission() {

@@ -3,6 +3,7 @@ package com.tecclub.flutter_singbox.constant
 object Action {
     const val SERVICE = "com.tecclub.flutter_singbox.SERVICE"
     const val SERVICE_CLOSE = "com.tecclub.flutter_singbox.SERVICE_CLOSE"
+    const val SERVICE_RESTART = "com.tecclub.flutter_singbox.SERVICE_RESTART"
     const val OPEN_URL = "com.tecclub.flutter_singbox.SERVICE_OPEN_URL"
     const val BROADCAST_ALERT = "com.tecclub.flutter_singbox.BROADCAST_ALERT"
     const val BROADCAST_STATUS_CHANGED = "com.tecclub.flutter_singbox.BROADCAST_STATUS_CHANGED"

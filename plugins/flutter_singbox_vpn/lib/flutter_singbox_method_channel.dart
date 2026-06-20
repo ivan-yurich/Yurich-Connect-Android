@@ -208,6 +208,15 @@ class MethodChannelFlutterSingbox extends FlutterSingboxPlatform {
   }
 
   @override
+  Future<bool> updateConnectionNotification(Map<String, Object?> state) async {
+    final result = await methodChannel.invokeMethod<bool>(
+      'updateConnectionNotification',
+      {'state': state},
+    );
+    return result ?? false;
+  }
+
+  @override
   Future<bool> requestNotificationPermission() async {
     final result = await methodChannel.invokeMethod<bool>(
       'requestNotificationPermission',

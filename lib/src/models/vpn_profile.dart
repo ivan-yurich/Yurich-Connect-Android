@@ -20,6 +20,17 @@ extension VpnProfileKindLabel on VpnProfileKind {
     VpnProfileKind.hysteria => 'Hysteria',
     VpnProfileKind.singBoxConfig => 'Sing-box',
   };
+
+  bool get isClientSupported => switch (this) {
+    VpnProfileKind.vlessReality ||
+    VpnProfileKind.naive ||
+    VpnProfileKind.hysteria2 ||
+    VpnProfileKind.hysteria => true,
+    VpnProfileKind.vlessTls ||
+    VpnProfileKind.vlessXhttp ||
+    VpnProfileKind.vlessMkcp ||
+    VpnProfileKind.singBoxConfig => false,
+  };
 }
 
 class VpnProfile {

@@ -162,6 +162,12 @@ class FlutterSingbox {
     return FlutterSingboxPlatform.instance.getNotificationDescription();
   }
 
+  /// Update the persistent VPN foreground notification with the latest
+  /// connection state.
+  Future<bool> updateConnectionNotification(Map<String, Object?> state) {
+    return FlutterSingboxPlatform.instance.updateConnectionNotification(state);
+  }
+
   /// Request notification permission on Android 13+.
   Future<bool> requestNotificationPermission() {
     return FlutterSingboxPlatform.instance.requestNotificationPermission();

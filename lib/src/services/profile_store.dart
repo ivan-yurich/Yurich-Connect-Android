@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 
 class ProfileStore {
@@ -9,9 +10,13 @@ class ProfileStore {
   static const _selectedProfileKey = 'selectedProfileId';
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
+  static const _smartRouteRuDirectKey = 'smartRouteRuDirect';
   static const _subscriptionReminderStampKey = 'subscriptionReminderStamp';
+  static const _deletedProfileIdsBySubscriptionSourceKey =
+      'deletedProfileIdsBySubscriptionSource';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
+  static const _profileStabilityKey = 'profileStabilityStats';
 
   Future<List<VpnProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -33,6 +38,103 @@ class ProfileStore {
       profiles.map((profile) => profile.toJson()).toList(),
     );
     await prefs.setString(_profilesKey, encoded);
+  }
+
+  Future<Map<String, Set<String>>>
+  loadDeletedProfileIdsBySubscriptionSource() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_deletedProfileIdsBySubscriptionSourceKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    return decoded.map((key, value) {
+      final ids = value is List
+          ? value.whereType<String>().where((id) => id.isNotEmpty).toSet()
+          : <String>{};
+      return MapEntry('$key', ids);
+    })..removeWhere((key, value) => key.isEmpty || value.isEmpty);
+  }
+
+  Future<void> rememberDeletedSubscriptionProfile(VpnProfile profile) async {
+    final source = subscriptionSourceKeyFor(profile);
+    if (source == null || profile.id.isEmpty) {
+      return;
+    }
+
+    final deletedBySource = Map<String, Set<String>>.from(
+      await loadDeletedProfileIdsBySubscriptionSource(),
+    );
+    final deletedIds = deletedBySource.putIfAbsent(source, () => <String>{});
+    deletedIds.add(profile.id);
+    await _saveDeletedProfileIdsBySubscriptionSource(deletedBySource);
+  }
+
+  Future<void> clearDeletedProfilesForSubscriptionSource(String source) async {
+    final sourceKey = subscriptionSourceKeyFromText(source);
+    if (sourceKey == null) {
+      return;
+    }
+
+    final deletedBySource = Map<String, Set<String>>.from(
+      await loadDeletedProfileIdsBySubscriptionSource(),
+    );
+    if (deletedBySource.remove(sourceKey) == null) {
+      return;
+    }
+    await _saveDeletedProfileIdsBySubscriptionSource(deletedBySource);
+  }
+
+  Future<void> _saveDeletedProfileIdsBySubscriptionSource(
+    Map<String, Set<String>> deletedBySource,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, List<String>>{};
+    for (final entry in deletedBySource.entries) {
+      final source = subscriptionSourceKeyFromText(entry.key);
+      if (source == null) {
+        continue;
+      }
+      final ids = entry.value.where((id) => id.isNotEmpty).toSet().toList()
+        ..sort();
+      if (ids.isNotEmpty) {
+        normalized[source] = ids;
+      }
+    }
+
+    if (normalized.isEmpty) {
+      await prefs.remove(_deletedProfileIdsBySubscriptionSourceKey);
+      return;
+    }
+
+    await prefs.setString(
+      _deletedProfileIdsBySubscriptionSourceKey,
+      jsonEncode(normalized),
+    );
+  }
+
+  static String? subscriptionSourceKeyFor(VpnProfile profile) {
+    return subscriptionSourceKeyFromText(
+      profile.subscriptionSource ?? profile.originalInput,
+    );
+  }
+
+  static String? subscriptionSourceKeyFromText(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return null;
+    }
+    return trimmed;
   }
 
   Future<String?> loadSelectedProfileId() async {
@@ -69,6 +171,16 @@ class ProfileStore {
     await prefs.setBool(_autoConnectKey, enabled);
   }
 
+  Future<bool> loadSmartRouteRuDirect() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_smartRouteRuDirectKey) ?? false;
+  }
+
+  Future<void> saveSmartRouteRuDirect(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_smartRouteRuDirectKey, enabled);
+  }
+
   Future<String?> loadSubscriptionReminderStamp() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_subscriptionReminderStampKey);
@@ -87,5 +199,52 @@ class ProfileStore {
   Future<void> saveSplitTunnelExcludedProcesses(List<String> processes) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_splitTunnelExcludedProcessesKey, processes);
+  }
+
+  Future<Map<String, ProfileStabilityStats>> loadProfileStabilityStats() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_profileStabilityKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    final stats = <String, ProfileStabilityStats>{};
+    for (final entry in decoded.entries) {
+      final profileId = '${entry.key}'.trim();
+      final value = entry.value;
+      if (profileId.isEmpty || value is! Map) {
+        continue;
+      }
+      stats[profileId] = ProfileStabilityStats.fromJson(
+        value.cast<String, dynamic>(),
+      );
+    }
+    return stats;
+  }
+
+  Future<void> saveProfileStabilityStats(
+    Map<String, ProfileStabilityStats> stats,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, Map<String, dynamic>>{};
+    for (final entry in stats.entries) {
+      final profileId = entry.key.trim();
+      if (profileId.isEmpty) {
+        continue;
+      }
+      normalized[profileId] = entry.value.toJson();
+    }
+
+    if (normalized.isEmpty) {
+      await prefs.remove(_profileStabilityKey);
+      return;
+    }
+
+    await prefs.setString(_profileStabilityKey, jsonEncode(normalized));
   }
 }

@@ -29,6 +29,7 @@ import androidx.lifecycle.Observer
 import com.tecclub.flutter_singbox.bg.BoxService
 import com.tecclub.flutter_singbox.bg.ServiceConnection
 import com.tecclub.flutter_singbox.bg.ServiceNotification
+import com.tecclub.flutter_singbox.bg.VpnNotificationHelper
 import com.tecclub.flutter_singbox.database.Settings
 import com.tecclub.flutter_singbox.config.SimpleConfigManager
 import com.tecclub.flutter_singbox.constant.Action
@@ -36,12 +37,15 @@ import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Status
 import com.tecclub.flutter_singbox.constant.ServiceMode
 import com.tecclub.flutter_singbox.constant.TrafficStats
+import com.tecclub.flutter_singbox.model.ConnectionStatus
+import com.tecclub.flutter_singbox.model.ConnectionUiState
 import go.Seq
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
 import java.io.File
 import com.tecclub.flutter_singbox.utils.StatusClient
 import com.tecclub.flutter_singbox.utils.LogClient
+import com.tecclub.flutter_singbox.utils.TrafficFormatter
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -216,7 +220,7 @@ class FlutterSingboxPlugin :
     
     // Job for stop cleanup - can be cancelled when starting new connection
     private var stopCleanupJob: kotlinx.coroutines.Job? = null
-    
+
     // Traffic stats
     private var _trafficStats = MutableStateFlow<Map<String, Any>>(
         mapOf(
@@ -235,7 +239,15 @@ class FlutterSingboxPlugin :
     // Session data tracking
     private var sessionStartUplinkTotal = 0L
     private var sessionStartDownlinkTotal = 0L
+    private var sessionStartUidTxBytes = -1L
+    private var sessionStartUidRxBytes = -1L
+    private var lastUidTxBytes = -1L
+    private var lastUidRxBytes = -1L
+    private var lastUidTrafficSampleAt = 0L
     private var lastNotificationUpdateAt = 0L
+    private var sessionStartedAt = 0L
+    private var connectionUiState = ConnectionUiState.disconnected()
+    private val vpnNotificationHelper by lazy { VpnNotificationHelper(context) }
     
     // VPN permission request code
     private val VPN_REQUEST_CODE = 24
@@ -303,6 +315,14 @@ class FlutterSingboxPlugin :
                 // Connect or disconnect clients based on status
                 when (status) {
                     Status.Started -> {
+                        if (sessionStartedAt == 0L) {
+                            sessionStartedAt = System.currentTimeMillis()
+                        }
+                        connectionUiState = connectionUiState.copy(
+                            status = ConnectionStatus.Connected,
+                            sessionDuration = currentSessionDuration()
+                        )
+                        vpnNotificationHelper.updateNotification(connectionUiState)
                         if (!statusClient.isConnected()) {
                             statusClient.connect()
                         }
@@ -311,10 +331,19 @@ class FlutterSingboxPlugin :
                         }
                     }
                     Status.Stopped -> {
+                        sessionStartedAt = 0L
+                        connectionUiState = ConnectionUiState.disconnected()
                         // Clients will be disconnected by stopVPN or onServiceStatusChanged
                     }
                     else -> {
-                        // Starting/Stopping - no action
+                        connectionUiState = connectionUiState.copy(
+                            status = if (status == Status.Starting) {
+                                ConnectionStatus.Connecting
+                            } else {
+                                ConnectionStatus.Disconnected
+                            }
+                        )
+                        vpnNotificationHelper.updateNotification(connectionUiState)
                     }
                 }
                 
@@ -680,6 +709,10 @@ class FlutterSingboxPlugin :
                 val description = call.argument<String>("description") ?: "Connected"
                 setNotificationDescription(description, result)
             }
+            "updateConnectionNotification" -> {
+                val state = call.argument<Map<String, Any?>>("state")
+                updateConnectionNotification(state, result)
+            }
             "requestNotificationPermission" -> {
                 requestNotificationPermission(result)
             }
@@ -700,7 +733,7 @@ class FlutterSingboxPlugin :
             }
         }
     }
-    
+
     private fun setNotificationTitle(title: String, result: Result) {
         try {
             SimpleConfigManager.setNotificationTitle(title)
@@ -734,6 +767,21 @@ class FlutterSingboxPlugin :
             result.success(description)
         } catch (e: Exception) {
             result.error("NOTIFICATION_ERROR", e.message, null)
+        }
+    }
+
+    private fun updateConnectionNotification(state: Map<*, *>?, result: Result) {
+        try {
+            connectionUiState = ConnectionUiState.fromMap(state)
+            if (
+                connectionUiState.status != ConnectionStatus.Disconnected ||
+                _vpnStatus.value != Status.Stopped
+            ) {
+                vpnNotificationHelper.updateNotification(connectionUiState)
+            }
+            result.success(true)
+        } catch (e: Exception) {
+            result.error("NOTIFICATION_UPDATE_ERROR", e.message, null)
         }
     }
 
@@ -909,6 +957,14 @@ class FlutterSingboxPlugin :
         try {
             // Update status to Starting
             _vpnStatus.value = Status.Starting
+            connectionUiState = connectionUiState.copy(
+                status = ConnectionStatus.Connecting,
+                uploadSpeed = "0 B/s",
+                downloadSpeed = "0 B/s",
+                totalTraffic = "0 B",
+                sessionDuration = null
+            )
+            vpnNotificationHelper.updateNotification(connectionUiState)
             android.util.Log.e("FlutterSingboxPlugin", "Set VPN status to Starting")
             sendStatusUpdate(Status.Starting)
             SimpleConfigManager.setStartedByUser(true)
@@ -916,6 +972,7 @@ class FlutterSingboxPlugin :
             // Reset session traffic counters
             sessionStartUplinkTotal = 0
             sessionStartDownlinkTotal = 0
+            resetUidTrafficSession()
             
             // Start the service using proper method
             android.util.Log.e("FlutterSingboxPlugin", "Calling startService method")
@@ -1228,6 +1285,15 @@ class FlutterSingboxPlugin :
         when (status) {
             Status.Started -> {
                 android.util.Log.e("FlutterSingboxPlugin", "Service started, connecting status client")
+                sessionStartedAt = System.currentTimeMillis()
+                connectionUiState = connectionUiState.copy(
+                    status = ConnectionStatus.Connected,
+                    uploadSpeed = "0 B/s",
+                    downloadSpeed = "0 B/s",
+                    totalTraffic = "0 B",
+                    sessionDuration = "00:00:00"
+                )
+                vpnNotificationHelper.updateNotification(connectionUiState)
                 
                 // Connect status client if not already connected
                 if (!statusClient.isConnected()) {
@@ -1242,11 +1308,14 @@ class FlutterSingboxPlugin :
                 // Reset session traffic counters when connection starts
                 sessionStartUplinkTotal = 0
                 sessionStartDownlinkTotal = 0
+                resetUidTrafficSession()
             }
             Status.Stopped -> {
                 android.util.Log.e("FlutterSingboxPlugin", "Service stopped, disconnecting status client")
+                sessionStartedAt = 0L
                 statusClient.disconnect()
                 logClient.disconnect()
+                connectionUiState = ConnectionUiState.disconnected()
                 
                 // Reset traffic stats when stopped
                 _trafficStats.value = mapOf<String, Any>(
@@ -1267,6 +1336,7 @@ class FlutterSingboxPlugin :
                     "formattedSessionDownlink" to "0 B",
                     "formattedSessionTotal" to "0 B"
                 )
+                resetUidTrafficSession()
             }
             else -> {
                 // Starting or Stopping - no action needed
@@ -1286,6 +1356,8 @@ class FlutterSingboxPlugin :
     
     // StatusClient.Handler implementation
     override fun onStatusUpdate(status: StatusMessage) {
+        val uidSample = sampleUidTraffic()
+
         // When first status update comes, set session start values
         if (sessionStartUplinkTotal == 0L && sessionStartDownlinkTotal == 0L && status.uplinkTotal > 0) {
             sessionStartUplinkTotal = status.uplinkTotal
@@ -1293,24 +1365,38 @@ class FlutterSingboxPlugin :
         }
         
         // Calculate session data (data transferred since connection started)
-        val sessionUplink = status.uplinkTotal - sessionStartUplinkTotal
-        val sessionDownlink = status.downlinkTotal - sessionStartDownlinkTotal
+        val singBoxSessionUplink = (status.uplinkTotal - sessionStartUplinkTotal).coerceAtLeast(0L)
+        val singBoxSessionDownlink = (status.downlinkTotal - sessionStartDownlinkTotal).coerceAtLeast(0L)
+        val sessionUplink = if (singBoxSessionUplink > 0L || status.uplink > 0L) {
+            singBoxSessionUplink
+        } else {
+            uidSample.sessionTx
+        }
+        val sessionDownlink = if (singBoxSessionDownlink > 0L || status.downlink > 0L) {
+            singBoxSessionDownlink
+        } else {
+            uidSample.sessionRx
+        }
+        val uplinkSpeed = if (status.uplink > 0L) status.uplink else uidSample.txSpeed
+        val downlinkSpeed = if (status.downlink > 0L) status.downlink else uidSample.rxSpeed
+        val uplinkTotal = if (status.uplinkTotal > 0L) status.uplinkTotal else uidSample.txTotal
+        val downlinkTotal = if (status.downlinkTotal > 0L) status.downlinkTotal else uidSample.rxTotal
         
         // Update traffic stats
         val stats = mapOf(
-            "uplinkSpeed" to status.uplink,
-            "downlinkSpeed" to status.downlink,
-            "uplinkTotal" to status.uplinkTotal,
-            "downlinkTotal" to status.downlinkTotal,
+            "uplinkSpeed" to uplinkSpeed,
+            "downlinkSpeed" to downlinkSpeed,
+            "uplinkTotal" to uplinkTotal,
+            "downlinkTotal" to downlinkTotal,
             "connectionsIn" to status.connectionsIn,
             "connectionsOut" to status.connectionsOut,
             "sessionUplink" to sessionUplink,
             "sessionDownlink" to sessionDownlink,
             "sessionTotal" to (sessionUplink + sessionDownlink),
-            "formattedUplinkSpeed" to TrafficStats.formatBytes(status.uplink) + "/s",
-            "formattedDownlinkSpeed" to TrafficStats.formatBytes(status.downlink) + "/s",
-            "formattedUplinkTotal" to TrafficStats.formatBytes(status.uplinkTotal),
-            "formattedDownlinkTotal" to TrafficStats.formatBytes(status.downlinkTotal),
+            "formattedUplinkSpeed" to TrafficStats.formatBytes(uplinkSpeed) + "/s",
+            "formattedDownlinkSpeed" to TrafficStats.formatBytes(downlinkSpeed) + "/s",
+            "formattedUplinkTotal" to TrafficStats.formatBytes(uplinkTotal),
+            "formattedDownlinkTotal" to TrafficStats.formatBytes(downlinkTotal),
             "formattedSessionUplink" to TrafficStats.formatBytes(sessionUplink),
             "formattedSessionDownlink" to TrafficStats.formatBytes(sessionDownlink),
             "formattedSessionTotal" to TrafficStats.formatBytes(sessionUplink + sessionDownlink)
@@ -1326,6 +1412,74 @@ class FlutterSingboxPlugin :
         }
     }
 
+    private data class UidTrafficSample(
+        val txTotal: Long,
+        val rxTotal: Long,
+        val txSpeed: Long,
+        val rxSpeed: Long,
+        val sessionTx: Long,
+        val sessionRx: Long
+    )
+
+    private fun resetUidTrafficSession() {
+        val tx = readUidTxBytes()
+        val rx = readUidRxBytes()
+        sessionStartUidTxBytes = tx
+        sessionStartUidRxBytes = rx
+        lastUidTxBytes = tx
+        lastUidRxBytes = rx
+        lastUidTrafficSampleAt = System.currentTimeMillis()
+    }
+
+    private fun sampleUidTraffic(): UidTrafficSample {
+        val now = System.currentTimeMillis()
+        val tx = readUidTxBytes()
+        val rx = readUidRxBytes()
+        if (tx < 0L || rx < 0L) {
+            return UidTrafficSample(0L, 0L, 0L, 0L, 0L, 0L)
+        }
+
+        if (sessionStartUidTxBytes < 0L || sessionStartUidRxBytes < 0L) {
+            sessionStartUidTxBytes = tx
+            sessionStartUidRxBytes = rx
+        }
+
+        val elapsedMs = (now - lastUidTrafficSampleAt).coerceAtLeast(1L)
+        val txSpeed = if (lastUidTxBytes >= 0L) {
+            ((tx - lastUidTxBytes).coerceAtLeast(0L) * 1000L) / elapsedMs
+        } else {
+            0L
+        }
+        val rxSpeed = if (lastUidRxBytes >= 0L) {
+            ((rx - lastUidRxBytes).coerceAtLeast(0L) * 1000L) / elapsedMs
+        } else {
+            0L
+        }
+
+        lastUidTxBytes = tx
+        lastUidRxBytes = rx
+        lastUidTrafficSampleAt = now
+
+        return UidTrafficSample(
+            txTotal = tx,
+            rxTotal = rx,
+            txSpeed = txSpeed,
+            rxSpeed = rxSpeed,
+            sessionTx = (tx - sessionStartUidTxBytes).coerceAtLeast(0L),
+            sessionRx = (rx - sessionStartUidRxBytes).coerceAtLeast(0L)
+        )
+    }
+
+    private fun readUidTxBytes(): Long {
+        val value = android.net.TrafficStats.getUidTxBytes(context.applicationInfo.uid)
+        return if (value == android.net.TrafficStats.UNSUPPORTED.toLong()) -1L else value
+    }
+
+    private fun readUidRxBytes(): Long {
+        val value = android.net.TrafficStats.getUidRxBytes(context.applicationInfo.uid)
+        return if (value == android.net.TrafficStats.UNSUPPORTED.toLong()) -1L else value
+    }
+
     private fun updateTrafficNotification(stats: Map<String, Any>) {
         if (_vpnStatus.value != Status.Started) {
             return
@@ -1337,40 +1491,21 @@ class FlutterSingboxPlugin :
         }
         lastNotificationUpdateAt = now
 
-        val text = "↑ ${stats["formattedUplinkSpeed"]}  ↓ ${stats["formattedDownlinkSpeed"]}  Σ ${stats["formattedSessionTotal"]}"
-        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        val pendingIntent = launchIntent?.let {
-            android.app.PendingIntent.getActivity(
-                context,
-                0,
-                it,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-            )
-        }
+        connectionUiState = connectionUiState.copy(
+            status = ConnectionStatus.Connected,
+            uploadSpeed = stats["formattedUplinkSpeed"]?.toString() ?: "0 B/s",
+            downloadSpeed = stats["formattedDownlinkSpeed"]?.toString() ?: "0 B/s",
+            totalTraffic = stats["formattedSessionTotal"]?.toString() ?: "0 B",
+            sessionDuration = currentSessionDuration()
+        )
+        vpnNotificationHelper.updateNotification(connectionUiState)
+    }
 
-        val notification = NotificationCompat.Builder(context, ServiceNotification.CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification_shield)
-            .setContentTitle(SimpleConfigManager.getNotificationTitle())
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setOnlyAlertOnce(true)
-            .setOngoing(true)
-            .setSilent(true)
-            .setShowWhen(false)
-            .setLocalOnly(true)
-            .apply {
-                if (pendingIntent != null) {
-                    setContentIntent(pendingIntent)
-                }
-            }
-            .build()
-
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(ServiceNotification.NOTIFICATION_ID, notification)
+    private fun currentSessionDuration(): String? {
+        val startedAt = sessionStartedAt
+        if (startedAt <= 0L) return connectionUiState.sessionDuration
+        val seconds = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L) / 1000L
+        return TrafficFormatter.formatDuration(seconds)
     }
     
     // Per-App Tunneling methods

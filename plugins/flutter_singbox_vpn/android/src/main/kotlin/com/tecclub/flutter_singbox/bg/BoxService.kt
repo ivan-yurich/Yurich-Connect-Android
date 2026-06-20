@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -26,10 +27,11 @@ import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.PlatformInterface
 import io.nekohasekai.libbox.SystemProxyStatus
-import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -37,6 +39,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 class BoxService(
     private val service: Service, private val platformInterface: PlatformInterface
@@ -48,10 +52,13 @@ class BoxService(
         private const val WATCHDOG_MIXED_PROXY_PORT = 20808
         private const val WATCHDOG_INITIAL_GRACE_MS = 30_000L
         private const val WATCHDOG_INTERVAL_MS = 60_000L
+        private const val WATCHDOG_IDLE_INTERVAL_MS = 90_000L
         private const val WATCHDOG_RESTART_COOLDOWN_MS = 90_000L
         private const val WATCHDOG_FAILURE_LIMIT = 3
         private const val KEEPER_WAKE_LOCK_MS = 10 * 60 * 1000L
         private const val STICKY_RESTART_DELAY_MS = 2_500L
+        private const val NETWORK_SETTLE_DELAY_MS = 6_000L
+        private const val WAKE_SETTLE_DELAY_MS = 3_000L
 
         fun start() {
             val intent = runBlocking {
@@ -82,6 +89,7 @@ class BoxService(
         ServiceNotification(status, service) 
     }
     private var commandServer: CommandServer? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var watchdogJob: Job? = null
     private var watchdogFailures = 0
     private var watchdogMixedProxyEnabled = false
@@ -96,18 +104,39 @@ class BoxService(
                     stopService()
                 }
 
+                Action.SERVICE_RESTART -> {
+                    serviceScope.launch {
+                        if (status.value == Status.Started) {
+                            restartFromWatchdog("notification-action")
+                        } else if (status.value == Status.Stopped) {
+                            onStartCommand()
+                        }
+                    }
+                }
+
 
                 PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         serviceUpdateIdleMode()
                     }
                     refreshKeeperWakeLock("idle-mode")
+                    handleNetworkWakeEvent("idle-mode")
+                }
+
+                ConnectivityManager.CONNECTIVITY_ACTION,
+                Intent.ACTION_SCREEN_ON,
+                Intent.ACTION_USER_PRESENT -> {
+                    handleNetworkWakeEvent(intent.action ?: "network-wake")
                 }
             }
         }
     }
 
     private fun startCommandServer() {
+        if (commandServer != null) {
+            android.util.Log.d("BoxService", "Command server already started")
+            return
+        }
         val commandServer = CommandServer(this, platformInterface)
         commandServer.start()
         this.commandServer = commandServer
@@ -247,14 +276,12 @@ class BoxService(
         refreshKeeperWakeLock("device-idle")
     }
 
-    @OptIn(DelicateCoroutinesApi::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun startTrafficMonitor() {
         // Nothing to do here - we're using StatusClient to get traffic updates
         // This method is kept for backwards compatibility
         android.util.Log.d("BoxService", "Traffic monitoring is now handled by StatusClient")
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
     private fun stopService() {
         if (status.value != Status.Started && status.value != Status.Starting) return
         stopNativeWatchdog()
@@ -275,7 +302,7 @@ class BoxService(
             receiverRegistered = false
         }
         notification.stop()
-        GlobalScope.launch(Dispatchers.IO) {
+        serviceScope.launch {
             val pfd = fileDescriptor
             if (pfd != null) {
                 pfd.close()
@@ -353,7 +380,6 @@ class BoxService(
         }
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
     @Suppress("SameReturnValue")
     internal fun onStartCommand(): Int {
         Application.initializeIfNeeded(service.applicationContext)
@@ -386,6 +412,10 @@ class BoxService(
             android.util.Log.e("BoxService", "Registering broadcast receivers")
             ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
                 addAction(Action.SERVICE_CLOSE)
+                addAction(Action.SERVICE_RESTART)
+                addAction(ConnectivityManager.CONNECTIVITY_ACTION)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
                 }
@@ -394,7 +424,7 @@ class BoxService(
         }
 
         android.util.Log.e("BoxService", "Launching IO coroutine for service startup")
-        GlobalScope.launch(Dispatchers.IO) {
+        serviceScope.launch {
             try {
                 android.util.Log.e("BoxService", "Ensuring libbox initialization")
                 Application.ensureLibboxInitialized(service.applicationContext)
@@ -421,6 +451,7 @@ class BoxService(
             SimpleConfigManager.getStartedByUser() && SimpleConfigManager.hasValidConfig()
         }.getOrDefault(false)
         stopNativeWatchdog()
+        serviceScope.cancel()
         releaseKeeperWakeLock()
         runCatching {
             if (receiverRegistered) {
@@ -501,7 +532,7 @@ class BoxService(
             return
         }
 
-        watchdogJob = GlobalScope.launch(Dispatchers.IO) {
+        watchdogJob = serviceScope.launch {
             delay(WATCHDOG_INITIAL_GRACE_MS)
             while (isActive && status.value == Status.Started) {
                 refreshKeeperWakeLock("watchdog")
@@ -535,7 +566,7 @@ class BoxService(
                     }
                 }
 
-                delay(WATCHDOG_INTERVAL_MS)
+                delay(watchdogDelayMs())
             }
         }
     }
@@ -545,6 +576,41 @@ class BoxService(
         watchdogJob = null
         watchdogFailures = 0
         watchdogRestarting = false
+    }
+
+    private fun handleNetworkWakeEvent(reason: String) {
+        if (status.value != Status.Started || watchdogRestarting) {
+            return
+        }
+
+        serviceScope.launch {
+            android.util.Log.d("BoxService", "Watchdog: network/wake event $reason")
+            refreshKeeperWakeLock(reason)
+            commandServer?.wake()
+            runCatching {
+                DefaultNetworkMonitor.stop()
+                DefaultNetworkMonitor.start()
+            }.onFailure {
+                android.util.Log.w("BoxService", "Watchdog: network monitor refresh failed", it)
+            }
+
+            if (watchdogJob?.isActive != true) {
+                startNativeWatchdog()
+            }
+
+            if (!watchdogMixedProxyEnabled) {
+                return@launch
+            }
+
+            delay(settleDelayFor(reason))
+            if (status.value != Status.Started || !hasDefaultNetwork()) {
+                return@launch
+            }
+
+            if (!probeMixedProxy()) {
+                restartFromWatchdog(reason)
+            }
+        }
     }
 
     private suspend fun restartFromWatchdog(reason: String) {
@@ -585,35 +651,61 @@ class BoxService(
 
     private fun probeMixedProxy(): Boolean {
         val targets = arrayOf(
-            "cp.cloudflare.com" to 443,
-            "www.gstatic.com" to 443
+            "cp.cloudflare.com" to "/generate_204",
+            "www.gstatic.com" to "/generate_204",
+            "connectivitycheck.gstatic.com" to "/generate_204"
         )
 
-        for ((host, port) in targets) {
-            var socket: Socket? = null
+        for ((host, path) in targets) {
+            var rawSocket: Socket? = null
+            var tlsSocket: SSLSocket? = null
             try {
-                socket = Socket()
-                socket.connect(
+                rawSocket = Socket()
+                rawSocket.connect(
                     InetSocketAddress("127.0.0.1", WATCHDOG_MIXED_PROXY_PORT),
                     2500
                 )
-                socket.soTimeout = 3500
-                val request = "CONNECT $host:$port HTTP/1.1\r\n" +
-                    "Host: $host:$port\r\n" +
+                rawSocket.soTimeout = 3500
+                val connectRequest = "CONNECT $host:443 HTTP/1.1\r\n" +
+                    "Host: $host:443\r\n" +
                     "Connection: close\r\n\r\n"
-                socket.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
-                socket.getOutputStream().flush()
-                val statusLine = socket.getInputStream()
+                rawSocket.getOutputStream().write(connectRequest.toByteArray(Charsets.US_ASCII))
+                rawSocket.getOutputStream().flush()
+                val connectReader = rawSocket.getInputStream().bufferedReader(Charsets.US_ASCII)
+                val connectStatus = connectReader.readLine()
+                if (connectStatus?.contains(" 200 ") != true) {
+                    android.util.Log.w("BoxService", "Watchdog CONNECT status: $connectStatus")
+                    continue
+                }
+                while (true) {
+                    val header = connectReader.readLine() ?: break
+                    if (header.isEmpty()) break
+                }
+
+                tlsSocket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+                    .createSocket(rawSocket, host, 443, true) as SSLSocket
+                tlsSocket.soTimeout = 4500
+                tlsSocket.startHandshake()
+                val request = "GET $path HTTP/1.1\r\n" +
+                    "Host: $host\r\n" +
+                    "User-Agent: YurichConnectNativeKeeper/1\r\n" +
+                    "Connection: close\r\n\r\n"
+                tlsSocket.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
+                tlsSocket.getOutputStream().flush()
+                val responseStatus = tlsSocket.getInputStream()
                     .bufferedReader(Charsets.US_ASCII)
                     .readLine()
-                if (statusLine?.contains(" 200 ") == true) {
+                if (responseStatus?.startsWith("HTTP/") == true &&
+                    (responseStatus.contains(" 204 ") || responseStatus.contains(" 200 "))
+                ) {
                     return true
                 }
-                android.util.Log.w("BoxService", "Watchdog probe HTTP status: $statusLine")
+                android.util.Log.w("BoxService", "Watchdog HTTPS status: $responseStatus")
             } catch (e: Exception) {
                 android.util.Log.w("BoxService", "Watchdog probe failed for $host: ${e.message}")
             } finally {
-                runCatching { socket?.close() }
+                runCatching { tlsSocket?.close() }
+                runCatching { rawSocket?.close() }
             }
         }
 
@@ -632,6 +724,32 @@ class BoxService(
             }
         }
         return false
+    }
+
+    private fun watchdogDelayMs(): Long {
+        return if (isDeviceIdleMode()) WATCHDOG_IDLE_INTERVAL_MS else WATCHDOG_INTERVAL_MS
+    }
+
+    private fun settleDelayFor(reason: String): Long {
+        return if (
+            reason.contains("CONNECTIVITY_ACTION") ||
+            reason.contains("network", ignoreCase = true) ||
+            reason.contains("idle", ignoreCase = true)
+        ) {
+            NETWORK_SETTLE_DELAY_MS
+        } else {
+            WAKE_SETTLE_DELAY_MS
+        }
+    }
+
+    private fun isDeviceIdleMode(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return false
+        }
+        return runCatching {
+            val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerManager.isDeviceIdleMode
+        }.getOrDefault(false)
     }
 
     private fun refreshKeeperWakeLock(reason: String) {

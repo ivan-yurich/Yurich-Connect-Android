@@ -41,6 +41,11 @@ class AndroidVpnEngine implements VpnEngine {
   }
 
   @override
+  Future<bool> updateConnectionNotification(Map<String, Object?> state) {
+    return _singBox.updateConnectionNotification(state);
+  }
+
+  @override
   Future<bool> requestNotificationPermission() {
     return _singBox.requestNotificationPermission();
   }

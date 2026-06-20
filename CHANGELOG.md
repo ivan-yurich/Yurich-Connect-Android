@@ -1,5 +1,190 @@
 # Changelog
 
+## 1.0.79 - 2026-06-20
+
+- Strengthened the native VPN keeper for night idle and mobile network changes.
+- Added a cellular/idle settle delay before native health probes to avoid
+  premature reconnects while LTE is switching towers or waking from Doze.
+- Android idle-mode events now trigger a soft tunnel check through the native
+  keeper instead of waiting for the next regular watchdog tick.
+- Native mixed-proxy health checks now include an additional Google
+  connectivity endpoint as a fallback.
+
+## 1.0.78 - 2026-06-20
+
+- Added explicit connection states for long-running sessions: Connected, Idle,
+  Degraded, Reconnecting, and Failed.
+- Strengthened the background keeper for night/idle phone use with a separate
+  idle health-check path, softer recovery, and detailed diagnostics for resume,
+  stale tunnel, and idle recovery events.
+- Improved `/s/<token>/` subscription import by automatically trying
+  `links.txt`, `hiddify.txt`, `nekobox.txt`, and `v2rayng.txt` variants while
+  preserving the original subscription source for refresh.
+- Expanded Smart Route package safeguards so Russian apps can stay direct while
+  global AI, Google, Telegram, YouTube, Instagram, and browser traffic remains
+  on the VPN path.
+- Added regression coverage for the new connection UI states and root
+  subscription fallback import.
+
+## 1.0.77 - 2026-06-19
+
+- Fixed the server picker UX: switching profile tabs or auto-selecting a
+  profile no longer collapses the expanded server list.
+- The server list now closes only when the user taps the explicit hide action,
+  which keeps bulk profile switching predictable.
+
+## 1.0.76 - 2026-06-19
+
+- Added a compact stability event trail to diagnostics so keeper actions,
+  unexpected stops, and native stream errors are visible in support reports.
+- Expanded Smart Route global safeguards for AI/Copilot/Bing/Perplexity
+  domains and apps so they stay on the VPN path instead of RU direct bypass.
+- Added regression coverage for the new Smart Route global app denylist.
+- Kept the supported stable protocol set unchanged: VLESS Reality, NaiveProxy,
+  and Hysteria/Hysteria2.
+
+## 1.0.75 - 2026-06-19
+
+- Added a global Flutter error guard so uncaught Dart, platform dispatcher, and
+  stream errors are logged instead of closing the app.
+- Hardened VPN status, traffic, and log streams with explicit error handlers and
+  safe timer flushes.
+- Expanded Smart Route global routing for Google, OpenAI, Telegram, YouTube,
+  browser, and Google core packages while keeping Russian app bypass
+  conservative.
+- Kept the supported stable protocol set unchanged: VLESS Reality, NaiveProxy,
+  and Hysteria/Hysteria2.
+
+## 1.0.74 - 2026-06-19
+
+- Усилен фоновый keeper: если VPN формально включён, но туннель давно не
+  подтверждал реальный интернет, приложение принудительно запускает health
+  probe и мягкий reconnect без ручного открытия приложения.
+- Недавний реальный трафик теперь записывается как здоровое состояние профиля,
+  поэтому автоподбор меньше штрафует рабочие серверы.
+- Диагностический отчёт расширен полями последнего действия keeper, следующей
+  проверки туннеля и следующего reconnect.
+- Протоколы и Smart Route не менялись, чтобы не ломать уже рабочие Reality,
+  NaiveProxy и Hysteria/Hysteria2 профили.
+
+## 1.0.60 - 2026-06-12
+
+- Reworked Android in-app update installation to use `PackageInstaller`
+  sessions first, with the classic APK view intent kept only as a fallback.
+- Removed fragile installer extras that could make some Android/Honor package
+  installers close without completing the update.
+- The update APK is now prepared in app-specific external cache when available
+  so Android's package installer can read it more reliably.
+- Prepared the release flow to publish ABI-specific APKs again, giving phones a
+  smaller update file than the universal APK.
+
+## 1.0.59 - 2026-06-12
+
+- Added a shared connection UI state model for the app and native Android
+  service, so status, active protocol, country, ping, traffic, and session time
+  are represented consistently.
+- Enriched the main connection banner with compact protocol, country, and ping
+  chips while keeping the fixed-size cyber/glass layout stable during live
+  traffic updates.
+- Reworked the Android foreground VPN notification to show the active profile,
+  protocol, country, ping, upload/download speed, total traffic, and session
+  duration.
+- Added notification actions for opening the app, disconnecting, reconnecting,
+  or starting the VPN from the foreground notification.
+- Added formatter and protocol-display tests for Yurich Connect protocol names:
+  VLESS Reality, NaiveProxy, and Hysteria/Hysteria2.
+
+## 1.0.58 - 2026-06-12
+
+- Added a shared Yurich Connect dark cyber/glass design system and moved the
+  main app theme to reusable color, gradient, and radius tokens.
+- Polished the Android home screen panels, profile cards, filter chips, status
+  card, and import dialog to keep the UI consistent with the premium cyan
+  brand style.
+- Replaced the hardcoded in-app version with the Android package version via
+  `package_info_plus`, so updater checks and diagnostics match the installed
+  APK.
+- Hardened the native VPN service lifecycle by replacing `GlobalScope` usage in
+  `BoxService` with a service-owned coroutine scope and guarding duplicate
+  command-server starts.
+- Kept the supported stable protocol set: VLESS Reality, NaiveProxy, and
+  Hysteria/Hysteria2.
+
+## 1.0.57 - 2026-06-09
+
+- Restored NaiveProxy support in the Android client while keeping the Xray
+  bridge, VLESS XHTTP, and VLESS mKCP disabled.
+- Brought back the Naive profile tab, import hints, QR helper text, and FAQ
+  wording for the supported stable set: VLESS Reality, NaiveProxy, and
+  Hysteria/Hysteria2.
+- Kept the reduced APK footprint from removing the bundled Xray binary.
+
+## 1.0.56 - 2026-06-09
+
+- Removed the experimental VLESS XHTTP/mKCP/Xray bridge from the Android app.
+- Deleted the bundled Xray native binary, reducing APK size and simplifying the
+  VPN startup path.
+- The visible Android profile list now focuses on VLESS Reality and
+  Hysteria/Hysteria2; legacy Naive, XHTTP, mKCP, TLS-only VLESS, and raw
+  sing-box JSON profiles are filtered out of the client UI.
+- Updated import hints and FAQ copy to match the supported protocol set.
+
+## 1.0.55 - 2026-06-09
+
+- Added an Android UID traffic fallback so the in-app session counter and VPN
+  notification can still show traffic when sing-box status totals stay at zero.
+- Added a clear user-facing message for VLESS XHTTP/mKCP on non-arm64 devices:
+  the bundled Xray bridge is available only for `arm64-v8a` in this build.
+- Updated FAQ copy to describe the new experimental Xray bridge instead of the
+  old "future engine" wording.
+
+## 1.0.54 - 2026-06-09
+
+- Added an experimental Android Xray sidecar bridge for imported VLESS XHTTP
+  and VLESS mKCP profiles on arm64 devices.
+- Kept sing-box as the main Android TUN/VpnService engine and routes XHTTP/mKCP
+  through a local Xray SOCKS bridge, preserving the stable NaiveProxy,
+  Hysteria2, and VLESS Reality behavior.
+- Added tests for Xray bridge JSON generation and sing-box bridge outbound
+  generation.
+
+## 1.0.53 - 2026-06-09
+
+- Added a direct APK fallback action when the in-app updater cannot complete
+  download or installation through Android.
+- Kept the GitHub Releases updater as the primary channel, but made the user
+  path less fragile when GitHub API, Android installer, or install permissions
+  fail on a device.
+- Bumped the Android version so phones on `1.0.52` can verify the update flow
+  against a newer build.
+
+## 1.0.52 - 2026-06-09
+
+- Blocked VLESS XHTTP/mKCP connection attempts before stopping the currently
+  working tunnel.
+- Replaced the technical `Unsupported operation` text with a clear Xray/libXray
+  requirement message.
+- Kept imported XHTTP/mKCP profiles visible for a future Xray engine without
+  breaking Hysteria2, NaiveProxy, or VLESS Reality sessions.
+
+## 1.0.51 - 2026-06-09
+
+- Fixed the in-app version shown to the updater so it matches the Android
+  package version.
+- Hardened update discovery: if the primary JSON endpoint is stale or not newer,
+  the app now continues checking GitHub Releases instead of stopping early.
+- Prepared a fresh GitHub Release so phones can verify the auto-update flow
+  against a newer version than `1.0.50`.
+
+## 1.0.50 - 2026-06-09
+
+- Made the connection panel more compact so long profile lists get more room on
+  the first screen.
+- Moved the session traffic total into the glowing uptime button under the
+  timer, keeping upload and download counters simpler.
+- Kept the stronger selected-profile frame, left glow strip, and in-card
+  "Active" badge for the currently connected profile.
+
 ## 1.0.49 - 2026-06-09
 
 - Kept the connection/status panel fixed while the profile list scrolls, so the
