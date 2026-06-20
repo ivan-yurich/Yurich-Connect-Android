@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/vpn_profile.dart';
+import 'profile_engine_selector.dart';
 import 'smart_route_rules.dart';
 import 'vless_profile_validator.dart';
 
@@ -31,12 +32,9 @@ class SingBoxConfigBuilder {
       throw StateError('У профиля нет outbound-конфига.');
     }
 
-    if (!profile.kind.isClientSupported &&
-        profile.kind != VpnProfileKind.naive) {
-      throw UnsupportedError(
-        '${profile.kind.label} отключён в этой Android-сборке. '
-        'Используй VLESS Reality, NaiveProxy или Hysteria/Hysteria2.',
-      );
+    final engine = ProfileEngineSelector.select(profile);
+    if (!engine.canRunInCurrentBuild) {
+      throw UnsupportedError(engine.reason);
     }
 
     final proxyOutbound =

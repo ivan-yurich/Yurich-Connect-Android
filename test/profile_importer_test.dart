@@ -585,8 +585,10 @@ void main() {
       'server_port': 443,
       'uuid': '11111111-1111-4111-8111-111111111111',
       'network': 'tcp',
+      'transport': {'type': 'tcp'},
       'tls': {
         'enabled': true,
+        'insecure': true,
         'reality': {'enabled': true, 'public_key': 'abc123'},
       },
     });
@@ -599,9 +601,11 @@ void main() {
 
     expect(profile.kind, VpnProfileKind.vlessReality);
     expect(proxy['network'], isNull);
+    expect(proxy['transport'], isNull);
     expect(proxy['flow'], 'xtls-rprx-vision');
     expect(proxy['packet_encoding'], 'xudp');
     expect(proxy['tls']['server_name'], 'example.com');
+    expect(proxy['tls']['insecure'], isNull);
     expect(proxy['tls']['utls'], {'enabled': true, 'fingerprint': 'chrome'});
     expect(proxy['tls']['reality']['public_key'], 'abc123');
   });
