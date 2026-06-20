@@ -123,6 +123,14 @@ class MainActivity : FlutterActivity() {
             result.error("APK_NOT_READABLE", "APK file is empty or not readable", null)
             return
         }
+        if (!isReadableApk(apkFile)) {
+            result.error(
+                "APK_INVALID",
+                "Downloaded update file is not a valid APK. Please retry the update.",
+                null,
+            )
+            return
+        }
 
         try {
             val installFile = prepareInstallFile(apkFile)
@@ -299,7 +307,26 @@ class MainActivity : FlutterActivity() {
         if (source.canonicalPath != target.canonicalPath) {
             source.copyTo(target, overwrite = true)
         }
+        if (!isReadableApk(target)) {
+            throw IllegalStateException("Prepared update file is not a valid APK")
+        }
         return target
+    }
+
+    private fun isReadableApk(file: File): Boolean {
+        if (!file.exists() || !file.canRead() || file.length() < APK_MIN_BYTES) {
+            return false
+        }
+        return try {
+            file.inputStream().use { input ->
+                val header = ByteArray(4)
+                val read = input.read(header)
+                read == 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to validate APK file", error)
+            false
+        }
     }
 
     private fun openInstallSettings() {
@@ -363,6 +390,7 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val TAG = "YurichUpdater"
+        const val APK_MIN_BYTES = 64 * 1024L
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val ACTION_PACKAGE_INSTALL_STATUS = "online.dnsai.ivanvpn.UPDATE_INSTALL_STATUS"
         const val EXTRA_PACKAGE_INSTALL_SESSION_ID = "package_install_session_id"

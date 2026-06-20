@@ -152,8 +152,8 @@ void main() {
         downloadCount += 1;
         request.response
           ..statusCode = HttpStatus.ok
-          ..headers.contentLength = 3
-          ..add(const [1, 2, 3]);
+          ..headers.contentLength = 4
+          ..add(const [0x50, 0x4B, 0x03, 0x04]);
         await request.response.close();
       });
 
@@ -162,15 +162,43 @@ void main() {
         version: '1.0.63',
         assetName: assetName,
         downloadUrl: Uri.parse('http://127.0.0.1:${server.port}/update.apk'),
-        size: 3,
+        size: 4,
       );
 
       final first = await service.download(update, onProgress: (_) {});
       final second = await service.download(update, onProgress: (_) {});
 
       expect(first.path, second.path);
-      expect(await second.readAsBytes(), const [1, 2, 3]);
+      expect(await second.readAsBytes(), const [0x50, 0x4B, 0x03, 0x04]);
       expect(downloadCount, 1);
     },
   );
+
+  test('rejects a downloaded HTML error page as invalid APK', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+
+    final body = utf8.encode('<html>temporary error</html>');
+    server.listen((request) async {
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentLength = body.length
+        ..add(body);
+      await request.response.close();
+    });
+
+    final service = AppUpdateService();
+    final update = AppUpdateInfo(
+      version: '1.0.81',
+      assetName:
+          'YurichConnect-invalid-${DateTime.now().microsecondsSinceEpoch}.apk',
+      downloadUrl: Uri.parse('http://127.0.0.1:${server.port}/update.apk'),
+      size: body.length,
+    );
+
+    await expectLater(
+      service.download(update, onProgress: (_) {}),
+      throwsA(isA<StateError>()),
+    );
+  });
 }

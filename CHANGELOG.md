@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.81 - 2026-06-20
+
+- Hardened Android in-app updates against corrupted or partial APK downloads.
+- The updater now validates the downloaded file as an APK archive before
+  handing it to Android's installer.
+- The native Android installer bridge also refuses invalid update files, so
+  cached HTML/error pages can no longer be installed as APKs.
+- Added regression coverage for invalid APK downloads.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
 ## 1.0.80 - 2026-06-20
 
 - Increased GitHub Releases updater network timeouts and retry backoff for

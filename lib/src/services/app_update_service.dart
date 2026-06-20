@@ -20,6 +20,7 @@ const _updateRetryDelays = [
   Duration(seconds: 10),
   Duration(seconds: 20),
 ];
+const _apkZipMagic = [0x50, 0x4B];
 
 class AppUpdateInfo {
   const AppUpdateInfo({
@@ -153,6 +154,7 @@ class AppUpdateService {
       for (var attempt = 0; attempt < _updateRetryDelays.length; attempt += 1) {
         try {
           await _downloadToFile(update, url, file, onProgress);
+          await _verifyApkFile(file, update.size);
           return file;
         } on Object catch (error) {
           lastError = error;
@@ -210,28 +212,47 @@ class AppUpdateService {
     }
     onProgress(1);
 
-    final expectedSize = update.size;
-    if (expectedSize != null && expectedSize > 0) {
-      final actualSize = await file.length();
-      if (actualSize != expectedSize) {
-        throw StateError(
-          'APK size mismatch: expected $expectedSize bytes, got $actualSize.',
-        );
-      }
-    }
+    await _verifyApkFile(file, update.size);
   }
 
   Future<bool> _isCompleteDownloadedFile(File file, int? expectedSize) async {
-    if (!await file.exists()) {
+    try {
+      await _verifyApkFile(file, expectedSize);
+      return true;
+    } on Object {
       return false;
+    }
+  }
+
+  Future<void> _verifyApkFile(File file, int? expectedSize) async {
+    if (!await file.exists()) {
+      throw StateError('APK file does not exist.');
     }
     final actualSize = await file.length();
     if (actualSize <= 0) {
-      return false;
+      throw StateError('APK file is empty.');
     }
-    return expectedSize == null ||
-        expectedSize <= 0 ||
-        actualSize == expectedSize;
+    if (expectedSize != null &&
+        expectedSize > 0 &&
+        actualSize != expectedSize) {
+      throw StateError(
+        'APK size mismatch: expected $expectedSize bytes, got $actualSize.',
+      );
+    }
+    final reader = await file.open();
+    try {
+      final header = await reader.read(4);
+      if (header.length < 4 ||
+          header[0] != _apkZipMagic[0] ||
+          header[1] != _apkZipMagic[1]) {
+        throw StateError(
+          'Downloaded file is not an APK archive. '
+          'Please retry the update.',
+        );
+      }
+    } finally {
+      await reader.close();
+    }
   }
 
   Future<void> installApk(File file) async {
