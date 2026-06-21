@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.87 - 2026-06-21
+
+- Published a control Android update release for validating the in-app updater
+  path from already installed builds.
+- Kept GitHub Releases as the first update metadata source and preserved the
+  legacy APK asset name for older updater clients.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
 ## 1.0.86 - 2026-06-21
 
 - Re-published Android update assets with both the current versioned APK name
