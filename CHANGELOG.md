@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.86 - 2026-06-21
+
+- Re-published Android update assets with both the current versioned APK name
+  and the legacy `YurichConnect-android-release.apk` name, so older in-app
+  updaters can discover the release.
+- Kept `versionCode` monotonic above the previous updater builds to avoid
+  Android downgrade protection.
+- Prefer GitHub Releases before the temporary site metadata endpoint when
+  checking for app updates.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
 ## 1.0.85 - 2026-06-21
 
 - Added an engine selector layer for VPN profiles: supported protocols stay on
