@@ -184,6 +184,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoReconnectInFlight = false;
   bool _notificationSyncInFlight = false;
   bool _autoRecoveryArmed = false;
+  bool _manualDisconnectRequested = false;
   bool _pingAllInFlight = false;
   bool _countryResolveInFlight = false;
   bool _logsExpanded = false;
@@ -518,12 +519,18 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _handleResumeRecovery() async {
     _lastResumeRecoveryAt = DateTime.now();
     await Future<void>.delayed(_resumeHealthCheckDelay);
-    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+    if (!mounted ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !_autoRecoveryArmed) {
       return;
     }
 
     final status = await _refreshVpnStatus();
-    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+    if (!mounted ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !_autoRecoveryArmed) {
       return;
     }
 
@@ -550,6 +557,8 @@ class _HomeScreenState extends State<HomeScreen>
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
+    final manualDisconnectRequested = await _store
+        .loadManualDisconnectRequested();
     if (!mounted) {
       return;
     }
@@ -578,6 +587,7 @@ class _HomeScreenState extends State<HomeScreen>
       _profileStabilityStats = stabilityStats;
       _selectedProfileId = resolvedSelectedId;
       _smartRouteRuDirect = smartRouteRuDirect;
+      _manualDisconnectRequested = manualDisconnectRequested;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -629,7 +639,9 @@ class _HomeScreenState extends State<HomeScreen>
                 _lastError = null;
                 _autoReconnectAttempts = 0;
                 _nextAutoReconnectAt = null;
-                _autoRecoveryArmed = true;
+                if (!_manualDisconnectRequested) {
+                  _autoRecoveryArmed = true;
+                }
                 _connectedSince ??= now;
                 _lastHealthyAt ??= now;
                 _lastTrafficAt ??= now;
@@ -652,6 +664,11 @@ class _HomeScreenState extends State<HomeScreen>
                 recoverUnexpectedStop = true;
               }
             });
+            if (status == AurumVpnStatus.started &&
+                _manualDisconnectRequested &&
+                !_stoppingByUser) {
+              unawaited(_enforceManualDisconnect('status-event'));
+            }
             if (recoverUnexpectedStop) {
               _markUnexpectedStop('status-event');
             }
@@ -743,7 +760,9 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() {
           _status = status;
           if (status == AurumVpnStatus.started) {
-            _autoRecoveryArmed = true;
+            if (!_manualDisconnectRequested) {
+              _autoRecoveryArmed = true;
+            }
             _connectedSince ??= DateTime.now();
             _clockNow = DateTime.now();
           } else if (status == AurumVpnStatus.stopped) {
@@ -763,6 +782,11 @@ class _HomeScreenState extends State<HomeScreen>
                   .reversed,
             );
         });
+        if (status == AurumVpnStatus.started &&
+            _manualDisconnectRequested &&
+            !_stoppingByUser) {
+          unawaited(_enforceManualDisconnect('init-status'));
+        }
         unawaited(_syncConnectionNotification());
       }
     } on Object {
@@ -1317,6 +1341,13 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    await _store.saveManualDisconnectRequested(false);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _manualDisconnectRequested = false;
+    });
     unawaited(_refreshBatteryOptimizationStatus(prompt: true));
     _autoRecoveryArmed = true;
     await _runBusy(() async {
@@ -1575,7 +1606,32 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _disconnect() async {
     _autoRecoveryArmed = false;
+    _autoReconnectInFlight = false;
+    _nextAutoReconnectAt = null;
+    _autoReconnectAttempts = 0;
+    await _store.saveManualDisconnectRequested(true);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _manualDisconnectRequested = true;
+    });
     await _runBusy(() => _stopVpnCore(), message: s.disconnectingVpn);
+  }
+
+  Future<void> _enforceManualDisconnect(String source) async {
+    if (!mounted || _stoppingByUser) {
+      return;
+    }
+
+    _queueLog(
+      'Manual disconnect guard: native VPN reported Started from $source; '
+      'stopping again.',
+    );
+    _autoRecoveryArmed = false;
+    _nextAutoReconnectAt = null;
+    _autoReconnectAttempts = 0;
+    await _stopVpnCore(updateMessage: true);
   }
 
   Future<void> _stopVpnCore({bool updateMessage = true}) async {
@@ -1667,7 +1723,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _refreshStatusWatchdog() async {
-    if (!mounted || _busy || _statusWatchdogInFlight) {
+    if (!mounted ||
+        _busy ||
+        _statusWatchdogInFlight ||
+        _manualDisconnectRequested) {
       return;
     }
 
@@ -1717,7 +1776,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _markUnexpectedStop(String source) {
-    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+    if (!mounted ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !_autoRecoveryArmed) {
       return;
     }
 
@@ -1742,7 +1804,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _refreshTunnelHealth({String source = 'watchdog'}) async {
-    if (_autoReconnectInFlight || _tunnelHealthCheckInFlight || !mounted) {
+    if (_autoReconnectInFlight ||
+        _tunnelHealthCheckInFlight ||
+        _manualDisconnectRequested ||
+        !mounted) {
       return;
     }
 
@@ -1780,7 +1845,9 @@ class _HomeScreenState extends State<HomeScreen>
         attempts: _healthProbeAttemptsFor(source),
         logFailures: false,
       );
-      if (!mounted || _status != AurumVpnStatus.started) {
+      if (!mounted ||
+          _manualDisconnectRequested ||
+          _status != AurumVpnStatus.started) {
         return;
       }
 
@@ -1811,6 +1878,9 @@ class _HomeScreenState extends State<HomeScreen>
       );
 
       if (_tunnelHealthFailures >= _tunnelHealthFailureThreshold) {
+        if (_manualDisconnectRequested) {
+          return;
+        }
         _tunnelHealthFailures = 0;
         _queueLog(
           'VPN watchdog: tunnel is unhealthy, reconnecting ${profile.name}.',
@@ -1840,7 +1910,11 @@ class _HomeScreenState extends State<HomeScreen>
     String source, {
     required bool forceRestart,
   }) async {
-    if (_autoReconnectInFlight || _busy || _stoppingByUser || !mounted) {
+    if (_autoReconnectInFlight ||
+        _busy ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !mounted) {
       return;
     }
 
@@ -1898,7 +1972,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     try {
       await Future<void>.delayed(delay);
-      if (!mounted || _stoppingByUser) {
+      if (!mounted || _stoppingByUser || _manualDisconnectRequested) {
         return;
       }
 
@@ -1922,6 +1996,9 @@ class _HomeScreenState extends State<HomeScreen>
         await Future<void>.delayed(const Duration(milliseconds: 1200));
       }
 
+      if (!mounted || _manualDisconnectRequested) {
+        return;
+      }
       await _startVpnCore(profile);
       _setKeeperAction('reconnect-ok:$source#$attempt');
       _lastHealthyAt = DateTime.now();
@@ -2769,6 +2846,7 @@ class _HomeScreenState extends State<HomeScreen>
       'connection_degraded: $_connectionDegraded',
       'connection_idle: ${_isTunnelIdle(now)}',
       'connection_stale: ${_isTunnelStale(now)}',
+      'manual_disconnect_requested: $_manualDisconnectRequested',
       'message: ${_redactSensitive(_message)}',
       if (_lastError != null) 'last_error: $_lastError',
       'uptime: ${_formatDuration(_connectedDuration)}',

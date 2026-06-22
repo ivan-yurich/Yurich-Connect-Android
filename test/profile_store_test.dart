@@ -83,6 +83,18 @@ void main() {
     expect(await store.loadSmartRouteRuDirect(), isFalse);
   });
 
+  test('stores manual disconnect guard', () async {
+    final store = ProfileStore();
+
+    expect(await store.loadManualDisconnectRequested(), isFalse);
+
+    await store.saveManualDisconnectRequested(true);
+    expect(await store.loadManualDisconnectRequested(), isTrue);
+
+    await store.saveManualDisconnectRequested(false);
+    expect(await store.loadManualDisconnectRequested(), isFalse);
+  });
+
   test('stores profile stability stats', () async {
     final store = ProfileStore();
     final lastFailureAt = DateTime.utc(2026, 6, 18, 8);

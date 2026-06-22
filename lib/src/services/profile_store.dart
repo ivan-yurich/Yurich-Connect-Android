@@ -10,6 +10,7 @@ class ProfileStore {
   static const _selectedProfileKey = 'selectedProfileId';
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
+  static const _manualDisconnectKey = 'manualDisconnectRequested';
   static const _smartRouteRuDirectKey = 'smartRouteRuDirect';
   static const _subscriptionReminderStampKey = 'subscriptionReminderStamp';
   static const _deletedProfileIdsBySubscriptionSourceKey =
@@ -169,6 +170,16 @@ class ProfileStore {
   Future<void> saveAutoConnect(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_autoConnectKey, enabled);
+  }
+
+  Future<bool> loadManualDisconnectRequested() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_manualDisconnectKey) ?? false;
+  }
+
+  Future<void> saveManualDisconnectRequested(bool requested) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_manualDisconnectKey, requested);
   }
 
   Future<bool> loadSmartRouteRuDirect() async {
