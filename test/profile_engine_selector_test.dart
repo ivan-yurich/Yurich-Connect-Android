@@ -48,6 +48,16 @@ void main() {
       expect(selection.canRunInCurrentBuild, true);
     }
   });
+
+  test('routes experimental PingTunnel to Xray-required engine', () {
+    final selection = ProfileEngineSelector.select(
+      _profile(VpnProfileKind.pingTunnelExperimental),
+    );
+
+    expect(selection.engine, VpnCoreEngine.xray);
+    expect(selection.canRunInCurrentBuild, false);
+    expect(selection.reason, contains('отдельного движка'));
+  });
 }
 
 VpnProfile _profile(VpnProfileKind kind, {Map<String, dynamic>? outbound}) {

@@ -34,6 +34,9 @@ class ProfileEngineSelector {
       VpnProfileKind.vlessTls => _xrayOnly(
         'VLESS TLS без Reality отключён в этой сборке: используем Reality как основной безопасный VLESS-профиль.',
       ),
+      VpnProfileKind.pingTunnelExperimental => _xrayOnly(
+        'PingTunnel сейчас помечен как экспериментальный и требует отдельного движка, не включённого в текущую сборку.',
+      ),
       VpnProfileKind.naive ||
       VpnProfileKind.hysteria2 ||
       VpnProfileKind.hysteria ||

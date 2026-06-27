@@ -6,6 +6,7 @@ enum VpnProfileKind {
   naive,
   hysteria2,
   hysteria,
+  pingTunnelExperimental,
   singBoxConfig,
 }
 
@@ -18,6 +19,7 @@ extension VpnProfileKindLabel on VpnProfileKind {
     VpnProfileKind.naive => 'NaiveProxy',
     VpnProfileKind.hysteria2 => 'Hysteria2',
     VpnProfileKind.hysteria => 'Hysteria',
+    VpnProfileKind.pingTunnelExperimental => 'PingTunnel Experimental',
     VpnProfileKind.singBoxConfig => 'Sing-box',
   };
 
@@ -29,6 +31,7 @@ extension VpnProfileKindLabel on VpnProfileKind {
     VpnProfileKind.vlessTls ||
     VpnProfileKind.vlessXhttp ||
     VpnProfileKind.vlessMkcp ||
+    VpnProfileKind.pingTunnelExperimental ||
     VpnProfileKind.singBoxConfig => false,
   };
 }

@@ -399,6 +399,22 @@ void main() {
     expect(SmartRouteRules.ruDirectPackageNames, isNotEmpty);
   });
 
+  test('imports PingTunnel link as experimental profile', () async {
+    const link = 'pingtunnel://user:token@example.com:443#PingTunnel';
+
+    final profiles = await ProfileImporter().importFromText(link);
+    final profile = profiles.first;
+
+    expect(profiles, hasLength(1));
+    expect(profile.kind, VpnProfileKind.pingTunnelExperimental);
+    expect(profile.server, 'example.com');
+    expect(profile.outbound?['type'], 'pingtunnel');
+    expect(
+      () => SingBoxConfigBuilder().build(profile),
+      throwsA(isA<UnsupportedError>()),
+    );
+  });
+
   test('builds Hiddify-like RU app bypass list with global app denylist', () {
     final packages = SmartRouteRules.ruBypassPackages(const [
       'ru.gosuslugi',
