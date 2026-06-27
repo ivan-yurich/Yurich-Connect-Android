@@ -41,7 +41,7 @@ class SingBoxConfigBuilder {
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
-    _applyDialStability(proxyOutbound);
+    _applyDialStability(profile, proxyOutbound);
     final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
 
     final config = <String, dynamic>{
@@ -183,14 +183,24 @@ class SingBoxConfigBuilder {
     };
   }
 
-  void _applyDialStability(Map<String, dynamic> proxyOutbound) {
+  void _applyDialStability(
+    VpnProfile profile,
+    Map<String, dynamic> proxyOutbound,
+  ) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
     proxyOutbound.putIfAbsent('domain_resolver', () => 'local-dns');
     proxyOutbound.putIfAbsent('domain_strategy', () => 'ipv4_only');
     proxyOutbound.putIfAbsent('network_strategy', () => 'fallback');
-    proxyOutbound.putIfAbsent('fallback_delay', () => '300ms');
+    proxyOutbound.putIfAbsent(
+      'fallback_delay',
+      () =>
+          profile.kind == VpnProfileKind.hysteria2 ||
+              profile.kind == VpnProfileKind.hysteria
+          ? '300ms'
+          : '200ms',
+    );
   }
 
   void _normalizeOutbound(

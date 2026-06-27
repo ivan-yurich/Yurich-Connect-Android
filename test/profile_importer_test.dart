@@ -265,7 +265,7 @@ void main() {
     expect(proxy['domain_resolver'], 'local-dns');
     expect(proxy['domain_strategy'], 'ipv4_only');
     expect(proxy['network_strategy'], 'fallback');
-    expect(proxy['fallback_delay'], '300ms');
+    expect(proxy['fallback_delay'], '200ms');
     expect(proxy['quic'], isFalse);
     expect(proxy['quic_congestion_control'], isNull);
     expect(proxy['udp_over_tcp'], isNull);

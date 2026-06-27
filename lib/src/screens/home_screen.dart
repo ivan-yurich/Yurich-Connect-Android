@@ -52,6 +52,9 @@ const _nativeStartTimeout = Duration(seconds: 8);
 const _subscriptionReminderWindow = Duration(days: 5);
 const _tunnelHealthProbeInterval = Duration(seconds: 105);
 const _startupProbeRecheckDelay = Duration(seconds: 8);
+const _trafficUiFlushInterval = Duration(seconds: 1);
+const _notificationSyncMinInterval = Duration(seconds: 2);
+const _profilePingCacheTtl = Duration(minutes: 10);
 const _recentTrafficGrace = Duration(seconds: 70);
 const _idleTunnelGrace = Duration(minutes: 3);
 const _idleHealthProbeInterval = Duration(minutes: 5);
@@ -162,6 +165,7 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _lastIdleHealthCheckAt;
   DateTime? _lastResumeRecoveryAt;
   DateTime? _lastKeeperActionAt;
+  DateTime? _lastNotificationSyncAt;
   DateTime _clockNow = DateTime.now();
   Map<String, dynamic>? _latestTrafficEvent;
 
@@ -170,6 +174,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _profilePingText = <String, String>{};
   final _profilePingBusy = <String, bool>{};
   final _profilePingError = <String, String>{};
+  final _profilePingCheckedAt = <String, DateTime>{};
   Map<String, ProfileStabilityStats> _profileStabilityStats = const {};
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
@@ -693,7 +698,7 @@ class _HomeScreenState extends State<HomeScreen>
             if (recoverUnexpectedStop) {
               _markUnexpectedStop('status-event');
             }
-            unawaited(_syncConnectionNotification());
+            unawaited(_syncConnectionNotification(force: true));
           }
         } on Object catch (error, stackTrace) {
           _handleEngineStreamError('status', error, stackTrace);
@@ -711,7 +716,7 @@ class _HomeScreenState extends State<HomeScreen>
             return;
           }
           _latestTrafficEvent = event;
-          _trafficFlushTimer ??= Timer(const Duration(milliseconds: 500), () {
+          _trafficFlushTimer ??= Timer(_trafficUiFlushInterval, () {
             try {
               _trafficFlushTimer = null;
               final latest = _latestTrafficEvent;
@@ -727,12 +732,25 @@ class _HomeScreenState extends State<HomeScreen>
                   downlinkSpeed > 0 ||
                   sessionTotal > _lastSessionTrafficBytes;
               final now = DateTime.now();
-              setState(() {
-                _uplink = latest['formattedUplinkSpeed'] as String? ?? _uplink;
-                _downlink =
-                    latest['formattedDownlinkSpeed'] as String? ?? _downlink;
-                _sessionTotal =
-                    latest['formattedSessionTotal'] as String? ?? _sessionTotal;
+              final nextUplink =
+                  latest['formattedUplinkSpeed'] as String? ?? _uplink;
+              final nextDownlink =
+                  latest['formattedDownlinkSpeed'] as String? ?? _downlink;
+              final nextSessionTotal =
+                  latest['formattedSessionTotal'] as String? ?? _sessionTotal;
+              final displayChanged =
+                  nextUplink != _uplink ||
+                  nextDownlink != _downlink ||
+                  nextSessionTotal != _sessionTotal;
+              final healthChanged =
+                  hasTraffic &&
+                  _status == AurumVpnStatus.started &&
+                  (_tunnelHealthFailures != 0 || _lastHealthyAt == null);
+
+              void applyTrafficUpdate() {
+                _uplink = nextUplink;
+                _downlink = nextDownlink;
+                _sessionTotal = nextSessionTotal;
                 if (sessionTotal >= _lastSessionTrafficBytes) {
                   _lastSessionTrafficBytes = sessionTotal;
                 }
@@ -741,8 +759,16 @@ class _HomeScreenState extends State<HomeScreen>
                   _lastHealthyAt = now;
                   _tunnelHealthFailures = 0;
                 }
-              });
-              unawaited(_syncConnectionNotification());
+              }
+
+              if (displayChanged || healthChanged) {
+                setState(applyTrafficUpdate);
+              } else {
+                applyTrafficUpdate();
+              }
+              if (displayChanged) {
+                unawaited(_syncConnectionNotification());
+              }
             } on Object catch (error, stackTrace) {
               _handleEngineStreamError('traffic-flush', error, stackTrace);
             }
@@ -808,7 +834,7 @@ class _HomeScreenState extends State<HomeScreen>
             !_stoppingByUser) {
           unawaited(_enforceManualDisconnect('init-status'));
         }
-        unawaited(_syncConnectionNotification());
+        unawaited(_syncConnectionNotification(force: true));
       }
     } on Object {
       // In widget tests and desktop preview the native Android plugin is absent.
@@ -845,11 +871,19 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _syncConnectionNotification() async {
+  Future<void> _syncConnectionNotification({bool force = false}) async {
     if (_notificationSyncInFlight) {
       return;
     }
+    final now = DateTime.now();
+    final lastSyncAt = _lastNotificationSyncAt;
+    if (!force &&
+        lastSyncAt != null &&
+        now.difference(lastSyncAt) < _notificationSyncMinInterval) {
+      return;
+    }
     _notificationSyncInFlight = true;
+    _lastNotificationSyncAt = now;
     try {
       await _bestEffortNative(
         'updateConnectionNotification',
@@ -1337,7 +1371,7 @@ class _HomeScreenState extends State<HomeScreen>
         _message = blockReason ?? s.selectedProfile(profile.name);
       });
       await _store.saveSelectedProfileId(profile.id);
-      unawaited(_pingProfile(profile));
+      unawaited(_pingProfile(profile, force: true));
       if (blockReason != null) {
         _showSnack(blockReason);
       }
@@ -2149,18 +2183,31 @@ class _HomeScreenState extends State<HomeScreen>
     return false;
   }
 
-  Future<void> _pingProfiles(List<VpnProfile> profiles) async {
+  Future<void> _pingProfiles(
+    List<VpnProfile> profiles, {
+    bool force = false,
+  }) async {
     if (_pingAllInFlight || profiles.isEmpty) {
       return;
     }
 
+    final orderedProfiles = profiles.toList(growable: false)
+      ..sort((a, b) {
+        final aSelected = a.id == _selectedProfileId;
+        final bSelected = b.id == _selectedProfileId;
+        if (aSelected == bSelected) {
+          return a.name.compareTo(b.name);
+        }
+        return aSelected ? -1 : 1;
+      });
+
     _pingAllInFlight = true;
     try {
-      for (final profile in profiles.take(16)) {
+      for (final profile in orderedProfiles.take(12)) {
         if (!mounted) {
           return;
         }
-        await _pingProfile(profile);
+        await _pingProfile(profile, force: force);
         await Future<void>.delayed(const Duration(milliseconds: 120));
       }
     } finally {
@@ -2168,13 +2215,19 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _pingProfile(VpnProfile profile) async {
+  Future<void> _pingProfile(VpnProfile profile, {bool force = false}) async {
     final server = profile.server?.trim();
     final port = profile.port ?? 443;
     if (server == null || server.isEmpty || port <= 0) {
       return;
     }
     if (_profilePingBusy[profile.id] == true) {
+      return;
+    }
+    final checkedAt = _profilePingCheckedAt[profile.id];
+    if (!force &&
+        checkedAt != null &&
+        DateTime.now().difference(checkedAt) < _profilePingCacheTtl) {
       return;
     }
 
@@ -2240,6 +2293,7 @@ class _HomeScreenState extends State<HomeScreen>
       });
     } finally {
       socket?.destroy();
+      _profilePingCheckedAt[profile.id] = DateTime.now();
       if (mounted) {
         setState(() => _profilePingBusy[profile.id] = false);
       }
@@ -3310,8 +3364,10 @@ class _HomeScreenState extends State<HomeScreen>
                       countryFlag: _profileCountryFlag,
                       pingLabel: _profilePingLabel,
                       profileStabilityLabel: _profileStabilityLabel,
-                      onPingAll: () => unawaited(_pingProfiles(_profiles)),
-                      onPing: (profile) => unawaited(_pingProfile(profile)),
+                      onPingAll: () =>
+                          unawaited(_pingProfiles(_profiles, force: true)),
+                      onPing: (profile) =>
+                          unawaited(_pingProfile(profile, force: true)),
                       onRequestBackgroundAccess: () =>
                           unawaited(_requestBackgroundPowerAccess()),
                       onSmartRouteChanged: (enabled) =>
