@@ -16,6 +16,7 @@ import '../services/app_update_service.dart';
 import '../services/installed_apps_service.dart';
 import '../services/power_manager_service.dart';
 import '../services/profile_auto_selector.dart';
+import '../services/profile_country_resolver.dart';
 import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_store.dart';
@@ -425,7 +426,7 @@ class _HomeScreenState extends State<HomeScreen>
           ? null
           : ProtocolDisplayMapper.mapProfile(profile),
       countryName: _profileCountryName(profile),
-      countryCode: profile?.countryCode,
+      countryCode: _profileCountryCode(profile),
       pingMs: profile == null ? null : _profilePingMs[profile.id],
       uploadSpeed: _uplink,
       downloadSpeed: _downlink,
@@ -460,27 +461,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String? _profileCountryName(VpnProfile? profile) {
-    if (profile == null) {
-      return null;
-    }
-    final countryName = profile.countryName?.trim();
-    if (countryName != null && countryName.isNotEmpty) {
-      return countryName;
-    }
-    final flag = _profileCountryFlag(profile);
-    return switch (flag) {
-      '🇷🇺' => 'Россия',
-      '🇫🇮' => 'Финляндия',
-      '🇩🇪' => 'Германия',
-      '🇺🇸' => 'США',
-      '🇯🇵' => 'Япония',
-      '🇳🇱' => 'Нидерланды',
-      '🇫🇷' => 'Франция',
-      '🇨🇦' => 'Канада',
-      '🇹🇷' => 'Турция',
-      '🇬🇧' => 'Великобритания',
-      _ => null,
-    };
+    return ProfileCountryResolver.displayCountryName(profile);
+  }
+
+  String? _profileCountryCode(VpnProfile? profile) {
+    return ProfileCountryResolver.displayCountryCode(profile);
   }
 
   @override
@@ -2367,6 +2352,18 @@ class _HomeScreenState extends State<HomeScreen>
 
     final geo = await _geoService.resolveExitCountryThroughTunnel();
     if (geo != null) {
+      final index = _profiles.indexWhere((profile) => profile.id == profileId);
+      final profile = index < 0 ? null : _profiles[index];
+      if (profile != null &&
+          ProfileCountryResolver.hasDeclaredCountry(profile)) {
+        _queueLog(
+          'Geo: exit country ${geo.countryCode}'
+          '${geo.ip == null ? '' : ' via ${geo.ip}'}; '
+          'profile country preserved',
+        );
+        return;
+      }
+
       await _saveProfileCountry(profileId, geo);
       _queueLog(
         'Geo: exit country ${geo.countryCode}'
@@ -2403,61 +2400,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String? _profileCountryFlag(VpnProfile profile) {
-    final existing = _leadingFlag(profile.name);
-    if (existing != null) {
-      return existing;
-    }
-
-    final cached = ProfileGeo.countryCodeToFlag(profile.countryCode);
-    if (cached != null) {
-      return cached;
-    }
-
-    final haystack = '${profile.name} ${profile.server ?? ''}'.toLowerCase();
-    if (haystack.contains('росси') ||
-        haystack.contains('russia') ||
-        haystack.endsWith('.ru') ||
-        haystack.endsWith('.su') ||
-        haystack.endsWith('.рф')) {
-      return '🇷🇺';
-    }
-    if (haystack.contains('фин') ||
-        haystack.contains('finland') ||
-        haystack.endsWith('.fi')) {
-      return '🇫🇮';
-    }
-    if (haystack.contains('герман') ||
-        haystack.contains('germany') ||
-        haystack.endsWith('.de')) {
-      return '🇩🇪';
-    }
-    if (haystack.contains('сша') ||
-        haystack.contains('usa') ||
-        haystack.contains('america') ||
-        haystack.endsWith('.us')) {
-      return '🇺🇸';
-    }
-    if (haystack.contains('japan') || haystack.contains('япон')) {
-      return '🇯🇵';
-    }
-    if (haystack.contains('netherlands') || haystack.contains('нидер')) {
-      return '🇳🇱';
-    }
-    if (haystack.contains('france') || haystack.contains('франц')) {
-      return '🇫🇷';
-    }
-    if (haystack.contains('canada') || haystack.contains('канада')) {
-      return '🇨🇦';
-    }
-    if (haystack.contains('turkey') || haystack.contains('турц')) {
-      return '🇹🇷';
-    }
-    if (haystack.contains('uk') ||
-        haystack.contains('united kingdom') ||
-        haystack.endsWith('.co.uk')) {
-      return '🇬🇧';
-    }
-    return '🌐';
+    return ProfileCountryResolver.displayCountryFlag(profile);
   }
 
   String _profileDisplayName(VpnProfile profile) {
@@ -2469,12 +2412,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String? _leadingFlag(String value) {
-    final runes = value.trimLeft().runes.take(2).toList(growable: false);
-    if (runes.length < 2) {
-      return null;
-    }
-    final isFlag = runes.every((rune) => rune >= 0x1F1E6 && rune <= 0x1F1FF);
-    return isFlag ? String.fromCharCodes(runes) : null;
+    return ProfileCountryResolver.leadingFlag(value);
   }
 
   String _formatDuration(Duration? duration) {
@@ -2963,8 +2901,8 @@ class _HomeScreenState extends State<HomeScreen>
         'protocol: ${_profileKindLabel(profile.kind)}',
         'endpoint: ${_redactSensitive(profile.endpoint)}',
         'country: ${_profileCountryFlag(profile) ?? 'unknown'}'
-            '${profile.countryCode == null ? '' : ' ${profile.countryCode}'}'
-            '${profile.countryName == null ? '' : ' ${profile.countryName}'}',
+            '${_profileCountryCode(profile) == null ? '' : ' ${_profileCountryCode(profile)}'}'
+            '${_profileCountryName(profile) == null ? '' : ' ${_profileCountryName(profile)}'}',
         'profile_ping: ${_profilePingLabel(profile)}',
         'profile_stability: ${_profileStabilityLabel(profile)}',
         'profile_stability_penalty: '
@@ -2995,7 +2933,7 @@ class _HomeScreenState extends State<HomeScreen>
             _profileKindLabel(item.kind),
             _redactSensitive(item.endpoint),
             'country=${_profileCountryFlag(item) ?? 'unknown'}'
-                '${item.countryCode == null ? '' : ' ${item.countryCode}'}',
+                '${_profileCountryCode(item) == null ? '' : ' ${_profileCountryCode(item)}'}',
             'ping=${_profilePingLabel(item)}',
             'stability=${_profileStabilityLabel(item)}',
             if (expires != null) 'expires=$expires',
