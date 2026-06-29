@@ -61,6 +61,7 @@ const _idleTunnelGrace = Duration(minutes: 3);
 const _idleHealthProbeInterval = Duration(minutes: 5);
 const _degradedHealthProbeInterval = Duration(seconds: 45);
 const _resumeHealthCheckDelay = Duration(seconds: 2);
+const _resumeNetworkSettleDelay = Duration(seconds: 5);
 const _staleTunnelGrace = Duration(minutes: 5);
 const _tunnelHealthFailureThreshold = 4;
 const _autoReconnectMaxAttempts = 6;
@@ -370,9 +371,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   int _healthFailureThresholdFor(String source) {
-    if (source == 'app-resume' ||
-        source.contains('idle') ||
-        source.contains('stale')) {
+    if (source == 'app-resume') {
+      return 2;
+    }
+    if (source.contains('idle') || source.contains('stale')) {
       return 1;
     }
     if (_tunnelHealthFailures > 0) {
@@ -551,6 +553,14 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (status == AurumVpnStatus.started) {
+      _setKeeperAction('resume-settle');
+      await Future<void>.delayed(_resumeNetworkSettleDelay);
+      if (!mounted ||
+          _stoppingByUser ||
+          _manualDisconnectRequested ||
+          !_autoRecoveryArmed) {
+        return;
+      }
       _nextTunnelHealthCheckAt = DateTime.now();
       _setKeeperAction('resume-check');
       unawaited(_refreshTunnelHealth(source: 'app-resume'));

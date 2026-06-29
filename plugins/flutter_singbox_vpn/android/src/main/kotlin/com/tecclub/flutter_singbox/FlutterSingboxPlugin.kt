@@ -220,6 +220,8 @@ class FlutterSingboxPlugin :
     
     // Job for stop cleanup - can be cancelled when starting new connection
     private var stopCleanupJob: kotlinx.coroutines.Job? = null
+    private var periodicStatusJob: kotlinx.coroutines.Job? = null
+    @Volatile private var serviceStatusCheckInFlight = false
 
     // Traffic stats
     private var _trafficStats = MutableStateFlow<Map<String, Any>>(
@@ -264,7 +266,10 @@ class FlutterSingboxPlugin :
     
     // Periodic status check
     private fun startPeriodicStatusCheck() {
-        coroutineScope.launch {
+        if (periodicStatusJob?.isActive == true) {
+            return
+        }
+        periodicStatusJob = coroutineScope.launch {
             while (true) {
                 try {
                     // Wait 15 seconds between checks
@@ -512,6 +517,7 @@ class FlutterSingboxPlugin :
             
         // Initialize status - ensure it's accurate
         checkServiceStatus()
+        startPeriodicStatusCheck()
     }
     
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -530,6 +536,9 @@ class FlutterSingboxPlugin :
         
         // Disconnect from service
         try {
+            periodicStatusJob?.cancel()
+            periodicStatusJob = null
+            serviceStatusCheckInFlight = false
             connection.disconnect()
             statusClient.disconnect()
             logClient.disconnect()
@@ -581,6 +590,11 @@ class FlutterSingboxPlugin :
             android.util.Log.e("FlutterSingboxPlugin", "Skipping service check - shutting down")
             return
         }
+        if (serviceStatusCheckInFlight) {
+            android.util.Log.e("FlutterSingboxPlugin", "Skipping service check - already in flight")
+            return
+        }
+        serviceStatusCheckInFlight = true
         
         coroutineScope.launch {
             try {
@@ -622,6 +636,8 @@ class FlutterSingboxPlugin :
                 
             } catch (e: Exception) {
                 android.util.Log.e("FlutterSingboxPlugin", "Error checking service status: ${e.message}")
+            } finally {
+                serviceStatusCheckInFlight = false
             }
         }
     }

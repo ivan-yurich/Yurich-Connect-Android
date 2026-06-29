@@ -59,6 +59,7 @@ class BoxService(
         private const val STICKY_RESTART_DELAY_MS = 2_500L
         private const val NETWORK_SETTLE_DELAY_MS = 6_000L
         private const val WAKE_SETTLE_DELAY_MS = 3_000L
+        private const val NETWORK_WAKE_DEBOUNCE_MS = 5_000L
 
         fun start() {
             val intent = runBlocking {
@@ -94,6 +95,7 @@ class BoxService(
     private var watchdogFailures = 0
     private var watchdogMixedProxyEnabled = false
     private var lastWatchdogRestartAt = 0L
+    private var lastNetworkWakeEventAt = 0L
     @Volatile private var watchdogRestarting = false
     private var keeperWakeLock: PowerManager.WakeLock? = null
     private var receiverRegistered = false
@@ -582,6 +584,13 @@ class BoxService(
         if (status.value != Status.Started || watchdogRestarting) {
             return
         }
+
+        val now = System.currentTimeMillis()
+        if (now - lastNetworkWakeEventAt < NETWORK_WAKE_DEBOUNCE_MS) {
+            android.util.Log.d("BoxService", "Watchdog: network/wake event debounced: $reason")
+            return
+        }
+        lastNetworkWakeEventAt = now
 
         serviceScope.launch {
             android.util.Log.d("BoxService", "Watchdog: network/wake event $reason")
