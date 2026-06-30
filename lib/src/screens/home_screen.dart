@@ -318,6 +318,19 @@ class _HomeScreenState extends State<HomeScreen>
     return _profiles.isEmpty ? null : _profiles.first;
   }
 
+  VpnProfile? get _explicitSelectedProfile {
+    final selectedId = _selectedProfileId;
+    if (selectedId == null) {
+      return null;
+    }
+    for (final profile in _profiles) {
+      if (profile.id == selectedId) {
+        return profile;
+      }
+    }
+    return null;
+  }
+
   bool get _connected =>
       _status == AurumVpnStatus.started || _status == AurumVpnStatus.starting;
 
@@ -1511,7 +1524,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    final current = _selectedProfile;
+    final current = _explicitSelectedProfile;
     if (current?.id == profile.id) {
       return;
     }
@@ -1546,7 +1559,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _connect() async {
-    final profile = _autoConnectProfile();
+    final profile = _explicitSelectedProfile ?? _autoConnectProfile();
     if (profile == null) {
       _showSnack(
         _profiles.isEmpty ? s.importFirst : s.autoConnectNoStableProfile,
@@ -3604,12 +3617,14 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   Widget build(BuildContext context) {
     final selected = _selectedProfile;
+    final explicitSelected = _explicitSelectedProfile;
     final connectCandidate = _connected
         ? selected
         : (_autoConnectProfile() ?? selected);
+    final panelProfile = explicitSelected ?? selected;
     final selectedProfileId = _connected
         ? (_selectedProfileId ?? selected?.id)
-        : (connectCandidate?.id ?? _selectedProfileId ?? selected?.id);
+        : (_selectedProfileId ?? selected?.id ?? connectCandidate?.id);
     final activeProfileId = _connected ? selectedProfileId : null;
 
     return Scaffold(
@@ -3663,7 +3678,7 @@ class _HomeScreenState extends State<HomeScreen>
                       pulse: _glowPulse,
                       strings: s,
                       profiles: _profiles,
-                      selectedProfile: connectCandidate,
+                      selectedProfile: panelProfile,
                       selectedId: selectedProfileId,
                       activeProfileId: activeProfileId,
                       selectedTab: _profileTab,
