@@ -1,4 +1,5 @@
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
+import 'package:aurum_vpn/src/models/profile_network_stability.dart';
 import 'package:aurum_vpn/src/models/profile_stability.dart';
 import 'package:aurum_vpn/src/services/profile_store.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -117,5 +118,37 @@ void main() {
     expect(loaded['profile-1']?.healthFailures, 4);
     expect(loaded['profile-1']?.lastFailureAt, lastFailureAt);
     expect(loaded['profile-1']?.lastFailureReason, 'health-probe');
+  });
+
+  test('stores profile network stability stats by network type', () async {
+    final store = ProfileStore();
+    final lastHealthyAt = DateTime.utc(2026, 6, 30, 9);
+
+    await store.saveProfileNetworkStabilityStats({
+      'profile-1': {
+        'wifi': ProfileNetworkStabilityStats(
+          successfulStarts: 2,
+          recoveries: 1,
+          healthFailures: 0,
+          trafficBytes: 1024,
+          lastHealthyAt: lastHealthyAt,
+        ),
+        'cellular': const ProfileNetworkStabilityStats(
+          healthFailures: 3,
+          lastFailureReason: 'health-probe:watchdog',
+        ),
+      },
+    });
+
+    final loaded = await store.loadProfileNetworkStabilityStats();
+    expect(loaded['profile-1']?['wifi']?.successfulStarts, 2);
+    expect(loaded['profile-1']?['wifi']?.recoveries, 1);
+    expect(loaded['profile-1']?['wifi']?.trafficBytes, 1024);
+    expect(loaded['profile-1']?['wifi']?.lastHealthyAt, lastHealthyAt);
+    expect(loaded['profile-1']?['cellular']?.healthFailures, 3);
+    expect(
+      loaded['profile-1']?['cellular']?.lastFailureReason,
+      'health-probe:watchdog',
+    );
   });
 }

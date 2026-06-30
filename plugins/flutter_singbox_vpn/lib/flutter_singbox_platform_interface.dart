@@ -52,6 +52,11 @@ abstract class FlutterSingboxPlatform extends PlatformInterface {
     throw UnimplementedError('getVPNStatus() has not been implemented.');
   }
 
+  /// Get current Android network snapshot used by recovery logic.
+  Future<Map<String, dynamic>> getNetworkSnapshot() {
+    throw UnimplementedError('getNetworkSnapshot() has not been implemented.');
+  }
+
   /// Stream of VPN status updates
   Stream<Map<String, dynamic>> get onStatusChanged {
     throw UnimplementedError('onStatusChanged has not been implemented.');

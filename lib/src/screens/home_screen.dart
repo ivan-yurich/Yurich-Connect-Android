@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/connection_status.dart';
 import '../models/connection_ui_state.dart';
+import '../models/profile_network_stability.dart';
 import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
@@ -62,6 +63,12 @@ const _idleHealthProbeInterval = Duration(minutes: 5);
 const _degradedHealthProbeInterval = Duration(seconds: 45);
 const _resumeHealthCheckDelay = Duration(seconds: 2);
 const _resumeNetworkSettleDelay = Duration(seconds: 5);
+const _resumeRecoveryMinInterval = Duration(seconds: 20);
+const _resumeWatchdogQuietWindow = Duration(seconds: 35);
+const _networkChangingSettleWindow = Duration(seconds: 35);
+const _nativeActivityGrace = Duration(seconds: 90);
+const _networkStatsTrafficMinDelta = 1024 * 1024;
+const _networkStatsTrafficMinInterval = Duration(minutes: 2);
 const _staleTunnelGrace = Duration(minutes: 5);
 const _tunnelHealthFailureThreshold = 4;
 const _autoReconnectMaxAttempts = 6;
@@ -178,6 +185,8 @@ class _HomeScreenState extends State<HomeScreen>
   final _profilePingError = <String, String>{};
   final _profilePingCheckedAt = <String, DateTime>{};
   Map<String, ProfileStabilityStats> _profileStabilityStats = const {};
+  Map<String, Map<String, ProfileNetworkStabilityStats>>
+  _profileNetworkStabilityStats = const {};
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
   _ProfileTab _profileTab = _ProfileTab.all;
@@ -216,13 +225,21 @@ class _HomeScreenState extends State<HomeScreen>
   bool _smartRouteRuDirect = false;
   DateTime? _nextAutoReconnectAt;
   DateTime? _nextTunnelHealthCheckAt;
+  DateTime? _networkChangingUntil;
+  DateTime? _lastNetworkSnapshotAt;
+  DateTime? _lastNativeActivityAt;
+  DateTime? _lastNetworkStatsTrafficSavedAt;
   int _autoReconnectAttempts = 0;
   int _tunnelHealthFailures = 0;
   int _lastSessionTrafficBytes = 0;
+  int _lastNetworkStatsTrafficBytes = 0;
+  int _networkGenerationId = 0;
   int _idleHealthChecks = 0;
   int _idleRecoveryCount = 0;
   String? _lastRecoverySource;
   String? _lastNetworkEvent;
+  String _networkType = 'unknown';
+  String _networkFingerprint = '';
   final _logs = <String>[];
   final _pendingLogs = <String>[];
   final _stabilityEvents = <String>[];
@@ -271,6 +288,19 @@ class _HomeScreenState extends State<HomeScreen>
       ? s.healthFailuresNone
       : s.healthFailuresCount(_tunnelHealthFailures);
 
+  bool get _networkChanging => _isNetworkChanging(DateTime.now());
+
+  String get _networkTypeLabel {
+    return switch (_networkType) {
+      'wifi' => 'Wi-Fi',
+      'cellular' => 'LTE/5G',
+      'ethernet' => 'Ethernet',
+      'none' => 'Нет сети',
+      'unknown' => 'Неизвестно',
+      _ => _networkType,
+    };
+  }
+
   String get _idleKeeperStatusLabel {
     final lastIdleAt = _lastIdleHealthCheckAt;
     if (lastIdleAt == null) {
@@ -293,6 +323,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   bool get _connectionDegraded {
     if (_stoppingByUser) {
+      return false;
+    }
+    if (_networkChanging) {
       return false;
     }
     if (_autoReconnectInFlight || _tunnelHealthFailures > 0) {
@@ -375,7 +408,7 @@ class _HomeScreenState extends State<HomeScreen>
       return 2;
     }
     if (source.contains('idle') || source.contains('stale')) {
-      return 1;
+      return 2;
     }
     if (_tunnelHealthFailures > 0) {
       return 2;
@@ -399,6 +432,85 @@ class _HomeScreenState extends State<HomeScreen>
     _lastKeeperAction = action;
     _lastKeeperActionAt = at ?? DateTime.now();
     _recordStabilityEvent('keeper:$action', at: _lastKeeperActionAt);
+  }
+
+  bool _isResumeRecoveryQuietWindow(DateTime now) {
+    final lastResumeAt = _lastResumeRecoveryAt;
+    return lastResumeAt != null &&
+        now.difference(lastResumeAt) < _resumeWatchdogQuietWindow;
+  }
+
+  bool _isNetworkChanging(DateTime now) {
+    final changingUntil = _networkChangingUntil;
+    return changingUntil != null && now.isBefore(changingUntil);
+  }
+
+  String _networkTypeFromSnapshot(Map<String, dynamic> snapshot) {
+    final raw = '${snapshot['type'] ?? 'unknown'}'.trim().toLowerCase();
+    return raw.isEmpty ? 'unknown' : raw;
+  }
+
+  int _networkGenerationFromSnapshot(Map<String, dynamic> snapshot) {
+    return _eventInt(snapshot['generation']);
+  }
+
+  bool _applyNetworkSnapshot(
+    Map<String, dynamic> snapshot, {
+    required String source,
+    DateTime? at,
+  }) {
+    if (snapshot.isEmpty) {
+      return false;
+    }
+
+    final now = at ?? DateTime.now();
+    final nextType = _networkTypeFromSnapshot(snapshot);
+    final nextGeneration = _networkGenerationFromSnapshot(snapshot);
+    final nextFingerprint = '${snapshot['fingerprint'] ?? ''}'.trim();
+    final generationChanged =
+        nextGeneration > 0 && nextGeneration != _networkGenerationId;
+    final fingerprintChanged =
+        nextFingerprint.isNotEmpty &&
+        _networkFingerprint.isNotEmpty &&
+        nextFingerprint != _networkFingerprint;
+    final changed = generationChanged || fingerprintChanged;
+
+    void apply() {
+      _networkType = nextType;
+      if (nextGeneration > 0) {
+        _networkGenerationId = nextGeneration;
+      }
+      if (nextFingerprint.isNotEmpty) {
+        _networkFingerprint = nextFingerprint;
+      }
+      _lastNetworkSnapshotAt = now;
+      if (changed) {
+        _networkChangingUntil = now.add(_networkChangingSettleWindow);
+        _lastNetworkEvent = '$source:$nextType#g$_networkGenerationId';
+        _lastNetworkStatsTrafficBytes = _lastSessionTrafficBytes;
+        _lastNetworkStatsTrafficSavedAt = null;
+        _tunnelHealthFailures = 0;
+        _nextTunnelHealthCheckAt = _networkChangingUntil;
+      }
+    }
+
+    if (mounted && changed) {
+      setState(apply);
+    } else {
+      apply();
+    }
+
+    if (changed) {
+      _setKeeperAction('network-changing:$source');
+      _recordStabilityEvent(
+        'network-change:$source:type=$nextType:g=$_networkGenerationId',
+      );
+      _queueLog(
+        'Network changed from $source: type=$nextType generation=$_networkGenerationId.',
+      );
+    }
+
+    return changed;
   }
 
   void _recordStabilityEvent(String message, {DateTime? at}) {
@@ -448,6 +560,9 @@ class _HomeScreenState extends State<HomeScreen>
       return ConnectionStatus.connecting;
     }
     if (_status == AurumVpnStatus.started) {
+      if (_networkChanging) {
+        return ConnectionStatus.networkChanging;
+      }
       if (_connectionDegraded) {
         return ConnectionStatus.degraded;
       }
@@ -525,12 +640,20 @@ class _HomeScreenState extends State<HomeScreen>
     if (state == AppLifecycleState.resumed) {
       _lastNetworkEvent = 'app-resume';
       unawaited(_refreshBatteryOptimizationStatus());
+      unawaited(_refreshNetworkSnapshot('app-resume'));
       unawaited(_handleResumeRecovery());
     }
   }
 
   Future<void> _handleResumeRecovery() async {
-    _lastResumeRecoveryAt = DateTime.now();
+    final startedAt = DateTime.now();
+    final previousResumeAt = _lastResumeRecoveryAt;
+    if (previousResumeAt != null &&
+        startedAt.difference(previousResumeAt) < _resumeRecoveryMinInterval) {
+      _recordStabilityEvent('resume-recovery:debounced');
+      return;
+    }
+    _lastResumeRecoveryAt = startedAt;
     await Future<void>.delayed(_resumeHealthCheckDelay);
     if (!mounted ||
         _stoppingByUser ||
@@ -561,6 +684,19 @@ class _HomeScreenState extends State<HomeScreen>
           !_autoRecoveryArmed) {
         return;
       }
+
+      final settledStatus = await _refreshVpnStatus();
+      if (!mounted ||
+          _stoppingByUser ||
+          _manualDisconnectRequested ||
+          !_autoRecoveryArmed) {
+        return;
+      }
+      if (settledStatus == AurumVpnStatus.stopped) {
+        _markUnexpectedStop('app-resume-after-settle');
+        return;
+      }
+
       _nextTunnelHealthCheckAt = DateTime.now();
       _setKeeperAction('resume-check');
       unawaited(_refreshTunnelHealth(source: 'app-resume'));
@@ -572,6 +708,8 @@ class _HomeScreenState extends State<HomeScreen>
     final storedProfiles = await _store.loadProfiles();
     final profiles = _clientSupportedProfiles(storedProfiles);
     final loadedStabilityStats = await _store.loadProfileStabilityStats();
+    final loadedNetworkStabilityStats = await _store
+        .loadProfileNetworkStabilityStats();
     if (profiles.length != storedProfiles.length) {
       await _store.saveProfiles(profiles);
     }
@@ -596,6 +734,20 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
     }
+    final networkStabilityStats =
+        <String, Map<String, ProfileNetworkStabilityStats>>{
+          for (final entry in loadedNetworkStabilityStats.entries)
+            if (profileIds.contains(entry.key))
+              entry.key: Map<String, ProfileNetworkStabilityStats>.from(
+                entry.value,
+              ),
+        };
+    if (networkStabilityStats.length != loadedNetworkStabilityStats.length) {
+      await _store.saveProfileNetworkStabilityStats(networkStabilityStats);
+      if (!mounted) {
+        return;
+      }
+    }
     final resolvedSelectedId =
         profiles.any((profile) => profile.id == selectedId)
         ? selectedId
@@ -606,6 +758,7 @@ class _HomeScreenState extends State<HomeScreen>
       _appBuildNumber = appInfo.buildNumber;
       _profiles = profiles;
       _profileStabilityStats = stabilityStats;
+      _profileNetworkStabilityStats = networkStabilityStats;
       _selectedProfileId = resolvedSelectedId;
       _smartRouteRuDirect = smartRouteRuDirect;
       _manualDisconnectRequested = manualDisconnectRequested;
@@ -615,6 +768,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
     unawaited(_pingProfiles(profiles));
     unawaited(_resolveProfileCountries(profiles));
+    unawaited(_refreshNetworkSnapshot('load'));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(_showSubscriptionRenewalReminder(profiles));
@@ -652,6 +806,7 @@ class _HomeScreenState extends State<HomeScreen>
 
           final status = event['status'] as String?;
           if (status != null && mounted) {
+            _applyNetworkSnapshot(event, source: 'status-event');
             final now = DateTime.now();
             var recoverUnexpectedStop = false;
             setState(() {
@@ -719,13 +874,18 @@ class _HomeScreenState extends State<HomeScreen>
               if (!mounted || latest == null) {
                 return;
               }
+              _applyNetworkSnapshot(latest, source: 'traffic-event');
               final uplinkSpeed = _eventInt(latest['uplinkSpeed']);
               final downlinkSpeed = _eventInt(latest['downlinkSpeed']);
               final sessionTotal = _eventInt(latest['sessionTotal']);
+              final connectionsIn = _eventInt(latest['connectionsIn']);
+              final connectionsOut = _eventInt(latest['connectionsOut']);
               final hasTraffic =
                   uplinkSpeed > 0 ||
                   downlinkSpeed > 0 ||
                   sessionTotal > _lastSessionTrafficBytes;
+              final hasNativeActivity =
+                  hasTraffic || connectionsIn > 0 || connectionsOut > 0;
               final now = DateTime.now();
               final nextUplink =
                   latest['formattedUplinkSpeed'] as String? ?? _uplink;
@@ -754,8 +914,14 @@ class _HomeScreenState extends State<HomeScreen>
                   _lastHealthyAt = now;
                   _tunnelHealthFailures = 0;
                 }
+                if (hasNativeActivity && _status == AurumVpnStatus.started) {
+                  _lastNativeActivityAt = now;
+                }
               }
 
+              if (hasTraffic && _status == AurumVpnStatus.started) {
+                _recordNetworkTrafficIfNeeded(sessionTotal, now);
+              }
               if (displayChanged || healthChanged) {
                 setState(applyTrafficUpdate);
               } else {
@@ -1427,6 +1593,14 @@ class _HomeScreenState extends State<HomeScreen>
             (stats) => stats.recordStartFailure(_redactSensitive('$error')),
           ),
         );
+        unawaited(
+          _recordProfileNetworkStability(
+            profile,
+            (stats) => stats.recordHealthFailure(
+              'start:${_redactSensitive('$error')}',
+            ),
+          ),
+        );
         rethrow;
       }
     }, message: s.connectingTo(profile.name));
@@ -1446,6 +1620,15 @@ class _HomeScreenState extends State<HomeScreen>
     return _profileStabilityStats[profileId] ?? const ProfileStabilityStats();
   }
 
+  ProfileNetworkStabilityStats _profileNetworkStabilityFor(
+    String profileId, {
+    String? networkType,
+  }) {
+    final type = networkType ?? _networkType;
+    return _profileNetworkStabilityStats[profileId]?[type] ??
+        const ProfileNetworkStabilityStats();
+  }
+
   Future<void> _recordProfileStability(
     VpnProfile profile,
     ProfileStabilityStats Function(ProfileStabilityStats current) update,
@@ -1462,6 +1645,70 @@ class _HomeScreenState extends State<HomeScreen>
     await _store.saveProfileStabilityStats(nextStats);
   }
 
+  Future<void> _recordProfileNetworkStability(
+    VpnProfile profile,
+    ProfileNetworkStabilityStats Function(ProfileNetworkStabilityStats current)
+    update, {
+    String? networkType,
+  }) async {
+    final type = (networkType ?? _networkType).trim().isEmpty
+        ? 'unknown'
+        : (networkType ?? _networkType).trim().toLowerCase();
+    final nextStats = <String, Map<String, ProfileNetworkStabilityStats>>{
+      for (final entry in _profileNetworkStabilityStats.entries)
+        entry.key: Map<String, ProfileNetworkStabilityStats>.from(entry.value),
+    };
+    final profileStats = nextStats.putIfAbsent(
+      profile.id,
+      () => <String, ProfileNetworkStabilityStats>{},
+    );
+    profileStats[type] = update(
+      _profileNetworkStabilityFor(profile.id, networkType: type),
+    );
+    if (mounted) {
+      setState(() => _profileNetworkStabilityStats = nextStats);
+    } else {
+      _profileNetworkStabilityStats = nextStats;
+    }
+    await _store.saveProfileNetworkStabilityStats(nextStats);
+  }
+
+  bool _hasRecentNativeActivity(DateTime now) {
+    final lastNativeAt = _lastNativeActivityAt;
+    return lastNativeAt != null &&
+        now.difference(lastNativeAt) < _nativeActivityGrace;
+  }
+
+  void _recordNetworkTrafficIfNeeded(int sessionTotal, DateTime now) {
+    final profile = _selectedProfile;
+    if (profile == null || sessionTotal <= 0) {
+      return;
+    }
+
+    final delta = sessionTotal - _lastNetworkStatsTrafficBytes;
+    final lastSavedAt = _lastNetworkStatsTrafficSavedAt;
+    if (delta <= 0) {
+      return;
+    }
+
+    final enoughBytes = delta >= _networkStatsTrafficMinDelta;
+    final enoughTime =
+        lastSavedAt == null ||
+        now.difference(lastSavedAt) >= _networkStatsTrafficMinInterval;
+    if (!enoughBytes && !enoughTime) {
+      return;
+    }
+
+    _lastNetworkStatsTrafficBytes = sessionTotal;
+    _lastNetworkStatsTrafficSavedAt = now;
+    unawaited(
+      _recordProfileNetworkStability(
+        profile,
+        (stats) => stats.recordTraffic(delta, at: now),
+      ),
+    );
+  }
+
   String _profileStabilityLabel(VpnProfile profile) {
     final stats = _profileStabilityFor(profile.id);
     if (stats.isTemporarilyUnstable()) {
@@ -1475,6 +1722,24 @@ class _HomeScreenState extends State<HomeScreen>
       return s.profileStabilityGood;
     }
     return s.profileStabilityLearning;
+  }
+
+  String _profileNetworkStatsSummary(VpnProfile profile) {
+    final statsByNetwork = _profileNetworkStabilityStats[profile.id];
+    if (statsByNetwork == null || statsByNetwork.isEmpty) {
+      return 'none';
+    }
+    final entries = statsByNetwork.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return entries
+        .map((entry) {
+          final stats = entry.value;
+          return '${entry.key}:starts=${stats.successfulStarts},'
+              'recovery=${stats.recoveries},'
+              'fail=${stats.healthFailures},'
+              'traffic=${stats.trafficBytes}';
+        })
+        .join('; ');
   }
 
   Future<void> _startVpnCore(VpnProfile profile) async {
@@ -1500,6 +1765,8 @@ class _HomeScreenState extends State<HomeScreen>
     _lastRecoverySource = null;
     _lastNetworkEvent = 'manual-start';
     _lastSessionTrafficBytes = 0;
+    _lastNetworkStatsTrafficBytes = 0;
+    _lastNetworkStatsTrafficSavedAt = null;
     _idleHealthChecks = 0;
     _idleRecoveryCount = 0;
     _tunnelHealthFailures = 0;
@@ -1651,6 +1918,12 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(
       _recordProfileStability(profile, (stats) => stats.recordStartSuccess()),
     );
+    unawaited(
+      _recordProfileNetworkStability(
+        profile,
+        (stats) => stats.recordStartSuccess(),
+      ),
+    );
     unawaited(_refreshConnectedCountry(profile.id));
   }
 
@@ -1764,6 +2037,21 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<void> _refreshNetworkSnapshot(String source) async {
+    try {
+      final snapshot = await _nativeCall(
+        'getNetworkSnapshot',
+        _vpnEngine.getNetworkSnapshot(),
+        timeout: _nativeShortTimeout,
+      );
+      _applyNetworkSnapshot(snapshot, source: source);
+    } on Object catch (error) {
+      _queueLog(
+        'Native network snapshot ignored [$source]: ${_redactSensitive('$error')}',
+      );
+    }
+  }
+
   Future<String> _waitForVpnStatus(
     Set<String> expected, {
     required Duration timeout,
@@ -1790,6 +2078,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     _statusWatchdogInFlight = true;
     try {
+      await _refreshNetworkSnapshot('watchdog');
       final previous = _status;
       final status = await _refreshVpnStatus();
       final ignoreStopped =
@@ -1807,6 +2096,14 @@ class _HomeScreenState extends State<HomeScreen>
           !_stoppingByUser &&
           !ignoreStopped) {
         final now = DateTime.now();
+        if (_isNetworkChanging(now)) {
+          _setKeeperAction('watchdog-network-changing');
+          return;
+        }
+        if (_isResumeRecoveryQuietWindow(now)) {
+          _setKeeperAction('watchdog-resume-quiet');
+          return;
+        }
         final stale = _isTunnelStale(now);
         final idleCheck = _shouldRunIdleHealthCheck(now);
         if (stale) {
@@ -1851,6 +2148,12 @@ class _HomeScreenState extends State<HomeScreen>
           (stats) => stats.recordStartFailure('unexpected-stop:$source'),
         ),
       );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthFailure('unexpected-stop:$source'),
+        ),
+      );
     }
     setState(() {
       _lastError = s.vpnStoppedUnexpectedly;
@@ -1875,8 +2178,35 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final now = DateTime.now();
+    if (_isNetworkChanging(now)) {
+      _setKeeperAction('health-skip-network-changing:$source');
+      _nextTunnelHealthCheckAt =
+          _networkChangingUntil ?? now.add(_networkChangingSettleWindow);
+      return;
+    }
+
     final nextCheckAt = _nextTunnelHealthCheckAt;
     if (nextCheckAt != null && now.isBefore(nextCheckAt)) {
+      return;
+    }
+
+    if (_hasRecentNativeActivity(now)) {
+      _tunnelHealthFailures = 0;
+      _lastHealthyAt = _lastNativeActivityAt ?? now;
+      _setKeeperAction('native-activity-ok:$source', at: _lastHealthyAt);
+      _nextTunnelHealthCheckAt = now.add(_healthProbeIntervalFor(source));
+      unawaited(
+        _recordProfileStability(
+          profile,
+          (stats) => stats.recordHealthy(at: _lastHealthyAt),
+        ),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthy(at: _lastHealthyAt),
+        ),
+      );
       return;
     }
 
@@ -1889,6 +2219,12 @@ class _HomeScreenState extends State<HomeScreen>
       _nextTunnelHealthCheckAt = now.add(_healthProbeIntervalFor(source));
       unawaited(
         _recordProfileStability(
+          profile,
+          (stats) => stats.recordHealthy(at: lastTrafficAt),
+        ),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
           profile,
           (stats) => stats.recordHealthy(at: lastTrafficAt),
         ),
@@ -1919,6 +2255,12 @@ class _HomeScreenState extends State<HomeScreen>
         unawaited(
           _recordProfileStability(profile, (stats) => stats.recordHealthy()),
         );
+        unawaited(
+          _recordProfileNetworkStability(
+            profile,
+            (stats) => stats.recordHealthy(),
+          ),
+        );
         return;
       }
 
@@ -1927,6 +2269,12 @@ class _HomeScreenState extends State<HomeScreen>
       _setKeeperAction('probe-failed:$source');
       unawaited(
         _recordProfileStability(
+          profile,
+          (stats) => stats.recordHealthFailure('health-probe:$source'),
+        ),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
           profile,
           (stats) => stats.recordHealthFailure('health-probe:$source'),
         ),
@@ -1983,6 +2331,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final now = DateTime.now();
+    final recoveryNetworkGeneration = _networkGenerationId;
     final nextAttemptAt = _nextAutoReconnectAt;
     if (nextAttemptAt != null && now.isBefore(nextAttemptAt)) {
       return;
@@ -2035,6 +2384,19 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
 
+      await _refreshNetworkSnapshot('reconnect:$source#$attempt');
+      if (_networkGenerationId != recoveryNetworkGeneration &&
+          _isNetworkChanging(DateTime.now())) {
+        _autoReconnectAttempts = 0;
+        _nextAutoReconnectAt = _networkChangingUntil;
+        _setKeeperAction('reconnect-cancel-network-change:$source#$attempt');
+        _queueLog(
+          'VPN watchdog: reconnect cancelled because network changed '
+          'from generation $recoveryNetworkGeneration to $_networkGenerationId.',
+        );
+        return;
+      }
+
       final status = await _refreshVpnStatus();
       if (!forceRestart && status != AurumVpnStatus.stopped) {
         _autoReconnectAttempts = 0;
@@ -2066,6 +2428,12 @@ class _HomeScreenState extends State<HomeScreen>
       unawaited(
         _recordProfileStability(profile, (stats) => stats.recordRecovery()),
       );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordRecovery(),
+        ),
+      );
     } on Object catch (error) {
       final errorText = _redactSensitive('$error');
       _queueLog('VPN watchdog reconnect failed: $errorText');
@@ -2074,6 +2442,12 @@ class _HomeScreenState extends State<HomeScreen>
         _recordProfileStability(
           profile,
           (stats) => stats.recordStartFailure(errorText),
+        ),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthFailure(errorText),
         ),
       );
       if (mounted) {
@@ -2879,6 +3253,18 @@ class _HomeScreenState extends State<HomeScreen>
       'connection_degraded: $_connectionDegraded',
       'connection_idle: ${_isTunnelIdle(now)}',
       'connection_stale: ${_isTunnelStale(now)}',
+      'network_type: $_networkType',
+      'network_label: $_networkTypeLabel',
+      'network_generation: $_networkGenerationId',
+      'network_changing: $_networkChanging',
+      if (_networkFingerprint.isNotEmpty)
+        'network_fingerprint: $_networkFingerprint',
+      if (_lastNetworkSnapshotAt != null)
+        'last_network_snapshot_local: ${_lastNetworkSnapshotAt!.toIso8601String()}',
+      if (_networkChangingUntil != null)
+        'network_changing_until_local: ${_networkChangingUntil!.toIso8601String()}',
+      if (_lastNativeActivityAt != null)
+        'last_native_activity_local: ${_lastNativeActivityAt!.toIso8601String()}',
       'manual_disconnect_requested: $_manualDisconnectRequested',
       'message: ${_redactSensitive(_message)}',
       if (_lastError != null) 'last_error: $_lastError',
@@ -2926,6 +3312,7 @@ class _HomeScreenState extends State<HomeScreen>
             '${_profileStabilityFor(profile.id).healthFailures}',
         if (_profileStabilityFor(profile.id).lastFailureReason != null)
           'profile_last_failure: ${_redactSensitive(_profileStabilityFor(profile.id).lastFailureReason!)}',
+        'profile_network_stats: ${_profileNetworkStatsSummary(profile)}',
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
       '',

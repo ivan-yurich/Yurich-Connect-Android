@@ -64,7 +64,7 @@ void main() {
   });
 
   group('ConnectionUiState', () {
-    test('serializes idle, degraded, reconnecting and failed states', () {
+    test('serializes idle, degraded, network changing and failed states', () {
       expect(
         ConnectionUiState.idle(
           uploadSpeed: '0 B/s',
@@ -81,6 +81,14 @@ void main() {
           totalTraffic: '1 MB',
         ).toJson()['status'],
         ConnectionStatus.degraded.name,
+      );
+      expect(
+        ConnectionUiState.networkChanging(
+          uploadSpeed: '0 B/s',
+          downloadSpeed: '0 B/s',
+          totalTraffic: '1 MB',
+        ).toJson()['status'],
+        ConnectionStatus.networkChanging.name,
       );
       expect(
         ConnectionUiState.reconnecting().toJson()['status'],

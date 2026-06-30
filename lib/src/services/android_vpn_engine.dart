@@ -63,6 +63,11 @@ class AndroidVpnEngine implements VpnEngine {
   Future<String> getVPNStatus() => _singBox.getVPNStatus();
 
   @override
+  Future<Map<String, dynamic>> getNetworkSnapshot() {
+    return _singBox.getNetworkSnapshot();
+  }
+
+  @override
   Future<bool> saveConfig(String config) => _singBox.saveConfig(config);
 
   @override

@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -222,6 +223,8 @@ class FlutterSingboxPlugin :
     private var stopCleanupJob: kotlinx.coroutines.Job? = null
     private var periodicStatusJob: kotlinx.coroutines.Job? = null
     @Volatile private var serviceStatusCheckInFlight = false
+    private var networkGenerationId = 0
+    private var lastNetworkFingerprint = ""
 
     // Traffic stats
     private var _trafficStats = MutableStateFlow<Map<String, Any>>(
@@ -645,10 +648,11 @@ class FlutterSingboxPlugin :
     // Helper method to send status updates to Flutter
     private fun sendStatusUpdate(status: Status) {
         android.util.Log.e("FlutterSingboxPlugin", "Sending status update to Flutter: ${status.name}")
-        val statusMap = mapOf(
+        val statusMap = currentNetworkSnapshot().toMutableMap()
+        statusMap.putAll(mapOf(
             "status" to status.name,
             "statusCode" to status.ordinal
-        )
+        ))
         
         val handler = Handler(Looper.getMainLooper())
         handler.post {
@@ -672,6 +676,103 @@ class FlutterSingboxPlugin :
         }
     }
 
+    private fun currentNetworkSnapshot(): Map<String, Any> {
+        val snapshot = readNetworkSnapshot().toMutableMap()
+        val fingerprint = snapshot["fingerprint"]?.toString() ?: "none"
+        if (lastNetworkFingerprint.isNotEmpty() && lastNetworkFingerprint != fingerprint) {
+            networkGenerationId += 1
+        }
+        lastNetworkFingerprint = fingerprint
+        snapshot["generation"] = networkGenerationId
+        return snapshot
+    }
+
+    private fun readNetworkSnapshot(): Map<String, Any> {
+        return try {
+            val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val networks = connectivity.allNetworks
+            val candidate = networks
+                .mapNotNull { network ->
+                    val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+                    if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        return@mapNotNull null
+                    }
+                    if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                        return@mapNotNull null
+                    }
+                    val linkProperties = connectivity.getLinkProperties(network)
+                    val type = networkType(capabilities)
+                    val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    val metered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                    val score = when (type) {
+                        "wifi" -> 40
+                        "cellular" -> 35
+                        "ethernet" -> 45
+                        else -> 20
+                    } + if (validated) 10 else 0
+                    NetworkSnapshotCandidate(
+                        type = type,
+                        interfaceName = linkProperties?.interfaceName ?: "",
+                        validated = validated,
+                        metered = metered,
+                        score = score
+                    )
+                }
+                .maxByOrNull { it.score }
+
+            if (candidate == null) {
+                return mapOf(
+                    "type" to "none",
+                    "interfaceName" to "",
+                    "validated" to false,
+                    "metered" to false,
+                    "fingerprint" to "none"
+                )
+            }
+
+            val fingerprint = listOf(
+                candidate.type,
+                candidate.interfaceName,
+                candidate.validated,
+                candidate.metered
+            ).joinToString("|")
+            mapOf(
+                "type" to candidate.type,
+                "interfaceName" to candidate.interfaceName,
+                "validated" to candidate.validated,
+                "metered" to candidate.metered,
+                "fingerprint" to fingerprint
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("FlutterSingboxPlugin", "Network snapshot failed", e)
+            mapOf(
+                "type" to "unknown",
+                "interfaceName" to "",
+                "validated" to false,
+                "metered" to false,
+                "fingerprint" to "unknown"
+            )
+        }
+    }
+
+    private fun networkType(capabilities: NetworkCapabilities): String {
+        return when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "bluetooth"
+            else -> "other"
+        }
+    }
+
+    private data class NetworkSnapshotCandidate(
+        val type: String,
+        val interfaceName: String,
+        val validated: Boolean,
+        val metered: Boolean,
+        val score: Int
+    )
+
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             "getPlatformVersion" -> {
@@ -692,6 +793,9 @@ class FlutterSingboxPlugin :
             }
             "getVPNStatus" -> {
                 getVPNStatus(result)
+            }
+            "getNetworkSnapshot" -> {
+                result.success(currentNetworkSnapshot())
             }
             // Per-App Tunneling Methods
             "setPerAppProxyMode" -> {
@@ -1399,7 +1503,8 @@ class FlutterSingboxPlugin :
         val downlinkTotal = if (status.downlinkTotal > 0L) status.downlinkTotal else uidSample.rxTotal
         
         // Update traffic stats
-        val stats = mapOf(
+        val stats = currentNetworkSnapshot().toMutableMap()
+        stats.putAll(mapOf(
             "uplinkSpeed" to uplinkSpeed,
             "downlinkSpeed" to downlinkSpeed,
             "uplinkTotal" to uplinkTotal,
@@ -1416,7 +1521,7 @@ class FlutterSingboxPlugin :
             "formattedSessionUplink" to TrafficStats.formatBytes(sessionUplink),
             "formattedSessionDownlink" to TrafficStats.formatBytes(sessionDownlink),
             "formattedSessionTotal" to TrafficStats.formatBytes(sessionUplink + sessionDownlink)
-        )
+        ))
         
         _trafficStats.value = stats as Map<String, Any>
         updateTrafficNotification(stats)

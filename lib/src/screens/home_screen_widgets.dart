@@ -46,6 +46,7 @@ class _StatusPanel extends StatelessWidget {
     final statusLabel = switch (connectionState.status) {
       ConnectionStatus.connected => strings.connected,
       ConnectionStatus.idle => strings.idleConnection,
+      ConnectionStatus.networkChanging => strings.reconnectingConnection,
       ConnectionStatus.degraded => strings.connectionProblem,
       ConnectionStatus.reconnecting => strings.reconnectingConnection,
       ConnectionStatus.failed => strings.connectionProblem,

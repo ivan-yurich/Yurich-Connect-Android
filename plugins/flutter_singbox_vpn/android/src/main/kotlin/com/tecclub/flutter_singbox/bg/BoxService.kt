@@ -60,6 +60,9 @@ class BoxService(
         private const val NETWORK_SETTLE_DELAY_MS = 6_000L
         private const val WAKE_SETTLE_DELAY_MS = 3_000L
         private const val NETWORK_WAKE_DEBOUNCE_MS = 5_000L
+        private const val NETWORK_WAKE_GRACE_MS = 45_000L
+        private const val NETWORK_WAKE_PROBE_ATTEMPTS = 3
+        private const val NETWORK_WAKE_PROBE_DELAY_MS = 4_000L
 
         fun start() {
             val intent = runBlocking {
@@ -550,6 +553,13 @@ class BoxService(
                     continue
                 }
 
+                if (isNetworkWakeGraceWindow()) {
+                    watchdogFailures = 0
+                    android.util.Log.d("BoxService", "Watchdog: waiting for network wake settle")
+                    delay(10_000L)
+                    continue
+                }
+
                 val healthy = probeMixedProxy()
                 if (healthy) {
                     if (watchdogFailures > 0) {
@@ -616,9 +626,27 @@ class BoxService(
                 return@launch
             }
 
-            if (!probeMixedProxy()) {
-                restartFromWatchdog(reason)
+            repeat(NETWORK_WAKE_PROBE_ATTEMPTS) { attempt ->
+                if (status.value != Status.Started || !hasDefaultNetwork()) {
+                    return@launch
+                }
+                if (probeMixedProxy()) {
+                    watchdogFailures = 0
+                    android.util.Log.d(
+                        "BoxService",
+                        "Watchdog: network/wake probe recovered after $reason"
+                    )
+                    return@launch
+                }
+                android.util.Log.w(
+                    "BoxService",
+                    "Watchdog: network/wake probe failed ${attempt + 1}/$NETWORK_WAKE_PROBE_ATTEMPTS after $reason"
+                )
+                if (attempt + 1 < NETWORK_WAKE_PROBE_ATTEMPTS) {
+                    delay(NETWORK_WAKE_PROBE_DELAY_MS)
+                }
             }
+            restartFromWatchdog(reason)
         }
     }
 
@@ -749,6 +777,12 @@ class BoxService(
         } else {
             WAKE_SETTLE_DELAY_MS
         }
+    }
+
+    private fun isNetworkWakeGraceWindow(): Boolean {
+        val lastEventAt = lastNetworkWakeEventAt
+        return lastEventAt > 0L &&
+            System.currentTimeMillis() - lastEventAt < NETWORK_WAKE_GRACE_MS
     }
 
     private fun isDeviceIdleMode(): Boolean {

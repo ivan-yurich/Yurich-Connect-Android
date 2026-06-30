@@ -108,6 +108,15 @@ class MethodChannelFlutterSingbox extends FlutterSingboxPlatform {
   }
 
   @override
+  Future<Map<String, dynamic>> getNetworkSnapshot() async {
+    final snapshot = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'getNetworkSnapshot',
+    );
+    if (snapshot == null) return const {};
+    return Map<String, dynamic>.from(snapshot);
+  }
+
+  @override
   Stream<Map<String, dynamic>> get onStatusChanged =>
       _statusStreamController.stream;
 

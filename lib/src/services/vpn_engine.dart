@@ -29,6 +29,7 @@ abstract class VpnEngine {
     int id,
   });
   Future<String> getVPNStatus();
+  Future<Map<String, dynamic>> getNetworkSnapshot();
   Future<bool> saveConfig(String config);
   Future<String> getConfig();
   Future<bool> startVPN();

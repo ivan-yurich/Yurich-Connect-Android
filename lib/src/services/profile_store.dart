@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/profile_stability.dart';
+import '../models/profile_network_stability.dart';
 import '../models/vpn_profile.dart';
 
 class ProfileStore {
@@ -18,6 +19,7 @@ class ProfileStore {
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
   static const _profileStabilityKey = 'profileStabilityStats';
+  static const _profileNetworkStabilityKey = 'profileNetworkStabilityStats';
 
   Future<List<VpnProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -257,5 +259,76 @@ class ProfileStore {
     }
 
     await prefs.setString(_profileStabilityKey, jsonEncode(normalized));
+  }
+
+  Future<Map<String, Map<String, ProfileNetworkStabilityStats>>>
+  loadProfileNetworkStabilityStats() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_profileNetworkStabilityKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    final stats = <String, Map<String, ProfileNetworkStabilityStats>>{};
+    for (final profileEntry in decoded.entries) {
+      final profileId = '${profileEntry.key}'.trim();
+      final networkMap = profileEntry.value;
+      if (profileId.isEmpty || networkMap is! Map) {
+        continue;
+      }
+
+      final profileStats = <String, ProfileNetworkStabilityStats>{};
+      for (final networkEntry in networkMap.entries) {
+        final networkType = '${networkEntry.key}'.trim();
+        final value = networkEntry.value;
+        if (networkType.isEmpty || value is! Map) {
+          continue;
+        }
+        profileStats[networkType] = ProfileNetworkStabilityStats.fromJson(
+          value.cast<String, dynamic>(),
+        );
+      }
+      if (profileStats.isNotEmpty) {
+        stats[profileId] = profileStats;
+      }
+    }
+    return stats;
+  }
+
+  Future<void> saveProfileNetworkStabilityStats(
+    Map<String, Map<String, ProfileNetworkStabilityStats>> stats,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, Map<String, Map<String, dynamic>>>{};
+    for (final profileEntry in stats.entries) {
+      final profileId = profileEntry.key.trim();
+      if (profileId.isEmpty || profileEntry.value.isEmpty) {
+        continue;
+      }
+
+      final networkStats = <String, Map<String, dynamic>>{};
+      for (final networkEntry in profileEntry.value.entries) {
+        final networkType = networkEntry.key.trim();
+        if (networkType.isEmpty) {
+          continue;
+        }
+        networkStats[networkType] = networkEntry.value.toJson();
+      }
+      if (networkStats.isNotEmpty) {
+        normalized[profileId] = networkStats;
+      }
+    }
+
+    if (normalized.isEmpty) {
+      await prefs.remove(_profileNetworkStabilityKey);
+      return;
+    }
+
+    await prefs.setString(_profileNetworkStabilityKey, jsonEncode(normalized));
   }
 }
