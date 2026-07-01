@@ -1,3 +1,4 @@
+import 'package:aurum_vpn/src/models/dns_protection_mode.dart';
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/models/profile_network_stability.dart';
 import 'package:aurum_vpn/src/models/profile_stability.dart';
@@ -82,6 +83,15 @@ void main() {
 
     await store.saveSmartRouteRuDirect(false);
     expect(await store.loadSmartRouteRuDirect(), isFalse);
+  });
+
+  test('stores DNS protection mode', () async {
+    final store = ProfileStore();
+
+    expect(await store.loadDnsProtectionMode(), DnsProtectionMode.stable);
+
+    await store.saveDnsProtectionMode(DnsProtectionMode.leakGuard);
+    expect(await store.loadDnsProtectionMode(), DnsProtectionMode.leakGuard);
   });
 
   test('stores manual disconnect guard', () async {

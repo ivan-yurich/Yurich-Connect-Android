@@ -427,6 +427,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.subscriptionNeedsAttention,
     required this.batteryOptimizationIgnored,
     required this.smartRouteRuDirect,
+    required this.dnsLeakProtectionEnabled,
     required this.keeperStatus,
     required this.idleKeeperStatus,
     required this.lastHealthStatus,
@@ -442,6 +443,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.onPing,
     required this.onRequestBackgroundAccess,
     required this.onSmartRouteChanged,
+    required this.onDnsLeakProtectionChanged,
   });
 
   final Animation<double> pulse;
@@ -466,6 +468,7 @@ class _ProfilePanel extends StatelessWidget {
   final bool Function(VpnProfile profile) subscriptionNeedsAttention;
   final bool batteryOptimizationIgnored;
   final bool smartRouteRuDirect;
+  final bool dnsLeakProtectionEnabled;
   final String keeperStatus;
   final String idleKeeperStatus;
   final String lastHealthStatus;
@@ -481,6 +484,7 @@ class _ProfilePanel extends StatelessWidget {
   final ValueChanged<VpnProfile> onPing;
   final VoidCallback onRequestBackgroundAccess;
   final ValueChanged<bool> onSmartRouteChanged;
+  final ValueChanged<bool> onDnsLeakProtectionChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -643,6 +647,7 @@ class _ProfilePanel extends StatelessWidget {
           subscriptionRefreshBusy: subscriptionRefreshBusy,
           batteryOptimizationIgnored: batteryOptimizationIgnored,
           smartRouteRuDirect: smartRouteRuDirect,
+          dnsLeakProtectionEnabled: dnsLeakProtectionEnabled,
           keeperStatus: keeperStatus,
           idleKeeperStatus: idleKeeperStatus,
           lastHealthStatus: lastHealthStatus,
@@ -655,6 +660,7 @@ class _ProfilePanel extends StatelessWidget {
           onRefreshSubscriptions: onRefreshSubscriptions,
           onRequestBackgroundAccess: onRequestBackgroundAccess,
           onSmartRouteChanged: onSmartRouteChanged,
+          onDnsLeakProtectionChanged: onDnsLeakProtectionChanged,
           onPing: selectedProfile == null
               ? null
               : () => onPing(selectedProfile!),
@@ -1183,6 +1189,7 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.subscriptionRefreshBusy,
     required this.batteryOptimizationIgnored,
     required this.smartRouteRuDirect,
+    required this.dnsLeakProtectionEnabled,
     required this.keeperStatus,
     required this.idleKeeperStatus,
     required this.lastHealthStatus,
@@ -1193,6 +1200,7 @@ class _ProfileInsightPanel extends StatelessWidget {
     required this.onRefreshSubscriptions,
     required this.onRequestBackgroundAccess,
     required this.onSmartRouteChanged,
+    required this.onDnsLeakProtectionChanged,
     required this.onPing,
   });
 
@@ -1207,6 +1215,7 @@ class _ProfileInsightPanel extends StatelessWidget {
   final bool subscriptionRefreshBusy;
   final bool batteryOptimizationIgnored;
   final bool smartRouteRuDirect;
+  final bool dnsLeakProtectionEnabled;
   final String keeperStatus;
   final String idleKeeperStatus;
   final String lastHealthStatus;
@@ -1217,10 +1226,15 @@ class _ProfileInsightPanel extends StatelessWidget {
   final VoidCallback onRefreshSubscriptions;
   final VoidCallback onRequestBackgroundAccess;
   final ValueChanged<bool> onSmartRouteChanged;
+  final ValueChanged<bool> onDnsLeakProtectionChanged;
   final VoidCallback? onPing;
 
   @override
   Widget build(BuildContext context) {
+    final selectedProfile = profile;
+    final profileUsesWarpDns =
+        selectedProfile != null && _usesWarpDns(selectedProfile);
+
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -1296,7 +1310,23 @@ class _ProfileInsightPanel extends StatelessWidget {
                       _InsightRow(
                         icon: Icons.dns_outlined,
                         label: strings.dnsLabel,
-                        value: strings.dnsCountryValue,
+                        value: profileUsesWarpDns
+                            ? strings.dnsWarpValue
+                            : dnsLeakProtectionEnabled
+                            ? strings.dnsLeakGuardValue
+                            : strings.dnsCountryValue,
+                        trailing: profileUsesWarpDns
+                            ? null
+                            : Switch.adaptive(
+                                value: dnsLeakProtectionEnabled,
+                                onChanged: onDnsLeakProtectionChanged,
+                                activeThumbColor: _cyanGlow,
+                              ),
+                        onTap: profileUsesWarpDns
+                            ? null
+                            : () => onDnsLeakProtectionChanged(
+                                !dnsLeakProtectionEnabled,
+                              ),
                       ),
                       _InsightRow(
                         icon: Icons.security_update_good_outlined,
@@ -1425,6 +1455,11 @@ class _ProfileInsightPanel extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  bool _usesWarpDns(VpnProfile profile) {
+    return profile.kind == VpnProfileKind.hysteria ||
+        profile.kind == VpnProfileKind.hysteria2;
   }
 }
 

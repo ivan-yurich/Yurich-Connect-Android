@@ -70,7 +70,7 @@ class ProtocolDisplayMapper {
     if (normalizedProtocol == 'hysteria2' ||
         normalizedProtocol == 'hy2' ||
         normalizedProtocol == 'hysteria') {
-      return 'Hysteria 2 / Турбо';
+      return 'Turbo WARP / Hysteria2';
     }
     if (normalizedProtocol == 'pingtunnel') {
       return 'PingTunnel / Эксперимент';

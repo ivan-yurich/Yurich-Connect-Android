@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/connection_status.dart';
 import '../models/connection_ui_state.dart';
+import '../models/dns_protection_mode.dart';
 import '../models/profile_network_stability.dart';
 import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
@@ -223,6 +224,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _batteryOptimizationCheckInFlight = false;
   bool _batteryOptimizationPromptShown = false;
   bool _smartRouteRuDirect = false;
+  DnsProtectionMode _dnsProtectionMode = DnsProtectionMode.stable;
   DateTime? _nextAutoReconnectAt;
   DateTime? _nextTunnelHealthCheckAt;
   DateTime? _networkChangingUntil;
@@ -729,6 +731,7 @@ class _HomeScreenState extends State<HomeScreen>
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
+    final dnsProtectionMode = await _store.loadDnsProtectionMode();
     final manualDisconnectRequested = await _store
         .loadManualDisconnectRequested();
     if (!mounted) {
@@ -774,6 +777,7 @@ class _HomeScreenState extends State<HomeScreen>
       _profileNetworkStabilityStats = networkStabilityStats;
       _selectedProfileId = resolvedSelectedId;
       _smartRouteRuDirect = smartRouteRuDirect;
+      _dnsProtectionMode = dnsProtectionMode;
       _manualDisconnectRequested = manualDisconnectRequested;
       _message = profiles.isEmpty
           ? strings.addProfileHint
@@ -1807,6 +1811,7 @@ class _HomeScreenState extends State<HomeScreen>
         naiveMode: plan.naiveMode,
         smartRouteRuDirect: _smartRouteRuDirect,
         smartRouteRuBypassPackages: smartRouteBypassPackages,
+        dnsProtectionMode: _dnsProtectionMode,
       );
       final configSummary = _summarizeSingBoxConfig(
         config,
@@ -2869,6 +2874,36 @@ class _HomeScreenState extends State<HomeScreen>
     }, message: s.smartRouteApplying);
   }
 
+  Future<void> _setDnsLeakProtection(bool enabled) async {
+    final mode = enabled
+        ? DnsProtectionMode.leakGuard
+        : DnsProtectionMode.stable;
+    if (_dnsProtectionMode == mode || _busy) {
+      return;
+    }
+
+    final profile = _selectedProfile;
+    final shouldRestart = _connected && profile != null;
+    await _store.saveDnsProtectionMode(mode);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _dnsProtectionMode = mode;
+      _message = enabled ? s.dnsLeakGuardEnabled : s.dnsLeakGuardDisabled;
+    });
+
+    if (!shouldRestart) {
+      return;
+    }
+
+    await _runBusy(() async {
+      await _stopVpnCore(updateMessage: false);
+      await _startVpnCore(profile);
+    }, message: s.dnsLeakGuardApplying);
+  }
+
   Future<List<String>> _smartRouteBypassPackages() async {
     if (!_smartRouteRuDirect) {
       return const [];
@@ -3253,6 +3288,7 @@ class _HomeScreenState extends State<HomeScreen>
       'locale: ${Platform.localeName}',
       'config_target: ${_vpnEngine.configTarget.name}',
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
+      'dns_protection_mode: ${_dnsProtectionMode.storageValue}',
       'smart_route_enabled: $_smartRouteRuDirect',
       if (_smartRouteRuDirect) ...[
         'smart_route_mode: ru-apps-direct/global-vpn',
@@ -3308,6 +3344,11 @@ class _HomeScreenState extends State<HomeScreen>
       if (profile != null) ...[
         'profile: ${_redactSensitive(profile.name)}',
         'protocol: ${_profileKindLabel(profile.kind)}',
+        if (_profileUsesWarpExit(profile)) ...[
+          'transport_mode: warp',
+          'dns_mode: warp/proxy',
+          'expected_geo: Cloudflare/WARP exit, not pure VPS location',
+        ],
         'endpoint: ${_redactSensitive(profile.endpoint)}',
         'country: ${_profileCountryFlag(profile) ?? 'unknown'}'
             '${_profileCountryCode(profile) == null ? '' : ' ${_profileCountryCode(profile)}'}'
@@ -3363,6 +3404,11 @@ class _HomeScreenState extends State<HomeScreen>
         .map(_redactSensitive);
     lines.addAll(safeLogs.isEmpty ? const ['Логов пока нет.'] : safeLogs);
     return lines.join('\n');
+  }
+
+  bool _profileUsesWarpExit(VpnProfile profile) {
+    return profile.kind == VpnProfileKind.hysteria ||
+        profile.kind == VpnProfileKind.hysteria2;
   }
 
   String _summarizeSingBoxConfig(
@@ -3434,10 +3480,16 @@ class _HomeScreenState extends State<HomeScreen>
         (server) => server['tag'] == dnsFinal,
         orElse: () => const <String, dynamic>{},
       );
+      final dnsDetour = dnsServer['detour'];
+      final hasRemoteDns = dnsServers.any(
+        (server) => server['tag'] == 'remote-dns',
+      );
       return [
         'target=${target.name}',
         'proxy=${proxy['type'] ?? 'unknown'}',
         'dns=$dnsFinal/${dnsServer['type'] ?? 'unknown'}',
+        if (hasRemoteDns) 'dns_leak_guard=true',
+        if (dnsDetour != null) 'dns_detour=$dnsDetour',
         if (hasFakeDns) 'fake_dns=true',
         'mtu=${tun['mtu'] ?? 'unknown'}',
         'strict_route=${tun['strict_route'] ?? 'unknown'}',
@@ -3702,6 +3754,8 @@ class _HomeScreenState extends State<HomeScreen>
                       subscriptionNeedsAttention: _subscriptionNeedsAttention,
                       batteryOptimizationIgnored: _batteryOptimizationIgnored,
                       smartRouteRuDirect: _smartRouteRuDirect,
+                      dnsLeakProtectionEnabled:
+                          _dnsProtectionMode.protectsAgainstLeaks,
                       keeperStatus: _keeperStatusLabel,
                       idleKeeperStatus: _idleKeeperStatusLabel,
                       lastHealthStatus: _lastHealthStatusLabel,
@@ -3722,6 +3776,8 @@ class _HomeScreenState extends State<HomeScreen>
                           unawaited(_requestBackgroundPowerAccess()),
                       onSmartRouteChanged: (enabled) =>
                           unawaited(_setSmartRouteRuDirect(enabled)),
+                      onDnsLeakProtectionChanged: (enabled) =>
+                          unawaited(_setDnsLeakProtection(enabled)),
                     ),
                     const SizedBox(height: 16),
                     _AppCenterPanel(

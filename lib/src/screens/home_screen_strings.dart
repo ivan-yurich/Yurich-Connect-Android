@@ -55,6 +55,11 @@ class _Strings {
     required this.networkLabel,
     required this.dnsLabel,
     required this.dnsCountryValue,
+    required this.dnsLeakGuardValue,
+    required this.dnsWarpValue,
+    required this.dnsLeakGuardEnabled,
+    required this.dnsLeakGuardDisabled,
+    required this.dnsLeakGuardApplying,
     required this.smartRouteLabel,
     required this.smartRouteEnabledValue,
     required this.smartRouteDisabledValue,
@@ -156,6 +161,11 @@ class _Strings {
   final String networkLabel;
   final String dnsLabel;
   final String dnsCountryValue;
+  final String dnsLeakGuardValue;
+  final String dnsWarpValue;
+  final String dnsLeakGuardEnabled;
+  final String dnsLeakGuardDisabled;
+  final String dnsLeakGuardApplying;
   final String smartRouteLabel;
   final String smartRouteEnabledValue;
   final String smartRouteDisabledValue;
@@ -639,6 +649,11 @@ class _Strings {
     networkLabel: 'Сеть',
     dnsLabel: 'DNS',
     dnsCountryValue: 'Локальный resolver',
+    dnsLeakGuardValue: 'Через VPN',
+    dnsWarpValue: 'WARP',
+    dnsLeakGuardEnabled: 'DNS-защита включена',
+    dnsLeakGuardDisabled: 'DNS-защита выключена',
+    dnsLeakGuardApplying: 'Применяю DNS-защиту...',
     smartRouteLabel: 'Smart Route',
     smartRouteEnabledValue: 'RU direct / Global VPN',
     smartRouteDisabledValue: 'Всё через VPN',
@@ -784,6 +799,11 @@ class _Strings {
     networkLabel: 'Network',
     dnsLabel: 'DNS',
     dnsCountryValue: 'Local resolver',
+    dnsLeakGuardValue: 'VPN',
+    dnsWarpValue: 'WARP',
+    dnsLeakGuardEnabled: 'DNS Leak Guard enabled',
+    dnsLeakGuardDisabled: 'DNS Leak Guard disabled',
+    dnsLeakGuardApplying: 'Applying DNS Leak Guard...',
     smartRouteLabel: 'Smart Route',
     smartRouteEnabledValue: 'RU direct / Global VPN',
     smartRouteDisabledValue: 'All traffic through VPN',

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:aurum_vpn/src/models/dns_protection_mode.dart';
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/services/profile_importer.dart';
 import 'package:aurum_vpn/src/services/sing_box_config_builder.dart';
@@ -284,6 +285,47 @@ void main() {
     expect(httpFallbackProxy['server'], 'example.com');
     expect(httpFallbackProxy['username'], 'example.com');
     expect(httpFallbackProxy['password'], 'pass');
+  });
+
+  test('builds DNS leak guard config with bootstrap resolver', () async {
+    const link = 'naive+https://example.com:pass@example.com:443#Naive';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                dnsProtectionMode: DnsProtectionMode.leakGuard,
+              ),
+            )
+            as Map<String, dynamic>;
+
+    final dns = config['dns'] as Map<String, dynamic>;
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final remoteDns = dnsServers.firstWhere(
+      (server) => server['tag'] == 'remote-dns',
+    );
+
+    expect(dns['final'], 'remote-dns');
+    expect(remoteDns['type'], 'https');
+    expect(remoteDns['server'], '1.1.1.1');
+    expect(remoteDns['detour'], 'proxy');
+    expect((dns['rules'] as List).whereType<Map<String, dynamic>>().first, {
+      'domain': ['example.com'],
+      'action': 'route',
+      'server': 'local-dns',
+    });
+    expect(
+      (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
+      'remote-dns',
+    );
+
+    final proxy = (config['outbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .first;
+    expect(proxy['domain_resolver'], 'local-dns');
   });
 
   test('adds Smart Route direct rules for Russian apps and domains', () async {

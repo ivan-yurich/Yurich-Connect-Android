@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/dns_protection_mode.dart';
 import '../models/profile_stability.dart';
 import '../models/profile_network_stability.dart';
 import '../models/vpn_profile.dart';
@@ -13,6 +14,7 @@ class ProfileStore {
   static const _autoConnectKey = 'autoConnect';
   static const _manualDisconnectKey = 'manualDisconnectRequested';
   static const _smartRouteRuDirectKey = 'smartRouteRuDirect';
+  static const _dnsProtectionModeKey = 'dnsProtectionMode';
   static const _subscriptionReminderStampKey = 'subscriptionReminderStamp';
   static const _deletedProfileIdsBySubscriptionSourceKey =
       'deletedProfileIdsBySubscriptionSource';
@@ -192,6 +194,18 @@ class ProfileStore {
   Future<void> saveSmartRouteRuDirect(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_smartRouteRuDirectKey, enabled);
+  }
+
+  Future<DnsProtectionMode> loadDnsProtectionMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return DnsProtectionMode.fromStorageValue(
+      prefs.getString(_dnsProtectionModeKey),
+    );
+  }
+
+  Future<void> saveDnsProtectionMode(DnsProtectionMode mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_dnsProtectionModeKey, mode.storageValue);
   }
 
   Future<String?> loadSubscriptionReminderStamp() async {

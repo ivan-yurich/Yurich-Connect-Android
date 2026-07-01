@@ -58,7 +58,7 @@ void main() {
       );
       expect(
         ProtocolDisplayMapper.mapProtocolToDisplayName('hy2'),
-        'Hysteria 2 / Турбо',
+        'Turbo WARP / Hysteria2',
       );
     });
   });

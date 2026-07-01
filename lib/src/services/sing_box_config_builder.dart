@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../models/dns_protection_mode.dart';
 import '../models/vpn_profile.dart';
 import 'profile_engine_selector.dart';
 import 'smart_route_rules.dart';
@@ -18,6 +19,7 @@ class SingBoxConfigBuilder {
     NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
     bool smartRouteRuDirect = false,
     List<String> smartRouteRuBypassPackages = const [],
+    DnsProtectionMode dnsProtectionMode = DnsProtectionMode.stable,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -46,7 +48,7 @@ class SingBoxConfigBuilder {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
-      'dns': _dnsConfig(profile),
+      'dns': _dnsConfig(profile, dnsProtectionMode),
       'inbounds': [
         _tunInbound(
           smartRouteRuDirect: smartRouteRuDirect,
@@ -74,7 +76,9 @@ class SingBoxConfigBuilder {
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
-        'default_domain_resolver': 'local-dns',
+        'default_domain_resolver': dnsProtectionMode.protectsAgainstLeaks
+            ? 'remote-dns'
+            : 'local-dns',
         'auto_detect_interface': true,
         'final': 'proxy',
       },
@@ -129,9 +133,21 @@ class SingBoxConfigBuilder {
     };
   }
 
-  Map<String, dynamic> _dnsConfig(VpnProfile profile) {
+  Map<String, dynamic> _dnsConfig(
+    VpnProfile profile,
+    DnsProtectionMode dnsProtectionMode,
+  ) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
+      if (dnsProtectionMode.protectsAgainstLeaks)
+        {
+          'type': 'https',
+          'tag': 'remote-dns',
+          'server': '1.1.1.1',
+          'server_port': 443,
+          'path': '/dns-query',
+          'detour': 'proxy',
+        },
       {
         'type': 'fakeip',
         'tag': 'fakeip',
@@ -162,7 +178,9 @@ class SingBoxConfigBuilder {
       'strategy': 'ipv4_only',
       'cache_capacity': 8192,
       'reverse_mapping': true,
-      'final': 'local-dns',
+      'final': dnsProtectionMode.protectsAgainstLeaks
+          ? 'remote-dns'
+          : 'local-dns',
     };
   }
 
