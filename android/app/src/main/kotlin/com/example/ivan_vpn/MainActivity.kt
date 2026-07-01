@@ -13,6 +13,8 @@ import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -22,8 +24,14 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val ioExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "YurichConnectIo").apply { isDaemon = true }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handlePackageInstallerCallback(intent)
@@ -78,39 +86,38 @@ class MainActivity : FlutterActivity() {
             "online.dnsai.ivanvpn/apps",
         ).setMethodCallHandler { call, result ->
             when (call.method) {
-                "getInstalledPackages" -> result.success(getInstalledPackages())
+                "getInstalledPackages" -> runIo(result) { getInstalledPackages() }
                 else -> result.notImplemented()
             }
         }
     }
 
     private fun inspectApk(path: String?, result: MethodChannel.Result) {
+        runIo(result) { inspectApkData(path) }
+    }
+
+    private fun inspectApkData(path: String?): Map<String, Any> {
         if (path.isNullOrBlank()) {
-            result.error("BAD_PATH", "APK path is empty", null)
-            return
+            throw NativeMethodFailure("BAD_PATH", "APK path is empty")
         }
 
         val apkFile = File(path)
         if (!apkFile.exists() || !apkFile.canRead() || apkFile.length() <= 0L) {
-            result.error("APK_NOT_READABLE", "APK file is empty or not readable", null)
-            return
+            throw NativeMethodFailure("APK_NOT_READABLE", "APK file is empty or not readable")
         }
 
         try {
             val packageInfo = getArchivePackageInfo(apkFile)
                 ?: throw IllegalStateException("Android cannot parse update APK")
-            result.success(
-                mapOf(
-                    "packageName" to (packageInfo.packageName ?: ""),
-                    "versionName" to (packageInfo.versionName ?: ""),
-                    "versionCode" to packageInfo.versionCodeCompat(),
-                ),
+            return mapOf(
+                "packageName" to (packageInfo.packageName ?: ""),
+                "versionName" to (packageInfo.versionName ?: ""),
+                "versionCode" to packageInfo.versionCodeCompat(),
             )
         } catch (error: Exception) {
-            result.error(
+            throw NativeMethodFailure(
                 "APK_INVALID",
                 "${error.javaClass.simpleName}: ${error.message}",
-                null,
             )
         }
     }
@@ -147,32 +154,48 @@ class MainActivity : FlutterActivity() {
         }
 
         val apkFile = File(path)
+        ioExecutor.execute {
+            try {
+                validateInstallSource(apkFile)
+                val installFile = prepareInstallFile(apkFile)
+                try {
+                    installWithPackageInstaller(installFile)
+                    successOnMain(result, null)
+                } catch (error: Exception) {
+                    Log.w(TAG, "PackageInstaller update failed, falling back to ACTION_VIEW", error)
+                    openInstallIntentOnMain(installFile, result)
+                }
+            } catch (error: NativeMethodFailure) {
+                errorOnMain(result, error.code, error.message ?: "Native method failed")
+            } catch (error: Exception) {
+                errorOnMain(
+                    result,
+                    "INSTALL_FAILED",
+                    "${error.javaClass.simpleName}: ${error.message}",
+                )
+            }
+        }
+    }
+
+    private fun validateInstallSource(apkFile: File) {
         if (!apkFile.exists()) {
-            result.error("APK_NOT_FOUND", "APK file not found", null)
-            return
+            throw NativeMethodFailure("APK_NOT_FOUND", "APK file not found")
         }
         if (!apkFile.canRead() || apkFile.length() <= 0L) {
-            result.error("APK_NOT_READABLE", "APK file is empty or not readable", null)
-            return
+            throw NativeMethodFailure("APK_NOT_READABLE", "APK file is empty or not readable")
         }
         if (!isReadableApk(apkFile)) {
-            result.error(
+            throw NativeMethodFailure(
                 "APK_INVALID",
                 "Downloaded update file is not a valid APK. Please retry the update.",
-                null,
             )
-            return
         }
+    }
 
-        try {
-            val installFile = prepareInstallFile(apkFile)
-            installWithPackageInstaller(installFile)
-            result.success(null)
-        } catch (error: Exception) {
-            Log.w(TAG, "PackageInstaller update failed, falling back to ACTION_VIEW", error)
+    private fun openInstallIntentOnMain(apkFile: File, result: MethodChannel.Result) {
+        mainHandler.post {
             try {
-                val installFile = prepareInstallFile(apkFile)
-                openInstallIntent(installFile)
+                openInstallIntent(apkFile)
                 result.success(null)
             } catch (fallbackError: ActivityNotFoundException) {
                 result.error("INSTALL_FAILED", "Android package installer was not found", null)
@@ -474,6 +497,41 @@ class MainActivity : FlutterActivity() {
             } else {
                 0
             }
+
+    override fun onDestroy() {
+        ioExecutor.shutdown()
+        super.onDestroy()
+    }
+
+    private fun <T> runIo(result: MethodChannel.Result, task: () -> T) {
+        ioExecutor.execute {
+            try {
+                successOnMain(result, task())
+            } catch (error: NativeMethodFailure) {
+                errorOnMain(result, error.code, error.message ?: "Native method failed")
+            } catch (error: Exception) {
+                Log.w(TAG, "Native channel call failed", error)
+                errorOnMain(
+                    result,
+                    "NATIVE_ERROR",
+                    "${error.javaClass.simpleName}: ${error.message}",
+                )
+            }
+        }
+    }
+
+    private fun successOnMain(result: MethodChannel.Result, value: Any?) {
+        mainHandler.post { result.success(value) }
+    }
+
+    private fun errorOnMain(result: MethodChannel.Result, code: String, message: String) {
+        mainHandler.post { result.error(code, message, null) }
+    }
+
+    private class NativeMethodFailure(
+        val code: String,
+        override val message: String,
+    ) : Exception(message)
 
     private companion object {
         const val TAG = "YurichUpdater"
