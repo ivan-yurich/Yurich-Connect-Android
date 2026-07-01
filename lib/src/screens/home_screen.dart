@@ -23,6 +23,7 @@ import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_store.dart';
 import '../services/protocol_display_mapper.dart';
+import '../services/sing_box_log_filter.dart';
 import '../services/smart_route_rules.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
@@ -3400,7 +3401,7 @@ class _HomeScreenState extends State<HomeScreen>
         .take(120)
         .toList()
         .reversed
-        .where((log) => !_isDiagnosticNoise(log))
+        .where((log) => !SingBoxLogFilter.isDiagnosticNoise(log))
         .map(_redactSensitive);
     lines.addAll(safeLogs.isEmpty ? const ['Логов пока нет.'] : safeLogs);
     return lines.join('\n');
@@ -3521,12 +3522,6 @@ class _HomeScreenState extends State<HomeScreen>
     } on Object {
       return 'target=${target.name}; raw/custom config';
     }
-  }
-
-  bool _isDiagnosticNoise(String log) {
-    return log.contains('router: found package name:') ||
-        log.contains('router: found user id:') ||
-        log.contains('router: failed to search process: process not found');
   }
 
   Future<void> _setLogsExpanded(bool expanded) async {
