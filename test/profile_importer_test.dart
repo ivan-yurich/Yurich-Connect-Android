@@ -287,7 +287,7 @@ void main() {
     expect(httpFallbackProxy['password'], 'pass');
   });
 
-  test('builds DNS leak guard config with bootstrap resolver', () async {
+  test('keeps Naive DNS stable when Auto DNS is enabled', () async {
     const link = 'naive+https://example.com:pass@example.com:443#Naive';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
@@ -304,6 +304,74 @@ void main() {
     final dnsServers = (dns['servers'] as List)
         .whereType<Map<String, dynamic>>()
         .toList();
+
+    expect(dns['final'], 'local-dns');
+    expect(
+      dnsServers.where((server) => server['tag'] == 'remote-dns'),
+      isEmpty,
+    );
+    expect((dns['rules'] as List).whereType<Map<String, dynamic>>().first, {
+      'domain': ['example.com'],
+      'action': 'route',
+      'server': 'local-dns',
+    });
+    expect(
+      (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
+      'local-dns',
+    );
+
+    final proxy = (config['outbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .first;
+    expect(proxy['domain_resolver'], 'local-dns');
+  });
+
+  test('keeps VLESS Reality DNS stable when Auto DNS is enabled', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                dnsProtectionMode: DnsProtectionMode.leakGuard,
+              ),
+            )
+            as Map<String, dynamic>;
+    final dns = config['dns'] as Map<String, dynamic>;
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
+    expect(dns['final'], 'local-dns');
+    expect(
+      dnsServers.where((server) => server['tag'] == 'remote-dns'),
+      isEmpty,
+    );
+    expect(
+      (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
+      'local-dns',
+    );
+  });
+
+  test('keeps remote DNS only for Hysteria Auto DNS mode', () async {
+    const link =
+        'hy2://secret-for-test@example.com:443?sni=cdn.example.com#Hy2';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                dnsProtectionMode: DnsProtectionMode.leakGuard,
+              ),
+            )
+            as Map<String, dynamic>;
+    final dns = config['dns'] as Map<String, dynamic>;
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
     final remoteDns = dnsServers.firstWhere(
       (server) => server['tag'] == 'remote-dns',
     );
@@ -312,20 +380,10 @@ void main() {
     expect(remoteDns['type'], 'https');
     expect(remoteDns['server'], '1.1.1.1');
     expect(remoteDns['detour'], 'proxy');
-    expect((dns['rules'] as List).whereType<Map<String, dynamic>>().first, {
-      'domain': ['example.com'],
-      'action': 'route',
-      'server': 'local-dns',
-    });
     expect(
       (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
       'remote-dns',
     );
-
-    final proxy = (config['outbounds'] as List)
-        .whereType<Map<String, dynamic>>()
-        .first;
-    expect(proxy['domain_resolver'], 'local-dns');
   });
 
   test('adds Smart Route direct rules for Russian apps and domains', () async {
@@ -389,8 +447,13 @@ void main() {
       (rule) =>
           rule['outbound'] == 'proxy' &&
           (rule['domain'] as List?)?.contains('chat.openai.com') == true &&
+          (rule['domain'] as List?)?.contains('aistudio.google.com') == true &&
           (rule['domain'] as List?)?.contains('gemini.google.com') == true &&
           (rule['domain'] as List?)?.contains('accounts.google.com') == true &&
+          (rule['domain'] as List?)?.contains(
+                'generativelanguage.googleapis.com',
+              ) ==
+              true &&
           (rule['domain'] as List?)?.contains('mtalk.google.com') == true &&
           (rule['domain'] as List?)?.contains('web.telegram.org') == true &&
           (rule['domain'] as List?)?.contains('t.me') == true,

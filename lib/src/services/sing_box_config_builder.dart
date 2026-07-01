@@ -46,9 +46,11 @@ class SingBoxConfigBuilder {
     _applyDialStability(profile, proxyOutbound);
     final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
 
+    final useRemoteDns = _usesRemoteDns(profile, dnsProtectionMode);
+
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
-      'dns': _dnsConfig(profile, dnsProtectionMode),
+      'dns': _dnsConfig(profile, useRemoteDns: useRemoteDns),
       'inbounds': [
         _tunInbound(
           smartRouteRuDirect: smartRouteRuDirect,
@@ -76,9 +78,7 @@ class SingBoxConfigBuilder {
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
-        'default_domain_resolver': dnsProtectionMode.protectsAgainstLeaks
-            ? 'remote-dns'
-            : 'local-dns',
+        'default_domain_resolver': useRemoteDns ? 'remote-dns' : 'local-dns',
         'auto_detect_interface': true,
         'final': 'proxy',
       },
@@ -134,12 +134,12 @@ class SingBoxConfigBuilder {
   }
 
   Map<String, dynamic> _dnsConfig(
-    VpnProfile profile,
-    DnsProtectionMode dnsProtectionMode,
-  ) {
+    VpnProfile profile, {
+    required bool useRemoteDns,
+  }) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
-      if (dnsProtectionMode.protectsAgainstLeaks)
+      if (useRemoteDns)
         {
           'type': 'https',
           'tag': 'remote-dns',
@@ -178,10 +178,16 @@ class SingBoxConfigBuilder {
       'strategy': 'ipv4_only',
       'cache_capacity': 8192,
       'reverse_mapping': true,
-      'final': dnsProtectionMode.protectsAgainstLeaks
-          ? 'remote-dns'
-          : 'local-dns',
+      'final': useRemoteDns ? 'remote-dns' : 'local-dns',
     };
+  }
+
+  bool _usesRemoteDns(VpnProfile profile, DnsProtectionMode dnsProtectionMode) {
+    if (!dnsProtectionMode.protectsAgainstLeaks) {
+      return false;
+    }
+    return profile.kind == VpnProfileKind.hysteria2 ||
+        profile.kind == VpnProfileKind.hysteria;
   }
 
   bool _isIpLiteral(String value) => InternetAddress.tryParse(value) != null;
