@@ -25,11 +25,11 @@ extension VpnProfileKindLabel on VpnProfileKind {
 
   bool get isClientSupported => switch (this) {
     VpnProfileKind.vlessReality ||
+    VpnProfileKind.vlessXhttp ||
+    VpnProfileKind.vlessTls ||
     VpnProfileKind.naive ||
     VpnProfileKind.hysteria2 ||
     VpnProfileKind.hysteria => true,
-    VpnProfileKind.vlessTls ||
-    VpnProfileKind.vlessXhttp ||
     VpnProfileKind.vlessMkcp ||
     VpnProfileKind.pingTunnelExperimental ||
     VpnProfileKind.singBoxConfig => false,

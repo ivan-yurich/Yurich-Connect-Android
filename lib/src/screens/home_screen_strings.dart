@@ -480,12 +480,22 @@ class _Strings {
     _ => 'Подключение: $name',
   };
 
-  String unsupportedProtocol(VpnProfileKind kind) => switch (this) {
-    _Strings.en =>
-      '${kind.label} is not enabled in this Android build. Use VLESS Reality, NaiveProxy, or Hysteria/Hysteria2.',
-    _ =>
-      '${kind.label} отключён в этой Android-сборке. Используй VLESS Reality, NaiveProxy или Hysteria/Hysteria2.',
-  };
+  String unsupportedProtocol(VpnProfileKind kind) {
+    if (kind == VpnProfileKind.vlessXhttp) {
+      return switch (this) {
+        _Strings.en =>
+          'VLESS XHTTP is imported and shown, but connection requires Xray/libXray. This APK currently runs VPN through sing-box.',
+        _ =>
+          'VLESS XHTTP импортируется и показывается, но для подключения нужен Xray/libXray. Этот APK сейчас запускает VPN через sing-box.',
+      };
+    }
+    return switch (this) {
+      _Strings.en =>
+        '${kind.label} is not enabled in this Android build. Use VLESS Reality, NaiveProxy, or Hysteria/Hysteria2.',
+      _ =>
+        '${kind.label} отключён в этой Android-сборке. Используй VLESS Reality, NaiveProxy или Hysteria/Hysteria2.',
+    };
+  }
 
   String networkRecoveryPaused(String name) => switch (this) {
     _Strings.en =>
@@ -593,7 +603,7 @@ class _Strings {
     addProfileHint: 'Добавь подписку Remnawave, QR или отдельный ключ',
     nothingToImport: 'Нечего импортировать.',
     supportedProtocolsOnly:
-        'В этой сборке поддерживаются VLESS Reality, NaiveProxy и Hysteria/Hysteria2. pingtunnel:// пока только для просмотра в разделе Эксперимент.',
+        'В этой сборке запускаются VLESS Reality, VLESS TLS, NaiveProxy и Hysteria/Hysteria2. VLESS XHTTP импортируется и показывается, но подключение требует Xray/libXray.',
     switchingProfile: 'Переключаю профиль...',
     importFirst: 'Сначала импортируй профиль.',
     autoConnectNoStableProfile:
@@ -712,7 +722,7 @@ class _Strings {
       _FaqItem(
         question: 'Какие протоколы поддерживаются?',
         answer:
-            'В Android-клиенте оставлены стабильные направления: VLESS Reality, NaiveProxy и Hysteria/Hysteria2. XHTTP, mKCP, TLS-only VLESS и raw sing-box JSON не показываются в профилях этой сборки.',
+            'В Android-клиенте запускаются стабильные направления: VLESS Reality, VLESS TLS, NaiveProxy и Hysteria/Hysteria2. XHTTP импортируется и виден в VLESS-разделе, но для подключения нужен Xray/libXray. mKCP и raw sing-box JSON остаются скрыты.',
       ),
       _FaqItem(
         question: 'Что делать, если после смены профиля пропал интернет?',
@@ -744,7 +754,7 @@ class _Strings {
     addProfileHint: 'Add a Remnawave subscription, QR code, or single key',
     nothingToImport: 'Nothing to import.',
     supportedProtocolsOnly:
-        'This build supports VLESS Reality, NaiveProxy, and Hysteria/Hysteria2. pingtunnel:// is shown as Experimental only.',
+        'This build runs VLESS Reality, VLESS TLS, NaiveProxy, and Hysteria/Hysteria2. VLESS XHTTP is imported and shown, but connection requires Xray/libXray.',
     switchingProfile: 'Switching profile...',
     importFirst: 'Import a profile first.',
     autoConnectNoStableProfile:
@@ -862,7 +872,7 @@ class _Strings {
       _FaqItem(
         question: 'Which protocols are supported?',
         answer:
-            'The Android client focuses on stable profiles: VLESS Reality, NaiveProxy, and Hysteria/Hysteria2. XHTTP, mKCP, TLS-only VLESS, and raw sing-box JSON are hidden in this build. PingTunnel (Experimental) is shown for tracking and is not started in this build.',
+            'The Android client runs stable profiles: VLESS Reality, VLESS TLS, NaiveProxy, and Hysteria/Hysteria2. XHTTP is now imported and visible in the VLESS tab, but connection requires Xray/libXray. mKCP and raw sing-box JSON remain hidden. PingTunnel (Experimental) is shown for tracking and is not started in this build.',
       ),
       _FaqItem(
         question: 'What if internet stops after switching profiles?',

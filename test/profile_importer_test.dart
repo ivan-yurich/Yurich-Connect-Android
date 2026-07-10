@@ -8,6 +8,7 @@ import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/services/profile_importer.dart';
 import 'package:aurum_vpn/src/services/sing_box_config_builder.dart';
 import 'package:aurum_vpn/src/services/smart_route_rules.dart';
+import 'package:aurum_vpn/src/services/xray_config_builder.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -30,9 +31,9 @@ void main() {
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
   });
 
-  test('normalizes VLESS Reality defaults for stable Android config', () async {
+  test('imports VLESS TLS link and builds via sing-box runtime', () async {
     const link =
-        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&pbk=abc123#Reality';
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome#TLS';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
     final config =
@@ -40,15 +41,34 @@ void main() {
             as Map<String, dynamic>;
     final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
 
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(proxy['type'], 'vless');
+    expect(proxy['server'], 'example.com');
+    expect(proxy['uuid'], '11111111-1111-4111-8111-111111111111');
+    expect(proxy['tls']['server_name'], 'www.example.com');
+  });
+
+  test('normalizes VLESS Reality defaults for stable Android config', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&pbk=abc123#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final wrapper =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final config = wrapper['xray'] as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+    final vnext = proxy['settings']['vnext'] as List;
+    final user = (vnext.first['users'] as List).first as Map<String, dynamic>;
+
     expect(profile.kind, VpnProfileKind.vlessReality);
-    expect(proxy['network'], isNull);
-    expect(proxy['flow'], 'xtls-rprx-vision');
-    expect(proxy['packet_encoding'], 'xudp');
-    expect(proxy['tls']['enabled'], true);
-    expect(proxy['tls']['server_name'], 'example.com');
-    expect(proxy['tls']['utls'], {'enabled': true, 'fingerprint': 'chrome'});
-    expect(proxy['tls']['reality']['enabled'], true);
-    expect(proxy['tls']['reality']['public_key'], 'abc123');
+    expect(profile.outbound?['packet_encoding'], 'xudp');
+    expect(user['flow'], 'xtls-rprx-vision');
+    expect(stream['network'], 'tcp');
+    expect(stream['security'], 'reality');
+    expect(stream['realitySettings']['serverName'], 'example.com');
+    expect(stream['realitySettings']['fingerprint'], 'chrome');
+    expect(stream['realitySettings']['publicKey'], 'abc123');
   });
 
   test('rejects VLESS Reality without public key', () async {
@@ -61,16 +81,23 @@ void main() {
     );
   });
 
-  test('imports VLESS XHTTP link as unsupported legacy profile', () async {
+  test('imports VLESS XHTTP link as first-class Xray profile', () async {
     const link =
-        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=xhttp&sni=example.com&path=%2Fxhttp#XHTTP';
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=example.com&path=%2Fxhttp&mode=auto&host=cdn.example.com&pbk=abc123#XHTTP';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
 
     expect(profile.kind, VpnProfileKind.vlessXhttp);
     expect(profile.outbound?['type'], 'vless');
-    expect(profile.outbound?['unsupported_transport'], 'xhttp');
-    expect(profile.outbound?['transport_options']['path'], '/xhttp');
+    expect(profile.outbound?['unsupported_transport'], isNull);
+    expect(profile.outbound?['transport'], {
+      'type': 'xhttp',
+      'path': '/xhttp',
+      'host': 'cdn.example.com',
+      'mode': 'auto',
+      'headers': {'Host': 'cdn.example.com'},
+    });
+    expect(profile.outbound?['tls']['reality']['public_key'], 'abc123');
     expect(
       () => SingBoxConfigBuilder().build(profile),
       throwsA(isA<UnsupportedError>()),
@@ -114,6 +141,24 @@ void main() {
     expect(proxy['down_mbps'], 200);
     expect(proxy['obfs'], {'type': 'salamander', 'password': 'obfs-secret'});
     expect(proxy['tls'], {'enabled': true, 'server_name': 'cdn.example.com'});
+  });
+
+  test('preserves complete Hysteria2 auth with an encoded colon', () async {
+    const link =
+        'hy2://client%3Asecret-for-test@example.com:8443/?sni=example.com&obfs=salamander&obfs-password=obfs-secret#Finland';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(SingBoxConfigBuilder().build(profile))
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.outbound?['password'], 'client:secret-for-test');
+    expect(proxy['password'], 'client:secret-for-test');
+    expect(proxy['obfs'], {'type': 'salamander', 'password': 'obfs-secret'});
+    expect(proxy['tls'], {'enabled': true, 'server_name': 'example.com'});
+    expect(profile.server, 'example.com');
+    expect(profile.kind, VpnProfileKind.hysteria2);
   });
 
   test('imports Hysteria v1 link with safe defaults', () async {
@@ -246,7 +291,16 @@ void main() {
       ),
       isTrue,
     );
-    expect(routeRules.any((rule) => rule['ip_is_private'] == true), isTrue);
+    final fakeIpRouteIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'proxy' &&
+          (rule['ip_cidr'] as List?)?.contains('198.18.0.0/15') == true,
+    );
+    final privateDirectIndex = routeRules.indexWhere(
+      (rule) => rule['ip_is_private'] == true && rule['outbound'] == 'direct',
+    );
+    expect(fakeIpRouteIndex, isNonNegative);
+    expect(privateDirectIndex, greaterThan(fakeIpRouteIndex));
     expect(
       (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
       'local-dns',
@@ -326,34 +380,81 @@ void main() {
     expect(proxy['domain_resolver'], 'local-dns');
   });
 
-  test('keeps VLESS Reality DNS stable when Auto DNS is enabled', () async {
+  test('keeps VLESS Reality DNS stable on Xray runtime', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
-    final config =
-        jsonDecode(
-              SingBoxConfigBuilder().build(
-                profile,
-                dnsProtectionMode: DnsProtectionMode.leakGuard,
-              ),
-            )
-            as Map<String, dynamic>;
+    final wrapper =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final config = wrapper['xray'] as Map<String, dynamic>;
     final dns = config['dns'] as Map<String, dynamic>;
-    final dnsServers = (dns['servers'] as List)
-        .whereType<Map<String, dynamic>>()
-        .toList();
+    final rules = (config['routing'] as Map<String, dynamic>)['rules'] as List;
+    final dnsServers = dns['servers'] as List;
+    final tunInbound =
+        (config['inbounds'] as List).first as Map<String, dynamic>;
 
-    expect(dns['final'], 'local-dns');
-    expect(
-      dnsServers.where((server) => server['tag'] == 'remote-dns'),
-      isEmpty,
-    );
-    expect(
-      (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
-      'local-dns',
-    );
+    expect(tunInbound['settings']['dns'], ['1.1.1.1', '8.8.8.8']);
+    expect((dnsServers.first as Map<String, dynamic>)['address'], '1.1.1.1');
+    expect(rules.first['protocol'], ['dns']);
+    expect(rules.first['outboundTag'], 'dns-out');
+    expect(rules[1]['port'], '53');
+    expect(rules[1]['outboundTag'], 'dns-out');
   });
+
+  test(
+    'uses remote DNS for VLESS Reality when Auto DNS is enabled in sing-box',
+    () async {
+      const link =
+          'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+      final profile = (await ProfileImporter().importFromText(link)).first;
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  dnsProtectionMode: DnsProtectionMode.leakGuard,
+                ),
+              )
+              as Map<String, dynamic>;
+      final dns = config['dns'] as Map<String, dynamic>;
+      final dnsServers = (dns['servers'] as List)
+          .whereType<Map<String, dynamic>>();
+      final dnsRules = (dns['rules'] as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final remoteDns = dnsServers.firstWhere(
+        (server) => server['tag'] == 'remote-dns-primary',
+        orElse: () => throw StateError('Remote DNS not configured'),
+      );
+      final proxy = (config['outbounds'] as List)
+          .whereType<Map<String, dynamic>>()
+          .first;
+      final serverRule = dnsRules.firstWhere(
+        (rule) => (rule['domain'] as List?)?.contains('example.com') == true,
+        orElse: () =>
+            throw StateError('DNS rule for profile server is missing'),
+      );
+
+      expect(dns['final'], 'remote-dns-primary');
+      expect(remoteDns['type'], 'https');
+      expect(remoteDns['server'], '1.1.1.1');
+      expect(
+        (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
+        'remote-dns-primary',
+      );
+      expect(proxy['domain_resolver'], 'remote-dns-primary');
+      expect(serverRule['server'], 'remote-dns-primary');
+      expect(
+        dnsServers.where((server) => server['tag'] == 'remote-dns-secondary'),
+        isNotEmpty,
+      );
+      expect(
+        dnsServers.where((server) => server['tag'] == 'local-dns'),
+        isEmpty,
+      );
+    },
+  );
 
   test('keeps remote DNS only for Hysteria Auto DNS mode', () async {
     const link =
@@ -372,18 +473,26 @@ void main() {
     final dnsServers = (dns['servers'] as List)
         .whereType<Map<String, dynamic>>()
         .toList();
+    final dnsRules = (dns['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
     final remoteDns = dnsServers.firstWhere(
-      (server) => server['tag'] == 'remote-dns',
+      (server) => server['tag'] == 'remote-dns-primary',
+    );
+    final serverRule = dnsRules.firstWhere(
+      (rule) => (rule['domain'] as List?)?.contains('example.com') == true,
+      orElse: () => throw StateError('DNS rule for profile server is missing'),
     );
 
-    expect(dns['final'], 'remote-dns');
+    expect(dns['final'], 'remote-dns-primary');
     expect(remoteDns['type'], 'https');
     expect(remoteDns['server'], '1.1.1.1');
-    expect(remoteDns['detour'], 'proxy');
     expect(
       (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
-      'remote-dns',
+      'remote-dns-primary',
     );
+    expect(serverRule['server'], 'remote-dns-primary');
+    expect(dnsServers.where((server) => server['tag'] == 'local-dns'), isEmpty);
   });
 
   test('adds Smart Route direct rules for Russian apps and domains', () async {
@@ -698,38 +807,47 @@ void main() {
     expect(proxy['password'], 'secret-for-test');
   });
 
-  test('normalizes standalone sing-box VLESS Reality outbound', () async {
-    final payload = jsonEncode({
-      'type': 'vless',
-      'tag': 'proxy',
-      'server': 'example.com',
-      'server_port': 443,
-      'uuid': '11111111-1111-4111-8111-111111111111',
-      'network': 'tcp',
-      'transport': {'type': 'tcp'},
-      'tls': {
-        'enabled': true,
-        'insecure': true,
-        'reality': {'enabled': true, 'public_key': 'abc123'},
-      },
-    });
+  test(
+    'normalizes standalone VLESS Reality outbound for Xray runtime',
+    () async {
+      final payload = jsonEncode({
+        'type': 'vless',
+        'tag': 'proxy',
+        'server': 'example.com',
+        'server_port': 443,
+        'uuid': '11111111-1111-4111-8111-111111111111',
+        'network': 'tcp',
+        'transport': {'type': 'tcp'},
+        'tls': {
+          'enabled': true,
+          'insecure': true,
+          'reality': {'enabled': true, 'public_key': 'abc123'},
+        },
+      });
 
-    final profile = (await ProfileImporter().importFromText(payload)).first;
-    final config =
-        jsonDecode(SingBoxConfigBuilder().build(profile))
-            as Map<String, dynamic>;
-    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+      final profile = (await ProfileImporter().importFromText(payload)).first;
+      final wrapper =
+          jsonDecode(XrayConfigBuilder().build(profile))
+              as Map<String, dynamic>;
+      final config = wrapper['xray'] as Map<String, dynamic>;
+      final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+      final stream = proxy['streamSettings'] as Map<String, dynamic>;
+      final user =
+          (((proxy['settings'] as Map<String, dynamic>)['vnext'] as List).first
+                  as Map<String, dynamic>)['users']
+              as List;
 
-    expect(profile.kind, VpnProfileKind.vlessReality);
-    expect(proxy['network'], isNull);
-    expect(proxy['transport'], isNull);
-    expect(proxy['flow'], 'xtls-rprx-vision');
-    expect(proxy['packet_encoding'], 'xudp');
-    expect(proxy['tls']['server_name'], 'example.com');
-    expect(proxy['tls']['insecure'], isNull);
-    expect(proxy['tls']['utls'], {'enabled': true, 'fingerprint': 'chrome'});
-    expect(proxy['tls']['reality']['public_key'], 'abc123');
-  });
+      expect(profile.kind, VpnProfileKind.vlessReality);
+      expect(profile.outbound?['network'], isNull);
+      expect(profile.outbound?['transport'], isNull);
+      expect(profile.outbound?['tls']['insecure'], isNull);
+      expect((user.first as Map<String, dynamic>)['flow'], 'xtls-rprx-vision');
+      expect(stream['network'], 'tcp');
+      expect(stream['realitySettings']['serverName'], 'example.com');
+      expect(stream['realitySettings']['fingerprint'], 'chrome');
+      expect(stream['realitySettings']['publicKey'], 'abc123');
+    },
+  );
 
   test('rejects legacy VLESS Reality outbounds without Reality fields', () {
     const profile = VpnProfile(
@@ -749,7 +867,7 @@ void main() {
     );
 
     expect(
-      () => SingBoxConfigBuilder().build(profile),
+      () => XrayConfigBuilder().build(profile),
       throwsA(isA<StateError>()),
     );
   });
@@ -922,6 +1040,62 @@ void main() {
     expect(profiles.first.kind, VpnProfileKind.vlessReality);
     expect(profiles.first.originalInput, startsWith('vless://'));
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
+  });
+
+  test('imports Remnawave Xray VLESS XHTTP JSON subscription', () async {
+    final payload = jsonEncode([
+      {
+        'remarks': 'Germany XHTTP',
+        'outbounds': [
+          {
+            'protocol': 'vless',
+            'tag': 'proxy',
+            'settings': {
+              'vnext': [
+                {
+                  'address': 'xhttp.example.com',
+                  'port': 443,
+                  'users': [
+                    {
+                      'id': '11111111-1111-4111-8111-111111111111',
+                      'encryption': 'none',
+                    },
+                  ],
+                },
+              ],
+            },
+            'streamSettings': {
+              'network': 'xhttp',
+              'security': 'reality',
+              'realitySettings': {
+                'serverName': 'www.microsoft.com',
+                'publicKey': 'abc123',
+                'shortId': '01',
+                'fingerprint': 'chrome',
+              },
+              'xhttpSettings': {
+                'path': '/xhttp',
+                'host': 'cdn.example.com',
+                'mode': 'auto',
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+
+    expect(profile.kind, VpnProfileKind.vlessXhttp);
+    expect(profile.name, 'Germany XHTTP');
+    expect(profile.outbound?['transport'], {
+      'type': 'xhttp',
+      'path': '/xhttp',
+      'host': 'cdn.example.com',
+      'mode': 'auto',
+      'headers': {'Host': 'cdn.example.com'},
+    });
+    expect(profile.outbound?['tls']['reality']['public_key'], 'abc123');
   });
 
   test('imports HTML subscription page with embedded profile links', () async {

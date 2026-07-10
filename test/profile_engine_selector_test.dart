@@ -17,23 +17,41 @@ void main() {
 
     expect(selection.engine, VpnCoreEngine.singBox);
     expect(selection.canRunInCurrentBuild, true);
+    expect(selection.reason, contains('sing-box'));
   });
 
-  test('routes VLESS XHTTP to future Xray engine', () {
+  test('runs VLESS XHTTP on Xray engine', () {
     final profile = _profile(
       VpnProfileKind.vlessXhttp,
       outbound: {
         'type': 'vless',
         'server': 'example.com',
-        'unsupported_transport': 'xhttp',
+        'transport': {'type': 'xhttp', 'path': '/xhttp'},
       },
     );
 
     final selection = ProfileEngineSelector.select(profile);
 
     expect(selection.engine, VpnCoreEngine.xray);
-    expect(selection.canRunInCurrentBuild, false);
+    expect(selection.canRunInCurrentBuild, true);
     expect(selection.reason, contains('Xray/libXray'));
+  });
+
+  test('runs VLESS TLS on sing-box engine', () {
+    final profile = _profile(
+      VpnProfileKind.vlessTls,
+      outbound: {
+        'type': 'vless',
+        'server': 'example.com',
+        'transport': {'type': 'tcp'},
+      },
+    );
+
+    final selection = ProfileEngineSelector.select(profile);
+
+    expect(selection.engine, VpnCoreEngine.singBox);
+    expect(selection.canRunInCurrentBuild, true);
+    expect(selection.reason, contains('sing-box'));
   });
 
   test('keeps Naive and Hysteria on sing-box', () {
@@ -47,6 +65,43 @@ void main() {
       expect(selection.engine, VpnCoreEngine.singBox);
       expect(selection.canRunInCurrentBuild, true);
     }
+  });
+
+  test(
+    'requires a successful startup probe for managed VLESS and Hysteria',
+    () {
+      for (final kind in [
+        VpnProfileKind.vlessReality,
+        VpnProfileKind.vlessTls,
+        VpnProfileKind.hysteria2,
+        VpnProfileKind.hysteria,
+      ]) {
+        expect(
+          ProfileEngineSelector.requiresSuccessfulStartupProbe(_profile(kind)),
+          isTrue,
+          reason: kind.name,
+        );
+      }
+    },
+  );
+
+  test('does not enforce mixed-proxy startup probe for unmanaged configs', () {
+    for (final kind in [
+      VpnProfileKind.naive,
+      VpnProfileKind.vlessXhttp,
+      VpnProfileKind.singBoxConfig,
+      VpnProfileKind.pingTunnelExperimental,
+    ]) {
+      expect(
+        ProfileEngineSelector.requiresSuccessfulStartupProbe(_profile(kind)),
+        isFalse,
+        reason: kind.name,
+      );
+    }
+  });
+
+  test('treats VLESS TLS as supported by the client', () {
+    expect(VpnProfileKind.vlessTls.isClientSupported, isTrue);
   });
 
   test('routes experimental PingTunnel to Xray-required engine', () {

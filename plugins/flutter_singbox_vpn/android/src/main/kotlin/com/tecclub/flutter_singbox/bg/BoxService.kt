@@ -21,6 +21,8 @@ import com.tecclub.flutter_singbox.constant.Action
 import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Status
 import com.tecclub.flutter_singbox.database.Settings
+import com.tecclub.flutter_singbox.xray.XrayRuntimeConfig
+import com.tecclub.flutter_singbox.xray.XrayRunner
 import io.nekohasekai.libbox.CommandServer
 import io.nekohasekai.libbox.CommandServerHandler
 import io.nekohasekai.libbox.Libbox
@@ -41,6 +43,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import java.security.MessageDigest
 
 class BoxService(
     private val service: Service, private val platformInterface: PlatformInterface
@@ -63,6 +66,7 @@ class BoxService(
         private const val NETWORK_WAKE_GRACE_MS = 45_000L
         private const val NETWORK_WAKE_PROBE_ATTEMPTS = 3
         private const val NETWORK_WAKE_PROBE_DELAY_MS = 4_000L
+        private const val LIFECYCLE_RECOVERY_TIMEOUT_MS = 30_000L
 
         fun start() {
             val intent = runBlocking {
@@ -93,15 +97,19 @@ class BoxService(
         ServiceNotification(status, service) 
     }
     private var commandServer: CommandServer? = null
+    private var xrayRunner: XrayRunner? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var watchdogJob: Job? = null
     private var watchdogFailures = 0
     private var watchdogMixedProxyEnabled = false
     private var lastWatchdogRestartAt = 0L
     private var lastNetworkWakeEventAt = 0L
+    private var lastStartAttemptAt = 0L
+    private var lastStopAttemptAt = 0L
     @Volatile private var watchdogRestarting = false
     private var keeperWakeLock: PowerManager.WakeLock? = null
     private var receiverRegistered = false
+    private var lastConfigFingerprint: String? = null
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -148,6 +156,13 @@ class BoxService(
     }
 
     private var lastProfileName = ""
+
+    private fun configFingerprint(config: String): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(config.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+    }
+
     private suspend fun startService() {
         android.util.Log.e("BoxService", "Starting SingBox service...")
         try {
@@ -164,10 +179,17 @@ class BoxService(
                 content.contains("\"type\"") &&
                 content.contains("\"mixed\"") &&
                 content.contains("$WATCHDOG_MIXED_PROXY_PORT")
+            lastConfigFingerprint = configFingerprint(content)
             
             if (content.isBlank() || content == "{}") {
                 android.util.Log.e("BoxService", "Empty configuration detected")
                 stopAndAlert(Alert.EmptyConfiguration)
+                return
+            }
+
+            val xrayConfig = XrayRuntimeConfig.from(content)
+            if (xrayConfig.enabled) {
+                startXrayService(xrayConfig.configJson)
                 return
             }
 
@@ -228,6 +250,38 @@ class BoxService(
         }
     }
 
+    private suspend fun startXrayService(configJson: String) {
+        if (service !is VPNService) {
+            stopAndAlert(Alert.StartService, "Xray runtime requires Android VPN service")
+            return
+        }
+
+        try {
+            android.util.Log.e("BoxService", "Starting Xray service...")
+            lastProfileName = "Yurich Connect XHTTP"
+            watchdogMixedProxyEnabled = false
+            val runner = XrayRunner(service)
+            xrayRunner = runner
+            val response = withContext(Dispatchers.IO) {
+                runner.start(configJson)
+            }
+            android.util.Log.e("BoxService", "Xray service started: $response")
+
+            status.postValue(Status.Started)
+            broadcastStatus(Status.Started)
+            withContext(Dispatchers.Main) {
+                notification.show(lastProfileName, "Подключено")
+            }
+            notification.start()
+            refreshKeeperWakeLock("xray-service-start")
+            startNativeWatchdog()
+        } catch (e: Exception) {
+            android.util.Log.e("BoxService", "Failed to start Xray service: ${e.message}", e)
+            stopXrayRunner("startXrayService")
+            stopAndAlert(Alert.StartService, e.message)
+        }
+    }
+
     override fun serviceReload() {
         stopNativeWatchdog()
         notification.stop()
@@ -239,12 +293,20 @@ class BoxService(
                     putExtra(Action.EXTRA_STATUS, Status.Starting.ordinal)
                 }
             )
-            val pfd = fileDescriptor
-            if (pfd != null) {
-                pfd.close()
-                fileDescriptor = null
+        stopXrayRunner("serviceReload")
+        runCatching {
+            commandServer?.closeService()
+        }.onFailure {
+            android.util.Log.e("BoxService", "service: error when closing sing-box on reload", it)
+        }
+        runCatching {
+            runBlocking {
+                DefaultNetworkMonitor.stop()
             }
-        commandServer?.closeService()
+        }.onFailure {
+            android.util.Log.e("BoxService", "service: error when stopping network monitor on reload", it)
+        }
+        closeTunFileDescriptor()
         runBlocking {
             startService()
         }
@@ -287,10 +349,99 @@ class BoxService(
         android.util.Log.d("BoxService", "Traffic monitoring is now handled by StatusClient")
     }
 
+    private fun closeTunFileDescriptor() {
+        val pfd = fileDescriptor ?: return
+        runCatching {
+            pfd.close()
+        }.onFailure {
+            android.util.Log.e("BoxService", "service: error when closing tun fd", it)
+        }
+        fileDescriptor = null
+    }
+
+    private fun hasActiveRuntime(): Boolean {
+        val xrayActive = runCatching { xrayRunner?.isStarted() == true }
+            .getOrDefault(false)
+        return xrayActive || fileDescriptor != null ||
+            (status.value == Status.Started && commandServer != null)
+    }
+
+    private fun shouldRecoverStaleLifecycleState(currentStatus: Status): Boolean {
+        if (currentStatus != Status.Starting && currentStatus != Status.Stopping) {
+            return false
+        }
+
+        val lastAttemptAt = if (currentStatus == Status.Starting) {
+            lastStartAttemptAt
+        } else {
+            lastStopAttemptAt
+        }
+        val staleByAge = lastAttemptAt == 0L ||
+            System.currentTimeMillis() - lastAttemptAt > LIFECYCLE_RECOVERY_TIMEOUT_MS
+
+        return staleByAge && !hasActiveRuntime()
+    }
+
+    private fun recoverStaleLifecycleState(currentStatus: Status) {
+        android.util.Log.w(
+            "BoxService",
+            "Recovering stale lifecycle state: $currentStatus"
+        )
+        stopNativeWatchdog()
+        releaseKeeperWakeLock()
+        val staleCommandServer = commandServer
+        xrayRunner = null
+        commandServer = null
+        closeTunFileDescriptor()
+        notification.stop()
+        status.value = Status.Stopped
+        android.util.Log.w(
+            "BoxService",
+            "Stale lifecycle state reset without synchronous native stop"
+        )
+
+        if (staleCommandServer != null) {
+            serviceScope.launch {
+                runCatching {
+                    staleCommandServer.closeService()
+                }.onFailure {
+                    android.util.Log.e("BoxService", "stale recovery: closeService failed", it)
+                }
+                runCatching {
+                    staleCommandServer.close()
+                }.onFailure {
+                    android.util.Log.e("BoxService", "stale recovery: command server close failed", it)
+                }
+                runCatching {
+                    DefaultNetworkMonitor.stop()
+                }.onFailure {
+                    android.util.Log.e("BoxService", "stale recovery: network monitor stop failed", it)
+                }
+            }
+        }
+    }
+
+    private fun stopXrayRunner(reason: String) {
+        val runner = xrayRunner ?: return
+        xrayRunner = null
+        // Xray/libXray can block while reading from TUN. Close the fd first so Android
+        // releases the VPN network promptly and stopXray() can exit its read loop.
+        closeTunFileDescriptor()
+        runCatching {
+            runner.stop()
+        }.onFailure {
+            android.util.Log.e("BoxService", "$reason: error when stopping xray", it)
+        }
+    }
+
     private fun stopService() {
         if (status.value != Status.Started && status.value != Status.Starting) return
         stopNativeWatchdog()
         releaseKeeperWakeLock()
+        runCatching {
+            SimpleConfigManager.setStartedByUser(false)
+        }
+        lastStopAttemptAt = System.currentTimeMillis()
         status.value = Status.Stopping
         
 
@@ -308,17 +459,18 @@ class BoxService(
         }
         notification.stop()
         serviceScope.launch {
-            val pfd = fileDescriptor
-            if (pfd != null) {
-                pfd.close()
-                fileDescriptor = null
-            }
+            stopXrayRunner("stopService")
             runCatching {
                 commandServer?.closeService()
             }.onFailure {
                 android.util.Log.e("BoxService", "service: error when closing", it)
             }
-            DefaultNetworkMonitor.stop()
+            try {
+                DefaultNetworkMonitor.stop()
+            } catch (e: Exception) {
+                android.util.Log.e("BoxService", "service: error when stopping network monitor", e)
+            }
+            closeTunFileDescriptor()
 
             commandServer?.apply {
                 close()
@@ -344,6 +496,24 @@ class BoxService(
         releaseKeeperWakeLock()
         runCatching {
             SimpleConfigManager.setStartedByUser(false)
+        }
+        stopXrayRunner("stopAndAlert")
+        runCatching {
+            commandServer?.closeService()
+        }.onFailure {
+            android.util.Log.e("BoxService", "stopAndAlert: error when closing sing-box", it)
+        }
+        try {
+            DefaultNetworkMonitor.stop()
+        } catch (e: Exception) {
+            android.util.Log.e("BoxService", "stopAndAlert: error when stopping network monitor", e)
+        }
+        closeTunFileDescriptor()
+        runCatching {
+            commandServer?.close()
+            commandServer = null
+        }.onFailure {
+            android.util.Log.e("BoxService", "stopAndAlert: error when closing command server", it)
         }
         withContext(Dispatchers.Main) {
             // CRITICAL: Must call startForeground before stopping to avoid Android crash
@@ -390,18 +560,71 @@ class BoxService(
         Application.initializeIfNeeded(service.applicationContext)
         android.util.Log.e("BoxService", "onStartCommand called, current status: ${status.value}")
         val keepRunning = runCatching { SimpleConfigManager.getStartedByUser() }.getOrDefault(false)
-        
+        val incomingConfig = runCatching { SimpleConfigManager.getConfig() }.getOrDefault("{}")
+        val incomingFingerprint = runCatching {
+            configFingerprint(incomingConfig)
+        }.getOrDefault("")
+
+        if (status.value != Status.Stopped) {
+            val currentStatus = status.value ?: Status.Stopped
+            if (shouldRecoverStaleLifecycleState(currentStatus)) {
+                recoverStaleLifecycleState(currentStatus)
+            } else {
+                val hasConfigChange = lastConfigFingerprint != null &&
+                    !incomingConfig.isBlank() &&
+                    incomingConfig != "{}" &&
+                    incomingFingerprint.isNotEmpty() &&
+                    incomingFingerprint != (lastConfigFingerprint ?: "")
+
+                if (hasConfigChange) {
+                    android.util.Log.e(
+                        "BoxService",
+                        "Runtime config changed while service is ${currentStatus.name}; reloading"
+                    )
+                    status.value = Status.Starting
+                    // Broadcast status change so Flutter updates to reconnect path immediately
+                    Application.application.sendBroadcast(
+                        Intent(Action.BROADCAST_STATUS_CHANGED).apply {
+                            `package` = Application.application.packageName
+                            putExtra(Action.EXTRA_STATUS, Status.Starting.ordinal)
+                        }
+                    )
+                    ensureReceiversRegistered()
+                    refreshRunningService("on-start-command-reload")
+                    serviceScope.launch {
+                        runCatching {
+                            serviceReload()
+                        }.onFailure {
+                            android.util.Log.e(
+                                "BoxService",
+                                "Failed to reload service on new config",
+                                it
+                            )
+                        }
+                    }
+                } else {
+                    android.util.Log.e("BoxService", "Service already running, reusing config")
+                    val notificationTitle = lastProfileName.ifBlank { "Yurich Connect" }
+                    val notificationText = if (status.value == Status.Started) {
+                        "Подключено"
+                    } else {
+                        "Подключение..."
+                    }
+                    notification.show(notificationTitle, notificationText)
+                    ensureReceiversRegistered()
+                    refreshRunningService("on-start-command-existing")
+                }
+                return if (keepRunning) Service.START_STICKY else Service.START_NOT_STICKY
+            }
+        }
+
         // CRITICAL: Call startForeground IMMEDIATELY to prevent Android from killing the app
         // This must happen synchronously before any async work
         android.util.Log.e("BoxService", "Starting foreground notification immediately")
         notification.show("Yurich Connect", "Подключение...")
         
-        if (status.value != Status.Stopped) {
-            android.util.Log.e("BoxService", "Service already running, not restarting")
-            return if (keepRunning) Service.START_STICKY else Service.START_NOT_STICKY
-        }
-        
         android.util.Log.e("BoxService", "Setting status to Starting")
+        lastStartAttemptAt = System.currentTimeMillis()
         status.value = Status.Starting
         
         // Broadcast status change
@@ -413,28 +636,23 @@ class BoxService(
             }
         )
 
-        if (!receiverRegistered) {
-            android.util.Log.e("BoxService", "Registering broadcast receivers")
-            ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
-                addAction(Action.SERVICE_CLOSE)
-                addAction(Action.SERVICE_RESTART)
-                addAction(ConnectivityManager.CONNECTIVITY_ACTION)
-                addAction(Intent.ACTION_SCREEN_ON)
-                addAction(Intent.ACTION_USER_PRESENT)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
-                }
-            }, ContextCompat.RECEIVER_NOT_EXPORTED)
-            receiverRegistered = true
-        }
+        ensureReceiversRegistered()
 
         android.util.Log.e("BoxService", "Launching IO coroutine for service startup")
         serviceScope.launch {
             try {
-                android.util.Log.e("BoxService", "Ensuring libbox initialization")
-                Application.ensureLibboxInitialized(service.applicationContext)
-                android.util.Log.e("BoxService", "Starting command server")
-                startCommandServer()
+                val runtimeConfig = XrayRuntimeConfig.from(SimpleConfigManager.getConfig())
+                if (runtimeConfig.enabled) {
+                    android.util.Log.e(
+                        "BoxService",
+                        "Xray config detected, skipping sing-box command server"
+                    )
+                } else {
+                    android.util.Log.e("BoxService", "Ensuring libbox initialization")
+                    Application.ensureLibboxInitialized(service.applicationContext)
+                    android.util.Log.e("BoxService", "Starting command server")
+                    startCommandServer()
+                }
             } catch (e: Exception) {
                 android.util.Log.e("BoxService", "Failed to start command server: ${e.message}", e)
                 stopAndAlert(Alert.StartCommandServer, e.message)
@@ -447,13 +665,43 @@ class BoxService(
         return if (keepRunning) Service.START_STICKY else Service.START_NOT_STICKY
     }
 
+    private fun ensureReceiversRegistered() {
+        if (receiverRegistered) {
+            return
+        }
+        android.util.Log.e("BoxService", "Registering broadcast receivers")
+        ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
+            addAction(Action.SERVICE_CLOSE)
+            addAction(Action.SERVICE_RESTART)
+            addAction(ConnectivityManager.CONNECTIVITY_ACTION)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
+        }, ContextCompat.RECEIVER_NOT_EXPORTED)
+        receiverRegistered = true
+    }
+
+    private fun refreshRunningService(reason: String) {
+        refreshKeeperWakeLock(reason)
+        commandServer?.wake()
+        if (status.value == Status.Started && watchdogJob?.isActive != true) {
+            android.util.Log.w("BoxService", "Restarting missing watchdog after $reason")
+            startNativeWatchdog()
+        }
+    }
+
     internal fun onBind(): android.os.Binder {
-        return android.os.Binder()
+        return binder
     }
 
     internal fun onDestroy() {
+        val destroyStatus = status.value ?: Status.Stopped
         val shouldRestore = runCatching {
-            SimpleConfigManager.getStartedByUser() && SimpleConfigManager.hasValidConfig()
+            destroyStatus == Status.Started &&
+                SimpleConfigManager.getStartedByUser() &&
+                SimpleConfigManager.hasValidConfig()
         }.getOrDefault(false)
         stopNativeWatchdog()
         serviceScope.cancel()
@@ -467,10 +715,7 @@ class BoxService(
         runCatching {
             notification.stop()
         }
-        runCatching {
-            fileDescriptor?.close()
-            fileDescriptor = null
-        }
+        stopXrayRunner("onDestroy")
         runCatching {
             commandServer?.closeService()
             commandServer?.close()
@@ -481,6 +726,7 @@ class BoxService(
                 DefaultNetworkMonitor.stop()
             }
         }
+        closeTunFileDescriptor()
         status.postValue(Status.Stopped)
         Application.application.sendBroadcast(
             Intent(Action.BROADCAST_STATUS_CHANGED).apply {
@@ -495,12 +741,12 @@ class BoxService(
     }
 
     internal fun onTaskRemoved() {
-        val shouldRestore = runCatching {
-            SimpleConfigManager.getStartedByUser() && SimpleConfigManager.hasValidConfig()
-        }.getOrDefault(false)
-        if (shouldRestore) {
-            scheduleStickyRestart("task-removed")
-        }
+        android.util.Log.w(
+            "BoxService",
+            "Task removed; keeping current foreground VPN service without sticky restart"
+        )
+        ensureReceiversRegistered()
+        refreshRunningService("task-removed")
     }
 
     internal fun onRevoke() {
@@ -668,16 +914,17 @@ class BoxService(
                 notification.show(lastProfileName, "Восстановление соединения...")
             }
 
-            val pfd = fileDescriptor
-            if (pfd != null) {
-                runCatching { pfd.close() }
-                fileDescriptor = null
-            }
             runCatching {
                 commandServer?.closeService()
             }.onFailure {
                 android.util.Log.e("BoxService", "Watchdog: closeService failed", it)
             }
+            try {
+                DefaultNetworkMonitor.stop()
+            } catch (e: Exception) {
+                android.util.Log.e("BoxService", "Watchdog: network monitor stop failed", e)
+            }
+            closeTunFileDescriptor()
 
             delay(900L)
             startService()

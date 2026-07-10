@@ -60,21 +60,29 @@ open class CommandClient(
         // Disconnect any existing client first
         disconnectInternal()
         
-        val options = CommandClientOptions()
-        val command = when (connectionType) {
-            ConnectionType.Status -> Libbox.CommandStatus
-            ConnectionType.Groups -> Libbox.CommandGroup
-            ConnectionType.Log -> Libbox.CommandLog
-            ConnectionType.ClashMode -> Libbox.CommandClashMode
-            ConnectionType.GroupOnly -> Libbox.CommandGroup
-        }
-        options.addCommand(command)
-        options.statusInterval = 2 * 1000 * 1000 * 1000
-        val newCommandClient = CommandClient(clientHandler, options)
         scope.launch(Dispatchers.IO) {
+            val options = CommandClientOptions()
+            val command = when (connectionType) {
+                ConnectionType.Status -> Libbox.CommandStatus
+                ConnectionType.Groups -> Libbox.CommandGroup
+                ConnectionType.Log -> Libbox.CommandLog
+                ConnectionType.ClashMode -> Libbox.CommandClashMode
+                ConnectionType.GroupOnly -> Libbox.CommandGroup
+            }
+            options.addCommand(command)
+            options.statusInterval = 2 * 1000 * 1000 * 1000
+            val newCommandClient = CommandClient(clientHandler, options)
             try {
                 for (i in 1..10) {
                     delay(100 + i.toLong() * 50)
+                    synchronized(lock) {
+                        if (!isConnecting) {
+                            runCatching {
+                                newCommandClient.disconnect()
+                            }
+                            return@launch
+                        }
+                    }
                     try {
                         newCommandClient.connect()
                     } catch (ignored: Exception) {
@@ -90,6 +98,12 @@ open class CommandClient(
                         return@launch
                     }
                     synchronized(lock) {
+                        if (!isConnecting) {
+                            runCatching {
+                                newCommandClient.disconnect()
+                            }
+                            return@launch
+                        }
                         this@CommandClient.commandClient = newCommandClient
                         isConnecting = false
                     }
@@ -142,6 +156,10 @@ open class CommandClient(
         }
 
         override fun disconnected(message: String?) {
+            synchronized(lock) {
+                commandClient = null
+                isConnecting = false
+            }
             handler.onDisconnected()
         }
 

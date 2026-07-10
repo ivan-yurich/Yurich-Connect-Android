@@ -10,6 +10,10 @@ import com.tecclub.flutter_singbox.database.Settings
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action !in RESTORE_ACTIONS) {
+            return
+        }
+
         Application.initializeIfNeeded(context.applicationContext)
 
         val autoStart = SimpleConfigManager.getAutoStart(context)
@@ -25,5 +29,14 @@ class BootReceiver : BroadcastReceiver() {
             action = BoxService.ACTION_START
         }
         ContextCompat.startForegroundService(context, serviceIntent)
+    }
+
+    private companion object {
+        private val RESTORE_ACTIONS = setOf(
+            Intent.ACTION_BOOT_COMPLETED,
+            "android.intent.action.LOCKED_BOOT_COMPLETED",
+            Intent.ACTION_MY_PACKAGE_REPLACED,
+            "android.intent.action.QUICKBOOT_POWERON",
+        )
     }
 }

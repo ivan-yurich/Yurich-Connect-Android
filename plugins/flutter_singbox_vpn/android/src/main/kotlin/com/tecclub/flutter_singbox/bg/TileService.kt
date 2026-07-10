@@ -1,10 +1,13 @@
 package com.tecclub.flutter_singbox.bg
 
+import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
+import androidx.annotation.RequiresApi
 import com.tecclub.flutter_singbox.constant.Status
 
+@RequiresApi(Build.VERSION_CODES.N)
 class TileService : TileService(), ServiceConnection.Callback {
     
     companion object {

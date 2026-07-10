@@ -11,9 +11,6 @@ import com.tecclub.flutter_singbox.bg.VPNService
 import com.tecclub.flutter_singbox.constant.Action
 import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Status
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 
 class ServiceConnection(
     private val context: Context,
@@ -53,11 +50,7 @@ class ServiceConnection(
         }
         
         // Create intent to bind to the service
-        val intent = runBlocking {
-            withContext(Dispatchers.IO) {
-                Intent(context, VPNService::class.java).setAction(Action.SERVICE)
-            }
-        }
+        val intent = serviceIntent()
         
         // Try to bind to the service - BIND_AUTO_CREATE will create it if needed
         val bound = try {
@@ -120,11 +113,7 @@ class ServiceConnection(
         service = null
         
         // Create new connection intent
-        val intent = runBlocking {
-            withContext(Dispatchers.IO) {
-                Intent(context, VPNService::class.java).setAction(Action.SERVICE)
-            }
-        }
+        val intent = serviceIntent()
         
         // Attempt to bind to the service
         val bound = try {
@@ -187,6 +176,9 @@ class ServiceConnection(
         reconnect()
         Log.d(TAG, "service dead")
     }
+
+    private fun serviceIntent(): Intent =
+        Intent(context, VPNService::class.java).setAction(Action.SERVICE)
 
     interface Callback {
         fun onServiceStatusChanged(status: Status)

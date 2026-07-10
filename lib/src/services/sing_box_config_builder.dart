@@ -13,6 +13,8 @@ enum NaiveOutboundMode { auto, native, httpConnect }
 
 class SingBoxConfigBuilder {
   static const localMixedProxyPort = 20808;
+  static const _remoteDnsTag = 'remote-dns-primary';
+  static const _localDnsTag = 'local-dns';
 
   String build(
     VpnProfile profile, {
@@ -35,18 +37,22 @@ class SingBoxConfigBuilder {
     }
 
     final engine = ProfileEngineSelector.select(profile);
-    if (!engine.canRunInCurrentBuild) {
+    if (!engine.canRunInCurrentBuild ||
+        engine.engine != VpnCoreEngine.singBox) {
       throw UnsupportedError(engine.reason);
     }
 
     final proxyOutbound =
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
-    _normalizeOutbound(profile, proxyOutbound, naiveMode);
-    _applyDialStability(profile, proxyOutbound);
-    final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
-
     final useRemoteDns = _usesRemoteDns(profile, dnsProtectionMode);
+    _normalizeOutbound(profile, proxyOutbound, naiveMode);
+    _applyDialStability(
+      profile: profile,
+      proxyOutbound: proxyOutbound,
+      useRemoteDns: useRemoteDns,
+    );
+    final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
@@ -75,10 +81,15 @@ class SingBoxConfigBuilder {
             'action': 'hijack-dns',
           },
           _unsupportedUdpRule(rejectUnsupportedUdp),
+          {
+            'ip_cidr': ['198.18.0.0/15', 'fc00::/18'],
+            'outbound': 'proxy',
+          },
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
-        'default_domain_resolver': useRemoteDns ? 'remote-dns' : 'local-dns',
+        'default_domain_resolver':
+            useRemoteDns ? _remoteDnsTag : _localDnsTag,
         'auto_detect_interface': true,
         'final': 'proxy',
       },
@@ -137,17 +148,27 @@ class SingBoxConfigBuilder {
     VpnProfile profile, {
     required bool useRemoteDns,
   }) {
+    const remoteDnsServers = <Map<String, dynamic>>[
+      {
+        'type': 'https',
+        'tag': 'remote-dns-primary',
+        'server': '1.1.1.1',
+        'server_port': 443,
+        'path': '/dns-query',
+      },
+      {
+        'type': 'https',
+        'tag': 'remote-dns-secondary',
+        'server': '8.8.8.8',
+        'server_port': 443,
+        'path': '/dns-query',
+      },
+    ];
     final servers = <Map<String, dynamic>>[
-      {'type': 'local', 'tag': 'local-dns'},
       if (useRemoteDns)
-        {
-          'type': 'https',
-          'tag': 'remote-dns',
-          'server': '1.1.1.1',
-          'server_port': 443,
-          'path': '/dns-query',
-          'detour': 'proxy',
-        },
+        ...remoteDnsServers
+      else
+        {'type': 'local', 'tag': 'local-dns'},
       {
         'type': 'fakeip',
         'tag': 'fakeip',
@@ -159,10 +180,11 @@ class SingBoxConfigBuilder {
     final rules = <Map<String, dynamic>>[];
     final server = profile.server?.trim();
     if (server != null && server.isNotEmpty && !_isIpLiteral(server)) {
+      final serverResolverTag = useRemoteDns ? _remoteDnsTag : _localDnsTag;
       rules.add({
         'domain': [server],
         'action': 'route',
-        'server': 'local-dns',
+        'server': serverResolverTag,
       });
     }
     rules.add({
@@ -171,14 +193,13 @@ class SingBoxConfigBuilder {
       'action': 'route',
       'server': 'fakeip',
     });
-
     return {
       'servers': servers,
       'rules': rules,
       'strategy': 'ipv4_only',
       'cache_capacity': 8192,
       'reverse_mapping': true,
-      'final': useRemoteDns ? 'remote-dns' : 'local-dns',
+      'final': useRemoteDns ? _remoteDnsTag : _localDnsTag,
     };
   }
 
@@ -186,8 +207,17 @@ class SingBoxConfigBuilder {
     if (!dnsProtectionMode.protectsAgainstLeaks) {
       return false;
     }
-    return profile.kind == VpnProfileKind.hysteria2 ||
-        profile.kind == VpnProfileKind.hysteria;
+    return switch (profile.kind) {
+      VpnProfileKind.hysteria ||
+      VpnProfileKind.hysteria2 ||
+      VpnProfileKind.vlessReality ||
+      VpnProfileKind.vlessTls => true,
+      VpnProfileKind.naive ||
+      VpnProfileKind.vlessXhttp ||
+      VpnProfileKind.vlessMkcp ||
+      VpnProfileKind.pingTunnelExperimental ||
+      VpnProfileKind.singBoxConfig => false,
+    };
   }
 
   bool _isIpLiteral(String value) => InternetAddress.tryParse(value) != null;
@@ -207,14 +237,18 @@ class SingBoxConfigBuilder {
     };
   }
 
-  void _applyDialStability(
-    VpnProfile profile,
-    Map<String, dynamic> proxyOutbound,
-  ) {
+  void _applyDialStability({
+    required VpnProfile profile,
+    required Map<String, dynamic> proxyOutbound,
+    required bool useRemoteDns,
+  }) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
-    proxyOutbound.putIfAbsent('domain_resolver', () => 'local-dns');
+    proxyOutbound.putIfAbsent(
+      'domain_resolver',
+      () => useRemoteDns ? _remoteDnsTag : _localDnsTag,
+    );
     proxyOutbound.putIfAbsent('domain_strategy', () => 'ipv4_only');
     proxyOutbound.putIfAbsent('network_strategy', () => 'fallback');
     proxyOutbound.putIfAbsent(

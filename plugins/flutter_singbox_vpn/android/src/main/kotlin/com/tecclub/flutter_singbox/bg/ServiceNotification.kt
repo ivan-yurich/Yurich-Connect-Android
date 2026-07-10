@@ -1,6 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
 import android.app.Service
+import android.content.pm.ServiceInfo
 import android.os.Build
 import com.tecclub.flutter_singbox.constant.Status
 import androidx.lifecycle.MutableLiveData
@@ -41,7 +42,16 @@ class ServiceNotification(
     }
 
     fun show(state: ConnectionUiState) {
-        service.startForeground(NOTIFICATION_ID, helper.buildNotification(state))
+        val notification = helper.buildNotification(state)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            service.startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            service.startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     fun update(state: ConnectionUiState) {
