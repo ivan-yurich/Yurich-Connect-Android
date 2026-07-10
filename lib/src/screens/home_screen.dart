@@ -10,22 +10,32 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/connection_status.dart';
 import '../models/connection_ui_state.dart';
+import '../models/dns_protection_mode.dart';
+import '../models/profile_network_stability.dart';
 import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
 import '../services/installed_apps_service.dart';
 import '../services/power_manager_service.dart';
 import '../services/profile_auto_selector.dart';
+import '../services/profile_country_resolver.dart';
 import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
+import '../services/profile_engine_selector.dart';
 import '../services/profile_store.dart';
 import '../services/protocol_display_mapper.dart';
+import '../services/sing_box_log_filter.dart';
 import '../services/smart_route_rules.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
+import '../services/subscription_profile_reconciler.dart';
+import '../services/xray_config_builder.dart';
 import '../theme/yurich_theme.dart';
 import '../utils/traffic_formatter.dart';
 import 'qr_scan_screen.dart';
+
+part 'home_screen_widgets.dart';
+part 'home_screen_strings.dart';
 
 const _gold = YurichColors.accentBlue;
 const _goldSoft = YurichColors.accentSoft;
@@ -49,11 +59,21 @@ const _nativeStartTimeout = Duration(seconds: 8);
 const _subscriptionReminderWindow = Duration(days: 5);
 const _tunnelHealthProbeInterval = Duration(seconds: 105);
 const _startupProbeRecheckDelay = Duration(seconds: 8);
-const _recentTrafficGrace = Duration(seconds: 120);
+const _trafficUiFlushInterval = Duration(seconds: 1);
+const _notificationSyncMinInterval = Duration(seconds: 2);
+const _profilePingCacheTtl = Duration(minutes: 10);
+const _recentTrafficGrace = Duration(seconds: 70);
 const _idleTunnelGrace = Duration(minutes: 3);
 const _idleHealthProbeInterval = Duration(minutes: 5);
 const _degradedHealthProbeInterval = Duration(seconds: 45);
 const _resumeHealthCheckDelay = Duration(seconds: 2);
+const _resumeNetworkSettleDelay = Duration(seconds: 5);
+const _resumeRecoveryMinInterval = Duration(seconds: 20);
+const _resumeWatchdogQuietWindow = Duration(seconds: 35);
+const _networkChangingSettleWindow = Duration(seconds: 35);
+const _nativeActivityGrace = Duration(seconds: 90);
+const _networkStatsTrafficMinDelta = 1024 * 1024;
+const _networkStatsTrafficMinInterval = Duration(minutes: 2);
 const _staleTunnelGrace = Duration(minutes: 5);
 const _tunnelHealthFailureThreshold = 4;
 const _autoReconnectMaxAttempts = 6;
@@ -83,7 +103,7 @@ enum _AppLanguage {
   }
 }
 
-enum _ProfileTab { all, vless, naive, hysteria }
+enum _ProfileTab { all, vless, naive, hysteria, experimental }
 
 enum _SupportTab { help, community }
 
@@ -98,13 +118,13 @@ class _ProfileConnectionBlocked implements Exception {
 
 _ProfileTab _profileTabForKind(VpnProfileKind kind) {
   return switch (kind) {
-    VpnProfileKind.vlessReality => _ProfileTab.vless,
+    VpnProfileKind.vlessReality ||
+    VpnProfileKind.vlessXhttp ||
+    VpnProfileKind.vlessTls => _ProfileTab.vless,
     VpnProfileKind.naive => _ProfileTab.naive,
     VpnProfileKind.hysteria2 || VpnProfileKind.hysteria => _ProfileTab.hysteria,
-    VpnProfileKind.vlessTls ||
-    VpnProfileKind.vlessXhttp ||
-    VpnProfileKind.vlessMkcp ||
-    VpnProfileKind.singBoxConfig => _ProfileTab.all,
+    VpnProfileKind.pingTunnelExperimental => _ProfileTab.experimental,
+    VpnProfileKind.vlessMkcp || VpnProfileKind.singBoxConfig => _ProfileTab.all,
   };
 }
 
@@ -114,7 +134,13 @@ bool _profileMatchesTab(VpnProfile profile, _ProfileTab tab) {
 
 List<VpnProfile> _clientSupportedProfiles(List<VpnProfile> profiles) {
   return profiles
-      .where((profile) => profile.kind.isClientSupported)
+      .where((profile) {
+        if (profile.kind == VpnProfileKind.vlessXhttp ||
+            profile.kind == VpnProfileKind.pingTunnelExperimental) {
+          return true;
+        }
+        return profile.kind.isClientSupported;
+      })
       .toList(growable: false);
 }
 
@@ -131,6 +157,8 @@ class _HomeScreenState extends State<HomeScreen>
   final _store = ProfileStore();
   final _importer = ProfileImporter();
   final _configBuilder = SingBoxConfigBuilder();
+  final _subscriptionProfileReconciler = const SubscriptionProfileReconciler();
+  final _xrayConfigBuilder = XrayConfigBuilder();
   final _autoSelector = const ProfileAutoSelector();
   final _updateService = AppUpdateService();
   final _powerManagerService = PowerManagerService();
@@ -153,6 +181,7 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _lastIdleHealthCheckAt;
   DateTime? _lastResumeRecoveryAt;
   DateTime? _lastKeeperActionAt;
+  DateTime? _lastNotificationSyncAt;
   DateTime _clockNow = DateTime.now();
   Map<String, dynamic>? _latestTrafficEvent;
 
@@ -161,7 +190,10 @@ class _HomeScreenState extends State<HomeScreen>
   final _profilePingText = <String, String>{};
   final _profilePingBusy = <String, bool>{};
   final _profilePingError = <String, String>{};
+  final _profilePingCheckedAt = <String, DateTime>{};
   Map<String, ProfileStabilityStats> _profileStabilityStats = const {};
+  Map<String, Map<String, ProfileNetworkStabilityStats>>
+  _profileNetworkStabilityStats = const {};
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
   _ProfileTab _profileTab = _ProfileTab.all;
@@ -184,6 +216,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoReconnectInFlight = false;
   bool _notificationSyncInFlight = false;
   bool _autoRecoveryArmed = false;
+  bool _manualDisconnectRequested = false;
   bool _pingAllInFlight = false;
   bool _countryResolveInFlight = false;
   bool _logsExpanded = false;
@@ -197,20 +230,32 @@ class _HomeScreenState extends State<HomeScreen>
   bool _batteryOptimizationCheckInFlight = false;
   bool _batteryOptimizationPromptShown = false;
   bool _smartRouteRuDirect = false;
+  DnsProtectionMode _dnsProtectionMode = DnsProtectionMode.stable;
   DateTime? _nextAutoReconnectAt;
   DateTime? _nextTunnelHealthCheckAt;
+  DateTime? _networkChangingUntil;
+  DateTime? _lastNetworkSnapshotAt;
+  DateTime? _lastNativeActivityAt;
+  DateTime? _lastNetworkStatsTrafficSavedAt;
   int _autoReconnectAttempts = 0;
   int _tunnelHealthFailures = 0;
   int _lastSessionTrafficBytes = 0;
+  int _lastNetworkStatsTrafficBytes = 0;
+  int _networkGenerationId = 0;
   int _idleHealthChecks = 0;
   int _idleRecoveryCount = 0;
+  int _connectionQueueToken = 0;
+  bool _connectionQueueActive = false;
   String? _lastRecoverySource;
   String? _lastNetworkEvent;
+  String _networkType = 'unknown';
+  String _networkFingerprint = '';
   final _logs = <String>[];
   final _pendingLogs = <String>[];
   final _stabilityEvents = <String>[];
   late final AnimationController _glowController;
   late final Animation<double> _glowPulse;
+  Future<void> _connectionQueue = Future<void>.value();
 
   _Strings get s => _Strings.forLanguage(_language);
 
@@ -254,6 +299,19 @@ class _HomeScreenState extends State<HomeScreen>
       ? s.healthFailuresNone
       : s.healthFailuresCount(_tunnelHealthFailures);
 
+  bool get _networkChanging => _isNetworkChanging(DateTime.now());
+
+  String get _networkTypeLabel {
+    return switch (_networkType) {
+      'wifi' => 'Wi-Fi',
+      'cellular' => 'LTE/5G',
+      'ethernet' => 'Ethernet',
+      'none' => 'Нет сети',
+      'unknown' => 'Неизвестно',
+      _ => _networkType,
+    };
+  }
+
   String get _idleKeeperStatusLabel {
     final lastIdleAt = _lastIdleHealthCheckAt;
     if (lastIdleAt == null) {
@@ -271,11 +329,27 @@ class _HomeScreenState extends State<HomeScreen>
     return _profiles.isEmpty ? null : _profiles.first;
   }
 
+  VpnProfile? get _explicitSelectedProfile {
+    final selectedId = _selectedProfileId;
+    if (selectedId == null) {
+      return null;
+    }
+    for (final profile in _profiles) {
+      if (profile.id == selectedId) {
+        return profile;
+      }
+    }
+    return null;
+  }
+
   bool get _connected =>
       _status == AurumVpnStatus.started || _status == AurumVpnStatus.starting;
 
   bool get _connectionDegraded {
     if (_stoppingByUser) {
+      return false;
+    }
+    if (_networkChanging) {
       return false;
     }
     if (_autoReconnectInFlight || _tunnelHealthFailures > 0) {
@@ -348,9 +422,22 @@ class _HomeScreenState extends State<HomeScreen>
         source.contains('idle') ||
         source.contains('stale') ||
         _tunnelHealthFailures > 0) {
+      return 3;
+    }
+    return 2;
+  }
+
+  int _healthFailureThresholdFor(String source) {
+    if (source == 'app-resume') {
       return 2;
     }
-    return 1;
+    if (source.contains('idle') || source.contains('stale')) {
+      return 2;
+    }
+    if (_tunnelHealthFailures > 0) {
+      return 2;
+    }
+    return _tunnelHealthFailureThreshold;
   }
 
   Duration _healthProbeIntervalFor(String source) {
@@ -369,6 +456,85 @@ class _HomeScreenState extends State<HomeScreen>
     _lastKeeperAction = action;
     _lastKeeperActionAt = at ?? DateTime.now();
     _recordStabilityEvent('keeper:$action', at: _lastKeeperActionAt);
+  }
+
+  bool _isResumeRecoveryQuietWindow(DateTime now) {
+    final lastResumeAt = _lastResumeRecoveryAt;
+    return lastResumeAt != null &&
+        now.difference(lastResumeAt) < _resumeWatchdogQuietWindow;
+  }
+
+  bool _isNetworkChanging(DateTime now) {
+    final changingUntil = _networkChangingUntil;
+    return changingUntil != null && now.isBefore(changingUntil);
+  }
+
+  String _networkTypeFromSnapshot(Map<String, dynamic> snapshot) {
+    final raw = '${snapshot['type'] ?? 'unknown'}'.trim().toLowerCase();
+    return raw.isEmpty ? 'unknown' : raw;
+  }
+
+  int _networkGenerationFromSnapshot(Map<String, dynamic> snapshot) {
+    return _eventInt(snapshot['generation']);
+  }
+
+  bool _applyNetworkSnapshot(
+    Map<String, dynamic> snapshot, {
+    required String source,
+    DateTime? at,
+  }) {
+    if (snapshot.isEmpty) {
+      return false;
+    }
+
+    final now = at ?? DateTime.now();
+    final nextType = _networkTypeFromSnapshot(snapshot);
+    final nextGeneration = _networkGenerationFromSnapshot(snapshot);
+    final nextFingerprint = '${snapshot['fingerprint'] ?? ''}'.trim();
+    final generationChanged =
+        nextGeneration > 0 && nextGeneration != _networkGenerationId;
+    final fingerprintChanged =
+        nextFingerprint.isNotEmpty &&
+        _networkFingerprint.isNotEmpty &&
+        nextFingerprint != _networkFingerprint;
+    final changed = generationChanged || fingerprintChanged;
+
+    void apply() {
+      _networkType = nextType;
+      if (nextGeneration > 0) {
+        _networkGenerationId = nextGeneration;
+      }
+      if (nextFingerprint.isNotEmpty) {
+        _networkFingerprint = nextFingerprint;
+      }
+      _lastNetworkSnapshotAt = now;
+      if (changed) {
+        _networkChangingUntil = now.add(_networkChangingSettleWindow);
+        _lastNetworkEvent = '$source:$nextType#g$_networkGenerationId';
+        _lastNetworkStatsTrafficBytes = _lastSessionTrafficBytes;
+        _lastNetworkStatsTrafficSavedAt = null;
+        _tunnelHealthFailures = 0;
+        _nextTunnelHealthCheckAt = _networkChangingUntil;
+      }
+    }
+
+    if (mounted && changed) {
+      setState(apply);
+    } else {
+      apply();
+    }
+
+    if (changed) {
+      _setKeeperAction('network-changing:$source');
+      _recordStabilityEvent(
+        'network-change:$source:type=$nextType:g=$_networkGenerationId',
+      );
+      _queueLog(
+        'Network changed from $source: type=$nextType generation=$_networkGenerationId.',
+      );
+    }
+
+    return changed;
   }
 
   void _recordStabilityEvent(String message, {DateTime? at}) {
@@ -398,7 +564,7 @@ class _HomeScreenState extends State<HomeScreen>
           ? null
           : ProtocolDisplayMapper.mapProfile(profile),
       countryName: _profileCountryName(profile),
-      countryCode: profile?.countryCode,
+      countryCode: _profileCountryCode(profile),
       pingMs: profile == null ? null : _profilePingMs[profile.id],
       uploadSpeed: _uplink,
       downloadSpeed: _downlink,
@@ -418,6 +584,9 @@ class _HomeScreenState extends State<HomeScreen>
       return ConnectionStatus.connecting;
     }
     if (_status == AurumVpnStatus.started) {
+      if (_networkChanging) {
+        return ConnectionStatus.networkChanging;
+      }
       if (_connectionDegraded) {
         return ConnectionStatus.degraded;
       }
@@ -433,27 +602,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String? _profileCountryName(VpnProfile? profile) {
-    if (profile == null) {
-      return null;
-    }
-    final countryName = profile.countryName?.trim();
-    if (countryName != null && countryName.isNotEmpty) {
-      return countryName;
-    }
-    final flag = _profileCountryFlag(profile);
-    return switch (flag) {
-      '🇷🇺' => 'Россия',
-      '🇫🇮' => 'Финляндия',
-      '🇩🇪' => 'Германия',
-      '🇺🇸' => 'США',
-      '🇯🇵' => 'Япония',
-      '🇳🇱' => 'Нидерланды',
-      '🇫🇷' => 'Франция',
-      '🇨🇦' => 'Канада',
-      '🇹🇷' => 'Турция',
-      '🇬🇧' => 'Великобритания',
-      _ => null,
-    };
+    return ProfileCountryResolver.displayCountryName(profile);
+  }
+
+  String? _profileCountryCode(VpnProfile? profile) {
+    return ProfileCountryResolver.displayCountryCode(profile);
   }
 
   @override
@@ -468,8 +621,8 @@ class _HomeScreenState extends State<HomeScreen>
       parent: _glowController,
       curve: Curves.easeInOut,
     );
-    _load();
-    _initVpn();
+    _startBootTask('load', _load, timeout: const Duration(seconds: 12));
+    _startBootTask('init-vpn', _initVpn, timeout: const Duration(seconds: 8));
     _statusWatchdogTimer = Timer.periodic(
       const Duration(seconds: 20),
       (_) => unawaited(_refreshStatusWatchdog()),
@@ -487,6 +640,23 @@ class _HomeScreenState extends State<HomeScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_refreshBatteryOptimizationStatus(prompt: true));
     });
+  }
+
+  void _startBootTask(
+    String label,
+    Future<void> Function() task, {
+    required Duration timeout,
+  }) {
+    unawaited(() async {
+      try {
+        await task().timeout(timeout);
+      } on Object catch (error, stackTrace) {
+        final errorText = _redactSensitive('$error');
+        _recordStabilityEvent('boot-task-error:$label:$errorText');
+        _queueLog('Boot task failed [$label]: $errorText');
+        _queueLog(_redactSensitive(stackTrace.toString().split('\n').first));
+      }
+    }());
   }
 
   @override
@@ -511,19 +681,33 @@ class _HomeScreenState extends State<HomeScreen>
     if (state == AppLifecycleState.resumed) {
       _lastNetworkEvent = 'app-resume';
       unawaited(_refreshBatteryOptimizationStatus());
+      unawaited(_refreshNetworkSnapshot('app-resume'));
       unawaited(_handleResumeRecovery());
     }
   }
 
   Future<void> _handleResumeRecovery() async {
-    _lastResumeRecoveryAt = DateTime.now();
+    final startedAt = DateTime.now();
+    final previousResumeAt = _lastResumeRecoveryAt;
+    if (previousResumeAt != null &&
+        startedAt.difference(previousResumeAt) < _resumeRecoveryMinInterval) {
+      _recordStabilityEvent('resume-recovery:debounced');
+      return;
+    }
+    _lastResumeRecoveryAt = startedAt;
     await Future<void>.delayed(_resumeHealthCheckDelay);
-    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+    if (!mounted ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !_autoRecoveryArmed) {
       return;
     }
 
     final status = await _refreshVpnStatus();
-    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+    if (!mounted ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !_autoRecoveryArmed) {
       return;
     }
 
@@ -533,6 +717,27 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (status == AurumVpnStatus.started) {
+      _setKeeperAction('resume-settle');
+      await Future<void>.delayed(_resumeNetworkSettleDelay);
+      if (!mounted ||
+          _stoppingByUser ||
+          _manualDisconnectRequested ||
+          !_autoRecoveryArmed) {
+        return;
+      }
+
+      final settledStatus = await _refreshVpnStatus();
+      if (!mounted ||
+          _stoppingByUser ||
+          _manualDisconnectRequested ||
+          !_autoRecoveryArmed) {
+        return;
+      }
+      if (settledStatus == AurumVpnStatus.stopped) {
+        _markUnexpectedStop('app-resume-after-settle');
+        return;
+      }
+
       _nextTunnelHealthCheckAt = DateTime.now();
       _setKeeperAction('resume-check');
       unawaited(_refreshTunnelHealth(source: 'app-resume'));
@@ -544,12 +749,17 @@ class _HomeScreenState extends State<HomeScreen>
     final storedProfiles = await _store.loadProfiles();
     final profiles = _clientSupportedProfiles(storedProfiles);
     final loadedStabilityStats = await _store.loadProfileStabilityStats();
+    final loadedNetworkStabilityStats = await _store
+        .loadProfileNetworkStabilityStats();
     if (profiles.length != storedProfiles.length) {
       await _store.saveProfiles(profiles);
     }
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
+    final dnsProtectionMode = await _store.loadDnsProtectionMode();
+    final manualDisconnectRequested = await _store
+        .loadManualDisconnectRequested();
     if (!mounted) {
       return;
     }
@@ -566,6 +776,20 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
     }
+    final networkStabilityStats =
+        <String, Map<String, ProfileNetworkStabilityStats>>{
+          for (final entry in loadedNetworkStabilityStats.entries)
+            if (profileIds.contains(entry.key))
+              entry.key: Map<String, ProfileNetworkStabilityStats>.from(
+                entry.value,
+              ),
+        };
+    if (networkStabilityStats.length != loadedNetworkStabilityStats.length) {
+      await _store.saveProfileNetworkStabilityStats(networkStabilityStats);
+      if (!mounted) {
+        return;
+      }
+    }
     final resolvedSelectedId =
         profiles.any((profile) => profile.id == selectedId)
         ? selectedId
@@ -576,14 +800,18 @@ class _HomeScreenState extends State<HomeScreen>
       _appBuildNumber = appInfo.buildNumber;
       _profiles = profiles;
       _profileStabilityStats = stabilityStats;
+      _profileNetworkStabilityStats = networkStabilityStats;
       _selectedProfileId = resolvedSelectedId;
       _smartRouteRuDirect = smartRouteRuDirect;
+      _dnsProtectionMode = dnsProtectionMode;
+      _manualDisconnectRequested = manualDisconnectRequested;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
     });
     unawaited(_pingProfiles(profiles));
     unawaited(_resolveProfileCountries(profiles));
+    unawaited(_refreshNetworkSnapshot('load'));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(_showSubscriptionRenewalReminder(profiles));
@@ -621,6 +849,13 @@ class _HomeScreenState extends State<HomeScreen>
 
           final status = event['status'] as String?;
           if (status != null && mounted) {
+            if (_stoppingByUser && status == AurumVpnStatus.started) {
+              _queueLog(
+                'Native Started status ignored during stop transition.',
+              );
+              return;
+            }
+            _applyNetworkSnapshot(event, source: 'status-event');
             final now = DateTime.now();
             var recoverUnexpectedStop = false;
             setState(() {
@@ -629,7 +864,9 @@ class _HomeScreenState extends State<HomeScreen>
                 _lastError = null;
                 _autoReconnectAttempts = 0;
                 _nextAutoReconnectAt = null;
-                _autoRecoveryArmed = true;
+                if (!_manualDisconnectRequested) {
+                  _autoRecoveryArmed = true;
+                }
                 _connectedSince ??= now;
                 _lastHealthyAt ??= now;
                 _lastTrafficAt ??= now;
@@ -652,10 +889,15 @@ class _HomeScreenState extends State<HomeScreen>
                 recoverUnexpectedStop = true;
               }
             });
+            if (status == AurumVpnStatus.started &&
+                _manualDisconnectRequested &&
+                !_stoppingByUser) {
+              unawaited(_enforceManualDisconnect('status-event'));
+            }
             if (recoverUnexpectedStop) {
               _markUnexpectedStop('status-event');
             }
-            unawaited(_syncConnectionNotification());
+            unawaited(_syncConnectionNotification(force: true));
           }
         } on Object catch (error, stackTrace) {
           _handleEngineStreamError('status', error, stackTrace);
@@ -673,7 +915,7 @@ class _HomeScreenState extends State<HomeScreen>
             return;
           }
           _latestTrafficEvent = event;
-          _trafficFlushTimer ??= Timer(const Duration(milliseconds: 500), () {
+          _trafficFlushTimer ??= Timer(_trafficUiFlushInterval, () {
             try {
               _trafficFlushTimer = null;
               final latest = _latestTrafficEvent;
@@ -681,20 +923,38 @@ class _HomeScreenState extends State<HomeScreen>
               if (!mounted || latest == null) {
                 return;
               }
+              _applyNetworkSnapshot(latest, source: 'traffic-event');
               final uplinkSpeed = _eventInt(latest['uplinkSpeed']);
               final downlinkSpeed = _eventInt(latest['downlinkSpeed']);
               final sessionTotal = _eventInt(latest['sessionTotal']);
+              final connectionsIn = _eventInt(latest['connectionsIn']);
+              final connectionsOut = _eventInt(latest['connectionsOut']);
               final hasTraffic =
                   uplinkSpeed > 0 ||
                   downlinkSpeed > 0 ||
                   sessionTotal > _lastSessionTrafficBytes;
+              final hasNativeActivity =
+                  hasTraffic || connectionsIn > 0 || connectionsOut > 0;
               final now = DateTime.now();
-              setState(() {
-                _uplink = latest['formattedUplinkSpeed'] as String? ?? _uplink;
-                _downlink =
-                    latest['formattedDownlinkSpeed'] as String? ?? _downlink;
-                _sessionTotal =
-                    latest['formattedSessionTotal'] as String? ?? _sessionTotal;
+              final nextUplink =
+                  latest['formattedUplinkSpeed'] as String? ?? _uplink;
+              final nextDownlink =
+                  latest['formattedDownlinkSpeed'] as String? ?? _downlink;
+              final nextSessionTotal =
+                  latest['formattedSessionTotal'] as String? ?? _sessionTotal;
+              final displayChanged =
+                  nextUplink != _uplink ||
+                  nextDownlink != _downlink ||
+                  nextSessionTotal != _sessionTotal;
+              final healthChanged =
+                  hasTraffic &&
+                  _status == AurumVpnStatus.started &&
+                  (_tunnelHealthFailures != 0 || _lastHealthyAt == null);
+
+              void applyTrafficUpdate() {
+                _uplink = nextUplink;
+                _downlink = nextDownlink;
+                _sessionTotal = nextSessionTotal;
                 if (sessionTotal >= _lastSessionTrafficBytes) {
                   _lastSessionTrafficBytes = sessionTotal;
                 }
@@ -703,8 +963,22 @@ class _HomeScreenState extends State<HomeScreen>
                   _lastHealthyAt = now;
                   _tunnelHealthFailures = 0;
                 }
-              });
-              unawaited(_syncConnectionNotification());
+                if (hasNativeActivity && _status == AurumVpnStatus.started) {
+                  _lastNativeActivityAt = now;
+                }
+              }
+
+              if (hasTraffic && _status == AurumVpnStatus.started) {
+                _recordNetworkTrafficIfNeeded(sessionTotal, now);
+              }
+              if (displayChanged || healthChanged) {
+                setState(applyTrafficUpdate);
+              } else {
+                applyTrafficUpdate();
+              }
+              if (displayChanged) {
+                unawaited(_syncConnectionNotification());
+              }
             } on Object catch (error, stackTrace) {
               _handleEngineStreamError('traffic-flush', error, stackTrace);
             }
@@ -743,7 +1017,9 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() {
           _status = status;
           if (status == AurumVpnStatus.started) {
-            _autoRecoveryArmed = true;
+            if (!_manualDisconnectRequested) {
+              _autoRecoveryArmed = true;
+            }
             _connectedSince ??= DateTime.now();
             _clockNow = DateTime.now();
           } else if (status == AurumVpnStatus.stopped) {
@@ -763,7 +1039,12 @@ class _HomeScreenState extends State<HomeScreen>
                   .reversed,
             );
         });
-        unawaited(_syncConnectionNotification());
+        if (status == AurumVpnStatus.started &&
+            _manualDisconnectRequested &&
+            !_stoppingByUser) {
+          unawaited(_enforceManualDisconnect('init-status'));
+        }
+        unawaited(_syncConnectionNotification(force: true));
       }
     } on Object {
       // In widget tests and desktop preview the native Android plugin is absent.
@@ -784,19 +1065,35 @@ class _HomeScreenState extends State<HomeScreen>
     if (!mounted) {
       return;
     }
+    final shouldProbeNow =
+        _status == AurumVpnStatus.started &&
+        !_manualDisconnectRequested &&
+        !_stoppingByUser;
     setState(() {
       _lastError = errorText;
       if (_status == AurumVpnStatus.started) {
         _tunnelHealthFailures += 1;
       }
     });
+    if (shouldProbeNow) {
+      _nextTunnelHealthCheckAt = DateTime.now();
+      unawaited(_refreshTunnelHealth(source: 'engine-stream-$source'));
+    }
   }
 
-  Future<void> _syncConnectionNotification() async {
+  Future<void> _syncConnectionNotification({bool force = false}) async {
     if (_notificationSyncInFlight) {
       return;
     }
+    final now = DateTime.now();
+    final lastSyncAt = _lastNotificationSyncAt;
+    if (!force &&
+        lastSyncAt != null &&
+        now.difference(lastSyncAt) < _notificationSyncMinInterval) {
+      return;
+    }
     _notificationSyncInFlight = true;
+    _lastNotificationSyncAt = now;
     try {
       await _bestEffortNative(
         'updateConnectionNotification',
@@ -976,7 +1273,16 @@ class _HomeScreenState extends State<HomeScreen>
         );
       }
       final importedWithCachedData = _profilesWithCachedData(imported);
-      final merged = _mergeProfiles(importedWithCachedData);
+      final merged = subscriptionSource == null
+          ? _mergeProfiles(importedWithCachedData)
+          : _subscriptionProfileReconciler
+                .replaceRefreshedSources(
+                  existing: _profiles,
+                  imported: importedWithCachedData,
+                  refreshedSources: {subscriptionSource},
+                  selectedProfileId: importedWithCachedData.first.id,
+                )
+                .profiles;
 
       await _store.saveProfiles(merged);
       await _store.saveSelectedProfileId(importedWithCachedData.first.id);
@@ -1003,7 +1309,12 @@ class _HomeScreenState extends State<HomeScreen>
 
     return profiles
         .map((profile) {
-          final existing = existingById[profile.id];
+          final existing =
+              existingById[profile.id] ??
+              _subscriptionProfileReconciler.findLogicalMatch(
+                profile,
+                _profiles,
+              );
           if (existing == null) {
             return profile;
           }
@@ -1079,12 +1390,15 @@ class _HomeScreenState extends State<HomeScreen>
       final deletedBySource = await _store
           .loadDeletedProfileIdsBySubscriptionSource();
       final imported = <VpnProfile>[];
+      final refreshedSources = <String>{};
       Object? lastError;
       for (final source in sources) {
         try {
-          imported.addAll(
-            _clientSupportedProfiles(await _importer.importFromText(source)),
+          final sourceProfiles = _clientSupportedProfiles(
+            await _importer.importFromText(source),
           );
+          imported.addAll(sourceProfiles);
+          refreshedSources.add(source);
         } on Object catch (error) {
           lastError = error;
           _queueLog(
@@ -1107,12 +1421,15 @@ class _HomeScreenState extends State<HomeScreen>
         importedWithCachedData,
         deletedBySource,
       );
-      final merged = _mergeProfiles(visibleImported);
-      final selectedId =
-          _selectedProfileId != null &&
-              merged.any((profile) => profile.id == _selectedProfileId)
-          ? _selectedProfileId
-          : (merged.isEmpty ? null : merged.first.id);
+      final reconciliation = _subscriptionProfileReconciler
+          .replaceRefreshedSources(
+            existing: _profiles,
+            imported: visibleImported,
+            refreshedSources: refreshedSources,
+            selectedProfileId: _selectedProfileId,
+          );
+      final merged = reconciliation.profiles;
+      final selectedId = reconciliation.selectedProfileId;
 
       await _store.saveProfiles(merged);
       await _store.saveSelectedProfileId(selectedId);
@@ -1263,7 +1580,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    final current = _selectedProfile;
+    final current = _explicitSelectedProfile;
     if (current?.id == profile.id) {
       return;
     }
@@ -1284,21 +1601,20 @@ class _HomeScreenState extends State<HomeScreen>
         _message = blockReason ?? s.selectedProfile(profile.name);
       });
       await _store.saveSelectedProfileId(profile.id);
-      unawaited(_pingProfile(profile));
+      unawaited(_pingProfile(profile, force: true));
       if (blockReason != null) {
         _showSnack(blockReason);
       }
       return;
     }
 
-    await _runBusy(() async {
-      await _stopVpnCore(updateMessage: false);
-      await _startVpnCore(profile);
+    await _runQueuedBusy(() async {
+      await _startVpnCore(profile, rapidRestart: true);
     }, message: s.switchingProfile);
   }
 
   Future<void> _connect() async {
-    final profile = _autoConnectProfile();
+    final profile = _explicitSelectedProfile ?? _autoConnectProfile();
     if (profile == null) {
       _showSnack(
         _profiles.isEmpty ? s.importFirst : s.autoConnectNoStableProfile,
@@ -1317,9 +1633,16 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    await _store.saveManualDisconnectRequested(false);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _manualDisconnectRequested = false;
+    });
     unawaited(_refreshBatteryOptimizationStatus(prompt: true));
     _autoRecoveryArmed = true;
-    await _runBusy(() async {
+    await _runQueuedBusy(() async {
       try {
         if (_selectedProfileId != profile.id) {
           setState(() {
@@ -1329,13 +1652,21 @@ class _HomeScreenState extends State<HomeScreen>
           });
           await _store.saveSelectedProfileId(profile.id);
         }
-        await _startVpnCore(profile);
+        await _startVpnCore(profile, rapidRestart: false);
       } on Object catch (error) {
         _autoRecoveryArmed = false;
         unawaited(
           _recordProfileStability(
             profile,
             (stats) => stats.recordStartFailure(_redactSensitive('$error')),
+          ),
+        );
+        unawaited(
+          _recordProfileNetworkStability(
+            profile,
+            (stats) => stats.recordHealthFailure(
+              'start:${_redactSensitive('$error')}',
+            ),
           ),
         );
         rethrow;
@@ -1357,6 +1688,15 @@ class _HomeScreenState extends State<HomeScreen>
     return _profileStabilityStats[profileId] ?? const ProfileStabilityStats();
   }
 
+  ProfileNetworkStabilityStats _profileNetworkStabilityFor(
+    String profileId, {
+    String? networkType,
+  }) {
+    final type = networkType ?? _networkType;
+    return _profileNetworkStabilityStats[profileId]?[type] ??
+        const ProfileNetworkStabilityStats();
+  }
+
   Future<void> _recordProfileStability(
     VpnProfile profile,
     ProfileStabilityStats Function(ProfileStabilityStats current) update,
@@ -1371,6 +1711,70 @@ class _HomeScreenState extends State<HomeScreen>
       _profileStabilityStats = nextStats;
     }
     await _store.saveProfileStabilityStats(nextStats);
+  }
+
+  Future<void> _recordProfileNetworkStability(
+    VpnProfile profile,
+    ProfileNetworkStabilityStats Function(ProfileNetworkStabilityStats current)
+    update, {
+    String? networkType,
+  }) async {
+    final type = (networkType ?? _networkType).trim().isEmpty
+        ? 'unknown'
+        : (networkType ?? _networkType).trim().toLowerCase();
+    final nextStats = <String, Map<String, ProfileNetworkStabilityStats>>{
+      for (final entry in _profileNetworkStabilityStats.entries)
+        entry.key: Map<String, ProfileNetworkStabilityStats>.from(entry.value),
+    };
+    final profileStats = nextStats.putIfAbsent(
+      profile.id,
+      () => <String, ProfileNetworkStabilityStats>{},
+    );
+    profileStats[type] = update(
+      _profileNetworkStabilityFor(profile.id, networkType: type),
+    );
+    if (mounted) {
+      setState(() => _profileNetworkStabilityStats = nextStats);
+    } else {
+      _profileNetworkStabilityStats = nextStats;
+    }
+    await _store.saveProfileNetworkStabilityStats(nextStats);
+  }
+
+  bool _hasRecentNativeActivity(DateTime now) {
+    final lastNativeAt = _lastNativeActivityAt;
+    return lastNativeAt != null &&
+        now.difference(lastNativeAt) < _nativeActivityGrace;
+  }
+
+  void _recordNetworkTrafficIfNeeded(int sessionTotal, DateTime now) {
+    final profile = _selectedProfile;
+    if (profile == null || sessionTotal <= 0) {
+      return;
+    }
+
+    final delta = sessionTotal - _lastNetworkStatsTrafficBytes;
+    final lastSavedAt = _lastNetworkStatsTrafficSavedAt;
+    if (delta <= 0) {
+      return;
+    }
+
+    final enoughBytes = delta >= _networkStatsTrafficMinDelta;
+    final enoughTime =
+        lastSavedAt == null ||
+        now.difference(lastSavedAt) >= _networkStatsTrafficMinInterval;
+    if (!enoughBytes && !enoughTime) {
+      return;
+    }
+
+    _lastNetworkStatsTrafficBytes = sessionTotal;
+    _lastNetworkStatsTrafficSavedAt = now;
+    unawaited(
+      _recordProfileNetworkStability(
+        profile,
+        (stats) => stats.recordTraffic(delta, at: now),
+      ),
+    );
   }
 
   String _profileStabilityLabel(VpnProfile profile) {
@@ -1388,7 +1792,28 @@ class _HomeScreenState extends State<HomeScreen>
     return s.profileStabilityLearning;
   }
 
-  Future<void> _startVpnCore(VpnProfile profile) async {
+  String _profileNetworkStatsSummary(VpnProfile profile) {
+    final statsByNetwork = _profileNetworkStabilityStats[profile.id];
+    if (statsByNetwork == null || statsByNetwork.isEmpty) {
+      return 'none';
+    }
+    final entries = statsByNetwork.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return entries
+        .map((entry) {
+          final stats = entry.value;
+          return '${entry.key}:starts=${stats.successfulStarts},'
+              'recovery=${stats.recoveries},'
+              'fail=${stats.healthFailures},'
+              'traffic=${stats.trafficBytes}';
+        })
+        .join('; ');
+  }
+
+  Future<void> _startVpnCore(
+    VpnProfile profile, {
+    bool rapidRestart = false,
+  }) async {
     final blockReason = _profileConnectBlockReason(profile);
     if (blockReason != null) {
       throw _ProfileConnectionBlocked(blockReason);
@@ -1400,17 +1825,24 @@ class _HomeScreenState extends State<HomeScreen>
       await _stopVpnCore(updateMessage: false);
     }
 
-    await Future<void>.delayed(const Duration(milliseconds: 1400));
+    await Future<void>.delayed(
+      rapidRestart
+          ? const Duration(milliseconds: 320)
+          : const Duration(seconds: 1),
+    );
 
     _pendingLogs.clear();
     _logs.clear();
     _lastError = null;
+    _connectedSince = null;
     _lastTrafficAt = null;
     _lastHealthyAt = null;
     _lastIdleHealthCheckAt = null;
     _lastRecoverySource = null;
     _lastNetworkEvent = 'manual-start';
     _lastSessionTrafficBytes = 0;
+    _lastNetworkStatsTrafficBytes = 0;
+    _lastNetworkStatsTrafficSavedAt = null;
     _idleHealthChecks = 0;
     _idleRecoveryCount = 0;
     _tunnelHealthFailures = 0;
@@ -1433,11 +1865,10 @@ class _HomeScreenState extends State<HomeScreen>
       planIndex += 1
     ) {
       final plan = plans[planIndex];
-      final config = _configBuilder.build(
+      final config = _buildRuntimeConfig(
         profile,
-        naiveMode: plan.naiveMode,
-        smartRouteRuDirect: _smartRouteRuDirect,
-        smartRouteRuBypassPackages: smartRouteBypassPackages,
+        plan: plan,
+        smartRouteBypassPackages: smartRouteBypassPackages,
       );
       final configSummary = _summarizeSingBoxConfig(
         config,
@@ -1483,14 +1914,34 @@ class _HomeScreenState extends State<HomeScreen>
             AurumVpnStatus.started,
           }, timeout: const Duration(seconds: 14));
           if (finalStatus == AurumVpnStatus.started) {
-            if (profile.kind != VpnProfileKind.naive) {
+            final requiresSuccessfulProbe =
+                ProfileEngineSelector.requiresSuccessfulStartupProbe(profile);
+            final shouldProbe =
+                requiresSuccessfulProbe || profile.kind == VpnProfileKind.naive;
+            if (!shouldProbe) {
               connected = true;
               break;
             }
 
-            if (await _probeLocalMixedProxy()) {
+            final probePassed =
+                await _probeLocalMixedProxy(
+                  attempts: requiresSuccessfulProbe ? 1 : 2,
+                ).timeout(
+                  const Duration(seconds: 12),
+                  onTimeout: () {
+                    _queueLog('Startup proxy probe timed out.');
+                    return false;
+                  },
+                );
+            if (probePassed) {
               connected = true;
               break;
+            } else if (requiresSuccessfulProbe) {
+              lastStartError = s.vpnStartFailed;
+              _queueLog(
+                'Startup proxy probe failed for ${profile.kind.name}; '
+                'restarting the tunnel before reporting Connected.',
+              );
             } else {
               startupProbeDegraded = true;
               connected = true;
@@ -1513,7 +1964,7 @@ class _HomeScreenState extends State<HomeScreen>
             '${_redactSensitive('$lastStartError')}',
           );
           await _stopVpnCore(updateMessage: false);
-          await Future<void>.delayed(const Duration(milliseconds: 1600));
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
           await _bestEffortNative(
             'saveConfig retry',
             _vpnEngine.saveConfig(config),
@@ -1536,6 +1987,7 @@ class _HomeScreenState extends State<HomeScreen>
     await Future<void>.delayed(const Duration(milliseconds: 500));
     await _store.saveSelectedProfileId(profile.id);
     if (mounted) {
+      final connectedAt = DateTime.now();
       setState(() {
         _selectedProfileId = profile.id;
         _lastError = null;
@@ -1545,12 +1997,12 @@ class _HomeScreenState extends State<HomeScreen>
             ? _tunnelHealthFailureThreshold - 1
             : 0;
         _autoRecoveryArmed = true;
-        _connectedSince ??= DateTime.now();
-        _clockNow = DateTime.now();
-        _lastTrafficAt = DateTime.now();
-        _lastHealthyAt = startupProbeDegraded ? null : DateTime.now();
+        _connectedSince = connectedAt;
+        _clockNow = connectedAt;
+        _lastTrafficAt = connectedAt;
+        _lastHealthyAt = startupProbeDegraded ? null : connectedAt;
         _lastSessionTrafficBytes = 0;
-        _nextTunnelHealthCheckAt = DateTime.now().add(
+        _nextTunnelHealthCheckAt = connectedAt.add(
           startupProbeDegraded
               ? _startupProbeRecheckDelay
               : _tunnelHealthProbeInterval,
@@ -1562,10 +2014,20 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(
       _recordProfileStability(profile, (stats) => stats.recordStartSuccess()),
     );
+    unawaited(
+      _recordProfileNetworkStability(
+        profile,
+        (stats) => stats.recordStartSuccess(),
+      ),
+    );
     unawaited(_refreshConnectedCountry(profile.id));
   }
 
   String? _profileConnectBlockReason(VpnProfile profile) {
+    final selection = ProfileEngineSelector.select(profile);
+    if (!selection.canRunInCurrentBuild) {
+      return selection.reason;
+    }
     if (!profile.kind.isClientSupported) {
       return s.unsupportedProtocol(profile.kind);
     }
@@ -1575,7 +2037,32 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _disconnect() async {
     _autoRecoveryArmed = false;
-    await _runBusy(() => _stopVpnCore(), message: s.disconnectingVpn);
+    _autoReconnectInFlight = false;
+    _nextAutoReconnectAt = null;
+    _autoReconnectAttempts = 0;
+    await _store.saveManualDisconnectRequested(true);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _manualDisconnectRequested = true;
+    });
+    await _runQueuedBusy(() => _stopVpnCore(), message: s.disconnectingVpn);
+  }
+
+  Future<void> _enforceManualDisconnect(String source) async {
+    if (!mounted || _stoppingByUser) {
+      return;
+    }
+
+    _queueLog(
+      'Manual disconnect guard: native VPN reported Started from $source; '
+      'stopping again.',
+    );
+    _autoRecoveryArmed = false;
+    _nextAutoReconnectAt = null;
+    _autoReconnectAttempts = 0;
+    await _stopVpnCore(updateMessage: true);
   }
 
   Future<void> _stopVpnCore({bool updateMessage = true}) async {
@@ -1600,7 +2087,7 @@ class _HomeScreenState extends State<HomeScreen>
         if (stoppedStatus != AurumVpnStatus.stopped) {
           _queueLog('VPN stop cleanup is still finishing: $stoppedStatus');
         }
-        await Future<void>.delayed(const Duration(milliseconds: 700));
+        await Future<void>.delayed(const Duration(milliseconds: 500));
       }
 
       if (mounted) {
@@ -1641,12 +2128,35 @@ class _HomeScreenState extends State<HomeScreen>
         _vpnEngine.getVPNStatus(),
         timeout: _nativeShortTimeout,
       );
-      if (mounted) {
+      if (_stoppingByUser && status == AurumVpnStatus.started) {
+        _queueLog(
+          'Native getVPNStatus=Started ignored during stop transition.',
+        );
+        return _status == AurumVpnStatus.stopped
+            ? AurumVpnStatus.stopped
+            : AurumVpnStatus.stopping;
+      }
+      if (mounted && _status != status) {
         setState(() => _status = status);
       }
       return status;
     } on Object {
       return _status;
+    }
+  }
+
+  Future<void> _refreshNetworkSnapshot(String source) async {
+    try {
+      final snapshot = await _nativeCall(
+        'getNetworkSnapshot',
+        _vpnEngine.getNetworkSnapshot(),
+        timeout: _nativeShortTimeout,
+      );
+      _applyNetworkSnapshot(snapshot, source: source);
+    } on Object catch (error) {
+      _queueLog(
+        'Native network snapshot ignored [$source]: ${_redactSensitive('$error')}',
+      );
     }
   }
 
@@ -1667,12 +2177,17 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _refreshStatusWatchdog() async {
-    if (!mounted || _busy || _statusWatchdogInFlight) {
+    if (!mounted ||
+        _busy ||
+        _statusWatchdogInFlight ||
+        _manualDisconnectRequested ||
+        _connectionQueueActive) {
       return;
     }
 
     _statusWatchdogInFlight = true;
     try {
+      await _refreshNetworkSnapshot('watchdog');
       final previous = _status;
       final status = await _refreshVpnStatus();
       final ignoreStopped =
@@ -1690,6 +2205,14 @@ class _HomeScreenState extends State<HomeScreen>
           !_stoppingByUser &&
           !ignoreStopped) {
         final now = DateTime.now();
+        if (_isNetworkChanging(now)) {
+          _setKeeperAction('watchdog-network-changing');
+          return;
+        }
+        if (_isResumeRecoveryQuietWindow(now)) {
+          _setKeeperAction('watchdog-resume-quiet');
+          return;
+        }
         final stale = _isTunnelStale(now);
         final idleCheck = _shouldRunIdleHealthCheck(now);
         if (stale) {
@@ -1717,7 +2240,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _markUnexpectedStop(String source) {
-    if (!mounted || _stoppingByUser || !_autoRecoveryArmed) {
+    if (!mounted ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !_autoRecoveryArmed) {
       return;
     }
 
@@ -1731,6 +2257,12 @@ class _HomeScreenState extends State<HomeScreen>
           (stats) => stats.recordStartFailure('unexpected-stop:$source'),
         ),
       );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthFailure('unexpected-stop:$source'),
+        ),
+      );
     }
     setState(() {
       _lastError = s.vpnStoppedUnexpectedly;
@@ -1742,7 +2274,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _refreshTunnelHealth({String source = 'watchdog'}) async {
-    if (_autoReconnectInFlight || _tunnelHealthCheckInFlight || !mounted) {
+    if (_autoReconnectInFlight ||
+        _tunnelHealthCheckInFlight ||
+        _manualDisconnectRequested ||
+        _connectionQueueActive ||
+        !mounted) {
       return;
     }
 
@@ -1752,8 +2288,35 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final now = DateTime.now();
+    if (_isNetworkChanging(now)) {
+      _setKeeperAction('health-skip-network-changing:$source');
+      _nextTunnelHealthCheckAt =
+          _networkChangingUntil ?? now.add(_networkChangingSettleWindow);
+      return;
+    }
+
     final nextCheckAt = _nextTunnelHealthCheckAt;
     if (nextCheckAt != null && now.isBefore(nextCheckAt)) {
+      return;
+    }
+
+    if (_hasRecentNativeActivity(now)) {
+      _tunnelHealthFailures = 0;
+      _lastHealthyAt = _lastNativeActivityAt ?? now;
+      _setKeeperAction('native-activity-ok:$source', at: _lastHealthyAt);
+      _nextTunnelHealthCheckAt = now.add(_healthProbeIntervalFor(source));
+      unawaited(
+        _recordProfileStability(
+          profile,
+          (stats) => stats.recordHealthy(at: _lastHealthyAt),
+        ),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthy(at: _lastHealthyAt),
+        ),
+      );
       return;
     }
 
@@ -1770,6 +2333,12 @@ class _HomeScreenState extends State<HomeScreen>
           (stats) => stats.recordHealthy(at: lastTrafficAt),
         ),
       );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthy(at: lastTrafficAt),
+        ),
+      );
       return;
     }
 
@@ -1780,7 +2349,9 @@ class _HomeScreenState extends State<HomeScreen>
         attempts: _healthProbeAttemptsFor(source),
         logFailures: false,
       );
-      if (!mounted || _status != AurumVpnStatus.started) {
+      if (!mounted ||
+          _manualDisconnectRequested ||
+          _status != AurumVpnStatus.started) {
         return;
       }
 
@@ -1794,10 +2365,17 @@ class _HomeScreenState extends State<HomeScreen>
         unawaited(
           _recordProfileStability(profile, (stats) => stats.recordHealthy()),
         );
+        unawaited(
+          _recordProfileNetworkStability(
+            profile,
+            (stats) => stats.recordHealthy(),
+          ),
+        );
         return;
       }
 
       _tunnelHealthFailures += 1;
+      final failureThreshold = _healthFailureThresholdFor(source);
       _setKeeperAction('probe-failed:$source');
       unawaited(
         _recordProfileStability(
@@ -1805,12 +2383,21 @@ class _HomeScreenState extends State<HomeScreen>
           (stats) => stats.recordHealthFailure('health-probe:$source'),
         ),
       );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthFailure('health-probe:$source'),
+        ),
+      );
       _queueLog(
-        'VPN watchdog: health probe failed #$_tunnelHealthFailures from $source '
-        'for ${profile.name}.',
+        'VPN watchdog: health probe failed #$_tunnelHealthFailures/'
+        '$failureThreshold from $source for ${profile.name}.',
       );
 
-      if (_tunnelHealthFailures >= _tunnelHealthFailureThreshold) {
+      if (_tunnelHealthFailures >= failureThreshold) {
+        if (_manualDisconnectRequested) {
+          return;
+        }
         _tunnelHealthFailures = 0;
         _queueLog(
           'VPN watchdog: tunnel is unhealthy, reconnecting ${profile.name}.',
@@ -1825,7 +2412,7 @@ class _HomeScreenState extends State<HomeScreen>
           });
         }
         _setKeeperAction('reconnect:health-probe');
-        unawaited(_recoverConnection('health-probe', forceRestart: true));
+        unawaited(_queueConnectionRecovery('health-probe', forceRestart: true));
       }
     } finally {
       _tunnelHealthCheckInFlight = false;
@@ -1833,14 +2420,18 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _recoverUnexpectedStop(String source) {
-    return _recoverConnection(source, forceRestart: false);
+    return _queueConnectionRecovery(source, forceRestart: false);
   }
 
   Future<void> _recoverConnection(
     String source, {
     required bool forceRestart,
   }) async {
-    if (_autoReconnectInFlight || _busy || _stoppingByUser || !mounted) {
+    if (_autoReconnectInFlight ||
+        _busy ||
+        _stoppingByUser ||
+        _manualDisconnectRequested ||
+        !mounted) {
       return;
     }
 
@@ -1850,6 +2441,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final now = DateTime.now();
+    final recoveryNetworkGeneration = _networkGenerationId;
     final nextAttemptAt = _nextAutoReconnectAt;
     if (nextAttemptAt != null && now.isBefore(nextAttemptAt)) {
       return;
@@ -1898,7 +2490,20 @@ class _HomeScreenState extends State<HomeScreen>
 
     try {
       await Future<void>.delayed(delay);
-      if (!mounted || _stoppingByUser) {
+      if (!mounted || _stoppingByUser || _manualDisconnectRequested) {
+        return;
+      }
+
+      await _refreshNetworkSnapshot('reconnect:$source#$attempt');
+      if (_networkGenerationId != recoveryNetworkGeneration &&
+          _isNetworkChanging(DateTime.now())) {
+        _autoReconnectAttempts = 0;
+        _nextAutoReconnectAt = _networkChangingUntil;
+        _setKeeperAction('reconnect-cancel-network-change:$source#$attempt');
+        _queueLog(
+          'VPN watchdog: reconnect cancelled because network changed '
+          'from generation $recoveryNetworkGeneration to $_networkGenerationId.',
+        );
         return;
       }
 
@@ -1922,13 +2527,22 @@ class _HomeScreenState extends State<HomeScreen>
         await Future<void>.delayed(const Duration(milliseconds: 1200));
       }
 
-      await _startVpnCore(profile);
+      if (!mounted || _manualDisconnectRequested) {
+        return;
+      }
+      await _startVpnCore(profile, rapidRestart: true);
       _setKeeperAction('reconnect-ok:$source#$attempt');
       _lastHealthyAt = DateTime.now();
       _lastError = null;
       _tunnelHealthFailures = 0;
       unawaited(
         _recordProfileStability(profile, (stats) => stats.recordRecovery()),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordRecovery(),
+        ),
       );
     } on Object catch (error) {
       final errorText = _redactSensitive('$error');
@@ -1938,6 +2552,12 @@ class _HomeScreenState extends State<HomeScreen>
         _recordProfileStability(
           profile,
           (stats) => stats.recordStartFailure(errorText),
+        ),
+      );
+      unawaited(
+        _recordProfileNetworkStability(
+          profile,
+          (stats) => stats.recordHealthFailure(errorText),
         ),
       );
       if (mounted) {
@@ -1971,6 +2591,33 @@ class _HomeScreenState extends State<HomeScreen>
       _ConnectionConfigPlan(NaiveOutboundMode.httpConnect, 'https-connect'),
       _ConnectionConfigPlan(NaiveOutboundMode.native, 'native-naive'),
     ];
+  }
+
+  String _buildRuntimeConfig(
+    VpnProfile profile, {
+    required _ConnectionConfigPlan plan,
+    required List<String> smartRouteBypassPackages,
+  }) {
+    final engine = ProfileEngineSelector.select(profile);
+    if (engine.engine == VpnCoreEngine.xray) {
+      if (!engine.canRunInCurrentBuild) {
+        throw UnsupportedError(engine.reason);
+      }
+      return _xrayConfigBuilder.build(
+        profile,
+        smartRouteRuDirect: _smartRouteRuDirect,
+        smartRouteRuBypassPackages: smartRouteBypassPackages,
+        dnsProtectionMode: _dnsProtectionMode,
+      );
+    }
+
+    return _configBuilder.build(
+      profile,
+      naiveMode: plan.naiveMode,
+      smartRouteRuDirect: _smartRouteRuDirect,
+      smartRouteRuBypassPackages: smartRouteBypassPackages,
+      dnsProtectionMode: _dnsProtectionMode,
+    );
   }
 
   Future<bool> _probeLocalMixedProxy({
@@ -2042,18 +2689,31 @@ class _HomeScreenState extends State<HomeScreen>
     return false;
   }
 
-  Future<void> _pingProfiles(List<VpnProfile> profiles) async {
+  Future<void> _pingProfiles(
+    List<VpnProfile> profiles, {
+    bool force = false,
+  }) async {
     if (_pingAllInFlight || profiles.isEmpty) {
       return;
     }
 
+    final orderedProfiles = profiles.toList(growable: false)
+      ..sort((a, b) {
+        final aSelected = a.id == _selectedProfileId;
+        final bSelected = b.id == _selectedProfileId;
+        if (aSelected == bSelected) {
+          return a.name.compareTo(b.name);
+        }
+        return aSelected ? -1 : 1;
+      });
+
     _pingAllInFlight = true;
     try {
-      for (final profile in profiles.take(16)) {
+      for (final profile in orderedProfiles.take(12)) {
         if (!mounted) {
           return;
         }
-        await _pingProfile(profile);
+        await _pingProfile(profile, force: force);
         await Future<void>.delayed(const Duration(milliseconds: 120));
       }
     } finally {
@@ -2061,13 +2721,19 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _pingProfile(VpnProfile profile) async {
+  Future<void> _pingProfile(VpnProfile profile, {bool force = false}) async {
     final server = profile.server?.trim();
     final port = profile.port ?? 443;
     if (server == null || server.isEmpty || port <= 0) {
       return;
     }
     if (_profilePingBusy[profile.id] == true) {
+      return;
+    }
+    final checkedAt = _profilePingCheckedAt[profile.id];
+    if (!force &&
+        checkedAt != null &&
+        DateTime.now().difference(checkedAt) < _profilePingCacheTtl) {
       return;
     }
 
@@ -2133,6 +2799,7 @@ class _HomeScreenState extends State<HomeScreen>
       });
     } finally {
       socket?.destroy();
+      _profilePingCheckedAt[profile.id] = DateTime.now();
       if (mounted) {
         setState(() => _profilePingBusy[profile.id] = false);
       }
@@ -2206,6 +2873,18 @@ class _HomeScreenState extends State<HomeScreen>
 
     final geo = await _geoService.resolveExitCountryThroughTunnel();
     if (geo != null) {
+      final index = _profiles.indexWhere((profile) => profile.id == profileId);
+      final profile = index < 0 ? null : _profiles[index];
+      if (profile != null &&
+          ProfileCountryResolver.hasDeclaredCountry(profile)) {
+        _queueLog(
+          'Geo: exit country ${geo.countryCode}'
+          '${geo.ip == null ? '' : ' via ${geo.ip}'}; '
+          'profile country preserved',
+        );
+        return;
+      }
+
       await _saveProfileCountry(profileId, geo);
       _queueLog(
         'Geo: exit country ${geo.countryCode}'
@@ -2242,61 +2921,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String? _profileCountryFlag(VpnProfile profile) {
-    final existing = _leadingFlag(profile.name);
-    if (existing != null) {
-      return existing;
-    }
-
-    final cached = ProfileGeo.countryCodeToFlag(profile.countryCode);
-    if (cached != null) {
-      return cached;
-    }
-
-    final haystack = '${profile.name} ${profile.server ?? ''}'.toLowerCase();
-    if (haystack.contains('росси') ||
-        haystack.contains('russia') ||
-        haystack.endsWith('.ru') ||
-        haystack.endsWith('.su') ||
-        haystack.endsWith('.рф')) {
-      return '🇷🇺';
-    }
-    if (haystack.contains('фин') ||
-        haystack.contains('finland') ||
-        haystack.endsWith('.fi')) {
-      return '🇫🇮';
-    }
-    if (haystack.contains('герман') ||
-        haystack.contains('germany') ||
-        haystack.endsWith('.de')) {
-      return '🇩🇪';
-    }
-    if (haystack.contains('сша') ||
-        haystack.contains('usa') ||
-        haystack.contains('america') ||
-        haystack.endsWith('.us')) {
-      return '🇺🇸';
-    }
-    if (haystack.contains('japan') || haystack.contains('япон')) {
-      return '🇯🇵';
-    }
-    if (haystack.contains('netherlands') || haystack.contains('нидер')) {
-      return '🇳🇱';
-    }
-    if (haystack.contains('france') || haystack.contains('франц')) {
-      return '🇫🇷';
-    }
-    if (haystack.contains('canada') || haystack.contains('канада')) {
-      return '🇨🇦';
-    }
-    if (haystack.contains('turkey') || haystack.contains('турц')) {
-      return '🇹🇷';
-    }
-    if (haystack.contains('uk') ||
-        haystack.contains('united kingdom') ||
-        haystack.endsWith('.co.uk')) {
-      return '🇬🇧';
-    }
-    return '🌐';
+    return ProfileCountryResolver.displayCountryFlag(profile);
   }
 
   String _profileDisplayName(VpnProfile profile) {
@@ -2308,12 +2933,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String? _leadingFlag(String value) {
-    final runes = value.trimLeft().runes.take(2).toList(growable: false);
-    if (runes.length < 2) {
-      return null;
-    }
-    final isFlag = runes.every((rune) => rune >= 0x1F1E6 && rune <= 0x1F1FF);
-    return isFlag ? String.fromCharCodes(runes) : null;
+    return ProfileCountryResolver.leadingFlag(value);
   }
 
   String _formatDuration(Duration? duration) {
@@ -2367,17 +2987,56 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    await _runBusy(() async {
+    await _runQueuedBusy(() async {
       await _stopVpnCore(updateMessage: false);
-      await _startVpnCore(profile);
+      await _startVpnCore(profile, rapidRestart: true);
     }, message: s.smartRouteApplying);
+  }
+
+  Future<void> _setDnsLeakProtection(bool enabled) async {
+    final mode = enabled
+        ? DnsProtectionMode.leakGuard
+        : DnsProtectionMode.stable;
+    if (_dnsProtectionMode == mode || _busy) {
+      return;
+    }
+
+    final profile = _selectedProfile;
+    final shouldRestart = _connected && profile != null;
+    await _store.saveDnsProtectionMode(mode);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _dnsProtectionMode = mode;
+      _message = enabled ? s.dnsLeakGuardEnabled : s.dnsLeakGuardDisabled;
+    });
+
+    if (!shouldRestart) {
+      return;
+    }
+
+    await _runQueuedBusy(() async {
+      await _stopVpnCore(updateMessage: false);
+      await _startVpnCore(profile, rapidRestart: true);
+    }, message: s.dnsLeakGuardApplying);
   }
 
   Future<List<String>> _smartRouteBypassPackages() async {
     if (!_smartRouteRuDirect) {
       return const [];
     }
-    return _installedAppsService.installedPackageNames();
+    try {
+      return await _installedAppsService.installedPackageNames().timeout(
+        const Duration(seconds: 2),
+      );
+    } on Object catch (error) {
+      _queueLog(
+        'Smart Route installed apps scan skipped: ${_redactSensitive('$error')}',
+      );
+      return const [];
+    }
   }
 
   String _profileKindLabel(VpnProfileKind kind) {
@@ -2387,6 +3046,7 @@ class _HomeScreenState extends State<HomeScreen>
         VpnProfileKind.vlessTls ||
         VpnProfileKind.vlessXhttp ||
         VpnProfileKind.vlessMkcp => 'vless',
+        VpnProfileKind.pingTunnelExperimental => 'pingtunnel',
         VpnProfileKind.naive => 'naive',
         VpnProfileKind.hysteria2 => 'hysteria2',
         VpnProfileKind.hysteria => 'hysteria',
@@ -2411,7 +3071,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    await _runBusy(() async {
+    await _runQueuedBusy(() async {
       final wasSelected = _selectedProfileId == profile.id;
       if (wasSelected && _connected) {
         _autoRecoveryArmed = false;
@@ -2518,6 +3178,37 @@ class _HomeScreenState extends State<HomeScreen>
       await _nativeCall(label, future, timeout: timeout);
     } on Object catch (error) {
       _queueLog('Native call ignored [$label]: ${_redactSensitive('$error')}');
+    }
+  }
+
+  Future<void> _runQueuedBusy(
+    Future<void> Function() action, {
+    String? message,
+  }) async {
+    await _queueConnectionTask(() => _runBusy(action, message: message));
+  }
+
+  Future<void> _queueConnectionRecovery(
+    String source, {
+    required bool forceRestart,
+  }) async {
+    await _queueConnectionTask(
+      () => _recoverConnection(source, forceRestart: forceRestart),
+    );
+  }
+
+  Future<void> _queueConnectionTask(Future<void> Function() action) async {
+    final myToken = ++_connectionQueueToken;
+    _connectionQueueActive = true;
+    final previous = _connectionQueue.catchError((_) {});
+    final task = previous.then((_) => action());
+    _connectionQueue = task.catchError((_) {});
+    try {
+      await task;
+    } finally {
+      if (_connectionQueueToken == myToken) {
+        _connectionQueueActive = false;
+      }
     }
   }
 
@@ -2756,6 +3447,7 @@ class _HomeScreenState extends State<HomeScreen>
       'locale: ${Platform.localeName}',
       'config_target: ${_vpnEngine.configTarget.name}',
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
+      'dns_protection_mode: ${_dnsProtectionMode.storageValue}',
       'smart_route_enabled: $_smartRouteRuDirect',
       if (_smartRouteRuDirect) ...[
         'smart_route_mode: ru-apps-direct/global-vpn',
@@ -2769,6 +3461,19 @@ class _HomeScreenState extends State<HomeScreen>
       'connection_degraded: $_connectionDegraded',
       'connection_idle: ${_isTunnelIdle(now)}',
       'connection_stale: ${_isTunnelStale(now)}',
+      'network_type: $_networkType',
+      'network_label: $_networkTypeLabel',
+      'network_generation: $_networkGenerationId',
+      'network_changing: $_networkChanging',
+      if (_networkFingerprint.isNotEmpty)
+        'network_fingerprint: $_networkFingerprint',
+      if (_lastNetworkSnapshotAt != null)
+        'last_network_snapshot_local: ${_lastNetworkSnapshotAt!.toIso8601String()}',
+      if (_networkChangingUntil != null)
+        'network_changing_until_local: ${_networkChangingUntil!.toIso8601String()}',
+      if (_lastNativeActivityAt != null)
+        'last_native_activity_local: ${_lastNativeActivityAt!.toIso8601String()}',
+      'manual_disconnect_requested: $_manualDisconnectRequested',
       'message: ${_redactSensitive(_message)}',
       if (_lastError != null) 'last_error: $_lastError',
       'uptime: ${_formatDuration(_connectedDuration)}',
@@ -2798,10 +3503,15 @@ class _HomeScreenState extends State<HomeScreen>
       if (profile != null) ...[
         'profile: ${_redactSensitive(profile.name)}',
         'protocol: ${_profileKindLabel(profile.kind)}',
+        if (_profileUsesWarpExit(profile)) ...[
+          'transport_mode: warp',
+          'dns_mode: warp/proxy',
+          'expected_geo: Cloudflare/WARP exit, not pure VPS location',
+        ],
         'endpoint: ${_redactSensitive(profile.endpoint)}',
         'country: ${_profileCountryFlag(profile) ?? 'unknown'}'
-            '${profile.countryCode == null ? '' : ' ${profile.countryCode}'}'
-            '${profile.countryName == null ? '' : ' ${profile.countryName}'}',
+            '${_profileCountryCode(profile) == null ? '' : ' ${_profileCountryCode(profile)}'}'
+            '${_profileCountryName(profile) == null ? '' : ' ${_profileCountryName(profile)}'}',
         'profile_ping: ${_profilePingLabel(profile)}',
         'profile_stability: ${_profileStabilityLabel(profile)}',
         'profile_stability_penalty: '
@@ -2815,6 +3525,7 @@ class _HomeScreenState extends State<HomeScreen>
             '${_profileStabilityFor(profile.id).healthFailures}',
         if (_profileStabilityFor(profile.id).lastFailureReason != null)
           'profile_last_failure: ${_redactSensitive(_profileStabilityFor(profile.id).lastFailureReason!)}',
+        'profile_network_stats: ${_profileNetworkStatsSummary(profile)}',
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
       '',
@@ -2832,7 +3543,7 @@ class _HomeScreenState extends State<HomeScreen>
             _profileKindLabel(item.kind),
             _redactSensitive(item.endpoint),
             'country=${_profileCountryFlag(item) ?? 'unknown'}'
-                '${item.countryCode == null ? '' : ' ${item.countryCode}'}',
+                '${_profileCountryCode(item) == null ? '' : ' ${_profileCountryCode(item)}'}',
             'ping=${_profilePingLabel(item)}',
             'stability=${_profileStabilityLabel(item)}',
             if (expires != null) 'expires=$expires',
@@ -2848,10 +3559,15 @@ class _HomeScreenState extends State<HomeScreen>
         .take(120)
         .toList()
         .reversed
-        .where((log) => !_isDiagnosticNoise(log))
+        .where((log) => !SingBoxLogFilter.isDiagnosticNoise(log))
         .map(_redactSensitive);
     lines.addAll(safeLogs.isEmpty ? const ['Логов пока нет.'] : safeLogs);
     return lines.join('\n');
+  }
+
+  bool _profileUsesWarpExit(VpnProfile profile) {
+    return profile.kind == VpnProfileKind.hysteria ||
+        profile.kind == VpnProfileKind.hysteria2;
   }
 
   String _summarizeSingBoxConfig(
@@ -2864,6 +3580,14 @@ class _HomeScreenState extends State<HomeScreen>
         return 'target=${target.name}; raw/custom config';
       }
       final map = decoded.cast<String, dynamic>();
+      final yurichRuntime = (map['_yurich'] as Map?)?.cast<String, dynamic>();
+      if (yurichRuntime?['core'] == XrayConfigBuilder.runtimeCore) {
+        final xray = (map['xray'] as Map?)?.cast<String, dynamic>();
+        if (xray == null) {
+          return 'target=${target.name}; core=xray; invalid wrapper';
+        }
+        return _summarizeXrayConfig(xray, target: target);
+      }
       final inbounds = ((map['inbounds'] as List?) ?? const [])
           .whereType<Map>()
           .map((item) => item.cast<String, dynamic>())
@@ -2923,10 +3647,19 @@ class _HomeScreenState extends State<HomeScreen>
         (server) => server['tag'] == dnsFinal,
         orElse: () => const <String, dynamic>{},
       );
+      final dnsDetour = dnsServer['detour'];
+      final hasRemoteDns = dnsServers.whereType<Map>().any((server) {
+        final tag = server['tag'];
+        return tag == 'remote-dns' ||
+            (tag is String &&
+                (tag == 'remote-dns-primary' || tag == 'remote-dns-secondary'));
+      });
       return [
         'target=${target.name}',
         'proxy=${proxy['type'] ?? 'unknown'}',
         'dns=$dnsFinal/${dnsServer['type'] ?? 'unknown'}',
+        if (hasRemoteDns) 'dns_leak_guard=true',
+        if (dnsDetour != null) 'dns_detour=$dnsDetour',
         if (hasFakeDns) 'fake_dns=true',
         'mtu=${tun['mtu'] ?? 'unknown'}',
         'strict_route=${tun['strict_route'] ?? 'unknown'}',
@@ -2960,10 +3693,68 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  bool _isDiagnosticNoise(String log) {
-    return log.contains('router: found package name:') ||
-        log.contains('router: found user id:') ||
-        log.contains('router: failed to search process: process not found');
+  String _summarizeXrayConfig(
+    Map<String, dynamic> map, {
+    required SingBoxConfigTarget target,
+  }) {
+    final inbounds = ((map['inbounds'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+    final tun = inbounds.firstWhere(
+      (inbound) => inbound['protocol'] == 'tun',
+      orElse: () => const <String, dynamic>{},
+    );
+    final tunSettings =
+        (tun['settings'] as Map?)?.cast<String, dynamic>() ??
+        const <String, dynamic>{};
+
+    final outbounds = ((map['outbounds'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+    final proxy = outbounds.firstWhere(
+      (outbound) => outbound['tag'] == 'proxy',
+      orElse: () =>
+          outbounds.isEmpty ? const <String, dynamic>{} : outbounds.first,
+    );
+    final stream =
+        (proxy['streamSettings'] as Map?)?.cast<String, dynamic>() ??
+        const <String, dynamic>{};
+    final reality = (stream['realitySettings'] as Map?)
+        ?.cast<String, dynamic>();
+    final tls = (stream['tlsSettings'] as Map?)?.cast<String, dynamic>();
+    final xhttp =
+        (stream['xhttpSettings'] as Map?)?.cast<String, dynamic>() ??
+        const <String, dynamic>{};
+    final dns = (map['dns'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final route = (map['routing'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final routeRules = ((route['rules'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+    final smartRouteEnabled = routeRules.any(
+      (rule) =>
+          rule['outboundTag'] == 'direct' &&
+          (rule['domain_suffix'] as List?)?.contains('ru') == true,
+    );
+
+    return [
+      'target=${target.name}',
+      'core=xray',
+      'proxy=${proxy['protocol'] ?? 'unknown'}',
+      'transport=${stream['network'] ?? 'unknown'}',
+      'security=${stream['security'] ?? 'unknown'}',
+      'xhttp_mode=${xhttp['mode'] ?? 'default'}',
+      'dns=${((dns['servers'] as List?) ?? const []).join(',')}',
+      'route_final=${route['final'] ?? 'missing'}',
+      'smart_route=$smartRouteEnabled',
+      'mtu=${tunSettings['mtu'] ?? 'unknown'}',
+      'address=${tunSettings['address'] ?? 'unknown'}',
+      'sni=${reality?['serverName'] ?? tls?['serverName'] ?? 'unknown'}',
+      if (reality != null) 'reality=true',
+      'mixed_proxy=false',
+    ].join('; ');
   }
 
   Future<void> _setLogsExpanded(bool expanded) async {
@@ -3106,12 +3897,14 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   Widget build(BuildContext context) {
     final selected = _selectedProfile;
+    final explicitSelected = _explicitSelectedProfile;
     final connectCandidate = _connected
         ? selected
         : (_autoConnectProfile() ?? selected);
+    final panelProfile = explicitSelected ?? selected;
     final selectedProfileId = _connected
         ? (_selectedProfileId ?? selected?.id)
-        : (connectCandidate?.id ?? _selectedProfileId ?? selected?.id);
+        : (_selectedProfileId ?? selected?.id ?? connectCandidate?.id);
     final activeProfileId = _connected ? selectedProfileId : null;
 
     return Scaffold(
@@ -3165,7 +3958,7 @@ class _HomeScreenState extends State<HomeScreen>
                       pulse: _glowPulse,
                       strings: s,
                       profiles: _profiles,
-                      selectedProfile: connectCandidate,
+                      selectedProfile: panelProfile,
                       selectedId: selectedProfileId,
                       activeProfileId: activeProfileId,
                       selectedTab: _profileTab,
@@ -3189,6 +3982,8 @@ class _HomeScreenState extends State<HomeScreen>
                       subscriptionNeedsAttention: _subscriptionNeedsAttention,
                       batteryOptimizationIgnored: _batteryOptimizationIgnored,
                       smartRouteRuDirect: _smartRouteRuDirect,
+                      dnsLeakProtectionEnabled:
+                          _dnsProtectionMode.protectsAgainstLeaks,
                       keeperStatus: _keeperStatusLabel,
                       idleKeeperStatus: _idleKeeperStatusLabel,
                       lastHealthStatus: _lastHealthStatusLabel,
@@ -3201,12 +3996,16 @@ class _HomeScreenState extends State<HomeScreen>
                       countryFlag: _profileCountryFlag,
                       pingLabel: _profilePingLabel,
                       profileStabilityLabel: _profileStabilityLabel,
-                      onPingAll: () => unawaited(_pingProfiles(_profiles)),
-                      onPing: (profile) => unawaited(_pingProfile(profile)),
+                      onPingAll: () =>
+                          unawaited(_pingProfiles(_profiles, force: true)),
+                      onPing: (profile) =>
+                          unawaited(_pingProfile(profile, force: true)),
                       onRequestBackgroundAccess: () =>
                           unawaited(_requestBackgroundPowerAccess()),
                       onSmartRouteChanged: (enabled) =>
                           unawaited(_setSmartRouteRuDirect(enabled)),
+                      onDnsLeakProtectionChanged: (enabled) =>
+                          unawaited(_setDnsLeakProtection(enabled)),
                     ),
                     const SizedBox(height: 16),
                     _AppCenterPanel(
@@ -3240,2905 +4039,4 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
-}
-
-class _AppBarGradient extends StatelessWidget {
-  const _AppBarGradient();
-
-  @override
-  Widget build(BuildContext context) {
-    return const DecoratedBox(
-      decoration: BoxDecoration(gradient: YurichGradients.header),
-    );
-  }
-}
-
-class _StatusPanel extends StatelessWidget {
-  const _StatusPanel({
-    required this.pulse,
-    required this.strings,
-    required this.status,
-    required this.connectionState,
-    required this.degraded,
-    required this.message,
-    required this.uplink,
-    required this.downlink,
-    required this.uptime,
-    required this.total,
-    required this.onToggle,
-    required this.toggleEnabled,
-  });
-
-  final Animation<double> pulse;
-  final _Strings strings;
-  final String status;
-  final ConnectionUiState connectionState;
-  final bool degraded;
-  final String message;
-  final String uplink;
-  final String downlink;
-  final String uptime;
-  final String total;
-  final VoidCallback onToggle;
-  final bool toggleEnabled;
-
-  @override
-  Widget build(BuildContext context) {
-    final connected = status == AurumVpnStatus.started;
-    final statusLabel = switch (connectionState.status) {
-      ConnectionStatus.connected => strings.connected,
-      ConnectionStatus.idle => strings.idleConnection,
-      ConnectionStatus.degraded => strings.connectionProblem,
-      ConnectionStatus.reconnecting => strings.reconnectingConnection,
-      ConnectionStatus.failed => strings.connectionProblem,
-      ConnectionStatus.connecting =>
-        status == AurumVpnStatus.stopping
-            ? strings.disconnecting
-            : strings.connecting,
-      ConnectionStatus.disconnected => strings.stopped,
-    };
-    final accent = degraded
-        ? _danger
-        : connected
-        ? _cyanGlow
-        : YurichColors.border;
-    final glow = degraded
-        ? _danger.withValues(alpha: 0.22)
-        : connected
-        ? _cyanGlow.withValues(alpha: 0.18)
-        : YurichColors.shadow;
-    final protocol = connectionState.protocolDisplayName ?? '—';
-    final country = [
-      connectionState.countryName,
-      connectionState.countryCode == null
-          ? null
-          : ProfileGeo.countryCodeToFlag(connectionState.countryCode),
-    ].whereType<String>().where((value) => value.isNotEmpty).join(' ');
-    final ping = connectionState.pingMs == null
-        ? '—'
-        : '${connectionState.pingMs} ms';
-
-    return AnimatedBuilder(
-      animation: pulse,
-      builder: (context, child) {
-        final glowPower = connected || degraded ? pulse.value : 0.0;
-        return SizedBox(
-          height: 196,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: degraded
-                  ? YurichGradients.errorCard
-                  : connected
-                  ? YurichGradients.activeCard
-                  : YurichGradients.inactiveCard,
-              borderRadius: BorderRadius.circular(YurichRadii.card),
-              border: Border.all(
-                color: connected || degraded
-                    ? accent.withValues(alpha: 0.74 + glowPower * 0.26)
-                    : accent,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: glow.withValues(alpha: 0.14 + glowPower * 0.24),
-                  blurRadius: 18 + glowPower * 18,
-                  spreadRadius: glowPower * 1.4,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-              child: child,
-            ),
-          ),
-        );
-      },
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                degraded
-                    ? Icons.warning_amber_rounded
-                    : connected
-                    ? Icons.verified_user
-                    : Icons.shield_outlined,
-                color: degraded
-                    ? _dangerSoft
-                    : connected
-                    ? _goldSoft
-                    : _mutedGold,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  statusLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 5),
-          Text(
-            message,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: _mutedGold),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _StatusInfoPill(
-                  icon: Icons.route_outlined,
-                  text: protocol,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _StatusInfoPill(
-                  icon: Icons.flag_outlined,
-                  text: country.isEmpty ? '—' : country,
-                ),
-              ),
-              const SizedBox(width: 8),
-              _StatusInfoPill(icon: Icons.speed_outlined, text: ping),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                child: _Metric(label: '↑', value: uplink, fixed: true),
-              ),
-              const SizedBox(width: 14),
-              _UptimeButton(
-                pulse: pulse,
-                connected: connected,
-                degraded: degraded,
-                uptime: uptime,
-                total: total,
-                enabled: toggleEnabled,
-                onPressed: onToggle,
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: _Metric(label: '↓', value: downlink, fixed: true),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _UptimeButton extends StatelessWidget {
-  const _UptimeButton({
-    required this.pulse,
-    required this.connected,
-    required this.degraded,
-    required this.uptime,
-    required this.total,
-    required this.enabled,
-    required this.onPressed,
-  });
-
-  final Animation<double> pulse;
-  final bool connected;
-  final bool degraded;
-  final String uptime;
-  final String total;
-  final bool enabled;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: pulse,
-      builder: (context, child) {
-        final glowPower = connected || degraded ? pulse.value : 0.0;
-        return Transform.scale(
-          scale: connected || degraded ? 1 + glowPower * 0.025 : 1,
-          child: Tooltip(
-            message: connected ? 'Время работы VPN' : 'Подключить',
-            child: Material(
-              color: Colors.transparent,
-              shape: const CircleBorder(),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: connected
-                      ? degraded
-                            ? YurichGradients.dangerButton
-                            : YurichGradients.cyanButton
-                      : YurichGradients.idleButton,
-                  border: Border.all(
-                    color: degraded
-                        ? YurichColors.dangerSoft
-                        : connected
-                        ? YurichColors.accentSoft
-                        : _gold.withValues(alpha: 0.35),
-                    width: connected ? 2.2 : 1.5,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: degraded
-                          ? _danger.withValues(alpha: 0.42 + glowPower * 0.28)
-                          : connected
-                          ? _cyanGlow.withValues(alpha: 0.42 + glowPower * 0.3)
-                          : YurichColors.shadow,
-                      blurRadius: connected ? 28 + glowPower * 18 : 20,
-                      spreadRadius: glowPower * 2,
-                      offset: const Offset(0, 12),
-                    ),
-                  ],
-                ),
-                child: child,
-              ),
-            ),
-          ),
-        );
-      },
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: enabled ? onPressed : null,
-        child: SizedBox.square(
-          dimension: 82,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  degraded
-                      ? Icons.priority_high_rounded
-                      : connected
-                      ? Icons.timer_outlined
-                      : Icons.power_settings_new,
-                  color: connected ? _ink : _goldSoft,
-                  size: 21,
-                ),
-                const SizedBox(height: 3),
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    connected ? uptime : '00:00',
-                    maxLines: 1,
-                    style: TextStyle(
-                      color: connected ? _ink : _goldSoft,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 2),
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    total,
-                    maxLines: 1,
-                    style: TextStyle(
-                      color: connected
-                          ? _ink.withValues(alpha: 0.66)
-                          : _mutedGold,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 10,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StatusInfoPill extends StatelessWidget {
-  const _StatusInfoPill({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 30,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(
-        color: YurichColors.surfaceMetric.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(YurichRadii.control),
-        border: Border.all(color: YurichColors.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 15, color: YurichColors.textSecondary),
-          const SizedBox(width: 5),
-          Flexible(
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: YurichColors.textPrimary,
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Metric extends StatelessWidget {
-  const _Metric({required this.label, required this.value, this.fixed = false});
-
-  final String label;
-  final String value;
-  final bool fixed;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Text(
-      '$label $value',
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(letterSpacing: 0),
-    );
-
-    return Container(
-      height: fixed ? 52 : null,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        gradient: YurichGradients.metric,
-        borderRadius: BorderRadius.circular(YurichRadii.control),
-        border: Border.all(color: YurichColors.border),
-      ),
-      alignment: Alignment.center,
-      child: fixed
-          ? FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.center,
-              child: text,
-            )
-          : text,
-    );
-  }
-}
-
-class _ProfilePanel extends StatelessWidget {
-  const _ProfilePanel({
-    required this.pulse,
-    required this.strings,
-    required this.profiles,
-    required this.selectedProfile,
-    required this.selectedId,
-    required this.activeProfileId,
-    required this.selectedTab,
-    required this.profilesExpanded,
-    required this.onTabChanged,
-    required this.onProfilesExpandedChanged,
-    required this.onSelect,
-    required this.onAdd,
-    required this.onCopy,
-    required this.onQr,
-    required this.onDeleteProfile,
-    required this.onRefreshSubscriptions,
-    required this.hasSubscriptionSources,
-    required this.subscriptionRefreshBusy,
-    required this.subscriptionStatus,
-    required this.subscriptionNeedsAttention,
-    required this.batteryOptimizationIgnored,
-    required this.smartRouteRuDirect,
-    required this.keeperStatus,
-    required this.idleKeeperStatus,
-    required this.lastHealthStatus,
-    required this.autoRecoveryStatus,
-    required this.healthFailuresStatus,
-    required this.stabilityNeedsAttention,
-    required this.kindLabel,
-    required this.displayName,
-    required this.countryFlag,
-    required this.pingLabel,
-    required this.profileStabilityLabel,
-    required this.onPingAll,
-    required this.onPing,
-    required this.onRequestBackgroundAccess,
-    required this.onSmartRouteChanged,
-  });
-
-  final Animation<double> pulse;
-  final _Strings strings;
-  final List<VpnProfile> profiles;
-  final VpnProfile? selectedProfile;
-  final String? selectedId;
-  final String? activeProfileId;
-  final _ProfileTab selectedTab;
-  final bool profilesExpanded;
-  final ValueChanged<_ProfileTab> onTabChanged;
-  final ValueChanged<bool> onProfilesExpandedChanged;
-  final ValueChanged<VpnProfile> onSelect;
-  final VoidCallback onAdd;
-  final VoidCallback? onCopy;
-  final VoidCallback? onQr;
-  final ValueChanged<VpnProfile> onDeleteProfile;
-  final VoidCallback onRefreshSubscriptions;
-  final bool hasSubscriptionSources;
-  final bool subscriptionRefreshBusy;
-  final String? Function(VpnProfile profile) subscriptionStatus;
-  final bool Function(VpnProfile profile) subscriptionNeedsAttention;
-  final bool batteryOptimizationIgnored;
-  final bool smartRouteRuDirect;
-  final String keeperStatus;
-  final String idleKeeperStatus;
-  final String lastHealthStatus;
-  final String autoRecoveryStatus;
-  final String healthFailuresStatus;
-  final bool stabilityNeedsAttention;
-  final String Function(VpnProfileKind kind) kindLabel;
-  final String Function(VpnProfile profile) displayName;
-  final String? Function(VpnProfile profile) countryFlag;
-  final String Function(VpnProfile profile) pingLabel;
-  final String Function(VpnProfile profile) profileStabilityLabel;
-  final VoidCallback onPingAll;
-  final ValueChanged<VpnProfile> onPing;
-  final VoidCallback onRequestBackgroundAccess;
-  final ValueChanged<bool> onSmartRouteChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    const compactProfileLimit = 6;
-    final matchingProfiles = profiles
-        .where((profile) => _profileMatchesTab(profile, selectedTab))
-        .toList(growable: false);
-    final visibleProfiles = [
-      ...matchingProfiles.where((profile) => profile.id == selectedId),
-      ...matchingProfiles.where((profile) => profile.id != selectedId),
-    ];
-    final shownProfiles = profilesExpanded
-        ? visibleProfiles
-        : visibleProfiles.take(compactProfileLimit).toList(growable: false);
-    final hiddenProfiles = visibleProfiles.length - shownProfiles.length;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                strings.profiles,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-            ),
-            IconButton(
-              tooltip: strings.refreshSubscriptions,
-              onPressed: hasSubscriptionSources && !subscriptionRefreshBusy
-                  ? onRefreshSubscriptions
-                  : null,
-              icon: subscriptionRefreshBusy
-                  ? const SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.sync),
-            ),
-            IconButton(
-              tooltip: strings.refreshPing,
-              onPressed: profiles.isEmpty ? null : onPingAll,
-              icon: const Icon(Icons.refresh),
-            ),
-            IconButton(
-              tooltip: strings.addProfile,
-              onPressed: onAdd,
-              icon: const Icon(Icons.add_link),
-            ),
-            IconButton(
-              tooltip: strings.showQr,
-              onPressed: onQr,
-              icon: const Icon(Icons.qr_code_2),
-            ),
-            IconButton(
-              tooltip: strings.copy,
-              onPressed: onCopy,
-              icon: const Icon(Icons.copy),
-            ),
-          ],
-        ),
-        if (profiles.isEmpty)
-          _EmptyProfiles(strings: strings)
-        else ...[
-          const SizedBox(height: 8),
-          _ServerPickerSummary(
-            strings: strings,
-            selectedProfile: selectedProfile,
-            totalCount: profiles.length,
-            visibleCount: visibleProfiles.length,
-            profilesExpanded: profilesExpanded,
-            onToggle: () => onProfilesExpandedChanged(!profilesExpanded),
-            kindLabel: kindLabel,
-            displayName: displayName,
-            countryFlag: countryFlag,
-            pingLabel: pingLabel,
-          ),
-          if (profilesExpanded) ...[
-            const SizedBox(height: 10),
-            _ProfileTabBar(
-              pulse: pulse,
-              strings: strings,
-              profiles: profiles,
-              selectedTab: selectedTab,
-              onChanged: onTabChanged,
-            ),
-            const SizedBox(height: 10),
-            if (visibleProfiles.isEmpty)
-              _EmptyProfiles(message: strings.noProfilesInTab(selectedTab))
-            else ...[
-              ...shownProfiles.map(
-                (profile) => Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: _ProfileTile(
-                    pulse: pulse,
-                    profile: profile,
-                    selected: profile.id == selectedId,
-                    active: profile.id == activeProfileId,
-                    onTap: () => onSelect(profile),
-                    kindLabel: kindLabel,
-                    displayName: displayName(profile),
-                    countryFlag: countryFlag(profile),
-                    pingLabel: pingLabel(profile),
-                    subscriptionStatus: subscriptionStatus(profile),
-                    subscriptionNeedsAttention: subscriptionNeedsAttention(
-                      profile,
-                    ),
-                    subscriptionLabel: strings.subscriptionLabel,
-                    activeLabel: strings.activeProfile,
-                    onPing: () => onPing(profile),
-                    onDelete: () => onDeleteProfile(profile),
-                    deleteTooltip: strings.delete,
-                  ),
-                ),
-              ),
-              if (hiddenProfiles > 0)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2, bottom: 10),
-                  child: Center(
-                    child: TextButton.icon(
-                      onPressed: () => onProfilesExpandedChanged(true),
-                      icon: const Icon(Icons.unfold_more),
-                      label: Text(strings.showMoreProfiles(hiddenProfiles)),
-                    ),
-                  ),
-                ),
-            ],
-            Padding(
-              padding: const EdgeInsets.only(top: 2, bottom: 8),
-              child: Center(
-                child: TextButton.icon(
-                  onPressed: () => onProfilesExpandedChanged(false),
-                  icon: const Icon(Icons.keyboard_arrow_up),
-                  label: Text(strings.collapseProfiles),
-                ),
-              ),
-            ),
-          ],
-        ],
-        const SizedBox(height: 6),
-        _ProfileInsightPanel(
-          strings: strings,
-          profile: selectedProfile,
-          kindLabel: kindLabel,
-          countryFlag: selectedProfile == null
-              ? null
-              : countryFlag(selectedProfile!),
-          pingLabel: selectedProfile == null
-              ? null
-              : pingLabel(selectedProfile!),
-          subscriptionStatus: selectedProfile == null
-              ? null
-              : strings.subscriptionStatus(
-                  selectedProfile!.subscriptionExpiresAt,
-                ),
-          subscriptionNeedsAttention: selectedProfile == null
-              ? false
-              : subscriptionNeedsAttention(selectedProfile!),
-          canRefreshSubscriptions: hasSubscriptionSources,
-          subscriptionRefreshBusy: subscriptionRefreshBusy,
-          batteryOptimizationIgnored: batteryOptimizationIgnored,
-          smartRouteRuDirect: smartRouteRuDirect,
-          keeperStatus: keeperStatus,
-          idleKeeperStatus: idleKeeperStatus,
-          lastHealthStatus: lastHealthStatus,
-          autoRecoveryStatus: autoRecoveryStatus,
-          healthFailuresStatus: healthFailuresStatus,
-          stabilityNeedsAttention: stabilityNeedsAttention,
-          profileStabilityStatus: selectedProfile == null
-              ? null
-              : profileStabilityLabel(selectedProfile!),
-          onRefreshSubscriptions: onRefreshSubscriptions,
-          onRequestBackgroundAccess: onRequestBackgroundAccess,
-          onSmartRouteChanged: onSmartRouteChanged,
-          onPing: selectedProfile == null
-              ? null
-              : () => onPing(selectedProfile!),
-        ),
-      ],
-    );
-  }
-}
-
-class _ServerPickerSummary extends StatelessWidget {
-  const _ServerPickerSummary({
-    required this.strings,
-    required this.selectedProfile,
-    required this.totalCount,
-    required this.visibleCount,
-    required this.profilesExpanded,
-    required this.onToggle,
-    required this.kindLabel,
-    required this.displayName,
-    required this.countryFlag,
-    required this.pingLabel,
-  });
-
-  final _Strings strings;
-  final VpnProfile? selectedProfile;
-  final int totalCount;
-  final int visibleCount;
-  final bool profilesExpanded;
-  final VoidCallback onToggle;
-  final String Function(VpnProfileKind kind) kindLabel;
-  final String Function(VpnProfile profile) displayName;
-  final String? Function(VpnProfile profile) countryFlag;
-  final String Function(VpnProfile profile) pingLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final profile = selectedProfile;
-    final title = profile == null
-        ? strings.serverPickerEmpty
-        : displayName(profile);
-    final flag = profile == null ? null : countryFlag(profile);
-    final details = profile == null
-        ? strings.autoConnectMode
-        : [
-            if (flag != null && flag.isNotEmpty) flag,
-            kindLabel(profile.kind),
-            profile.endpoint,
-            pingLabel(profile),
-          ].where((value) => value.trim().isNotEmpty).join(' · ');
-
-    return InkWell(
-      borderRadius: BorderRadius.circular(YurichRadii.card),
-      onTap: onToggle,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: YurichGradients.compactCard,
-          borderRadius: BorderRadius.circular(YurichRadii.card),
-          border: Border.all(color: _cyanGlow.withValues(alpha: 0.34)),
-          boxShadow: [
-            BoxShadow(
-              color: _cyanGlow.withValues(alpha: 0.08),
-              blurRadius: 18,
-              spreadRadius: 1,
-            ),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _cyanGlow.withValues(alpha: 0.14),
-                  border: Border.all(color: _cyanGlow.withValues(alpha: 0.38)),
-                ),
-                child: const Icon(Icons.storage_rounded),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      strings.serverPickerTitle(totalCount),
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: _mutedGold,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      details,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: _mutedGold),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    profilesExpanded
-                        ? strings.hideServers
-                        : strings.openServers,
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: _cyanGlow,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    strings.visibleServers(visibleCount),
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: _mutedGold),
-                  ),
-                ],
-              ),
-              const SizedBox(width: 4),
-              Icon(
-                profilesExpanded
-                    ? Icons.keyboard_arrow_up
-                    : Icons.keyboard_arrow_down,
-                color: _cyanGlow,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ProfileTabBar extends StatelessWidget {
-  const _ProfileTabBar({
-    required this.pulse,
-    required this.strings,
-    required this.profiles,
-    required this.selectedTab,
-    required this.onChanged,
-  });
-
-  final Animation<double> pulse;
-  final _Strings strings;
-  final List<VpnProfile> profiles;
-  final _ProfileTab selectedTab;
-  final ValueChanged<_ProfileTab> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          for (final tab in _ProfileTab.values) ...[
-            AnimatedBuilder(
-              animation: pulse,
-              builder: (context, child) {
-                final selected = selectedTab == tab;
-                return DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(YurichRadii.chip),
-                    boxShadow: selected
-                        ? [
-                            BoxShadow(
-                              color: _cyanGlow.withValues(
-                                alpha: 0.24 + pulse.value * 0.22,
-                              ),
-                              blurRadius: 16 + pulse.value * 12,
-                              spreadRadius: 1 + pulse.value,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: child,
-                );
-              },
-              child: ChoiceChip(
-                label: Text(strings.profileTabLabel(tab, _countFor(tab))),
-                selected: selectedTab == tab,
-                showCheckmark: false,
-                onSelected: (_) => onChanged(tab),
-                selectedColor: _cyanGlow,
-                backgroundColor: _surfaceMetric,
-                surfaceTintColor: Colors.transparent,
-                labelStyle: TextStyle(
-                  color: selectedTab == tab ? _ink : _goldSoft,
-                  fontWeight: selectedTab == tab
-                      ? FontWeight.w900
-                      : FontWeight.w700,
-                  letterSpacing: 0,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(YurichRadii.chip),
-                  side: BorderSide(
-                    color: selectedTab == tab
-                        ? _goldSoft.withValues(alpha: 0.95)
-                        : _gold.withValues(alpha: 0.2),
-                    width: selectedTab == tab ? 1.4 : 1,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-          ],
-        ],
-      ),
-    );
-  }
-
-  int _countFor(_ProfileTab tab) {
-    if (tab == _ProfileTab.all) {
-      return profiles.length;
-    }
-    return profiles.where((profile) => _profileMatchesTab(profile, tab)).length;
-  }
-}
-
-class _ProfileTile extends StatelessWidget {
-  const _ProfileTile({
-    required this.pulse,
-    required this.profile,
-    required this.selected,
-    required this.active,
-    required this.onTap,
-    required this.kindLabel,
-    required this.displayName,
-    required this.countryFlag,
-    required this.pingLabel,
-    required this.subscriptionStatus,
-    required this.subscriptionNeedsAttention,
-    required this.subscriptionLabel,
-    required this.activeLabel,
-    required this.onPing,
-    required this.onDelete,
-    required this.deleteTooltip,
-  });
-
-  final Animation<double> pulse;
-  final VpnProfile profile;
-  final bool selected;
-  final bool active;
-  final VoidCallback onTap;
-  final String Function(VpnProfileKind kind) kindLabel;
-  final String displayName;
-  final String? countryFlag;
-  final String pingLabel;
-  final String? subscriptionStatus;
-  final bool subscriptionNeedsAttention;
-  final String subscriptionLabel;
-  final String activeLabel;
-  final VoidCallback onPing;
-  final VoidCallback onDelete;
-  final String deleteTooltip;
-
-  @override
-  Widget build(BuildContext context) {
-    final content = Row(
-      children: [
-        SizedBox(
-          width: 32,
-          child: Center(
-            child: countryFlag == null
-                ? Icon(switch (profile.kind) {
-                    VpnProfileKind.naive => Icons.public,
-                    VpnProfileKind.hysteria2 ||
-                    VpnProfileKind.hysteria => Icons.speed_outlined,
-                    _ => Icons.bolt,
-                  }, color: selected ? _goldSoft : _mutedGold)
-                : Text(countryFlag!, style: const TextStyle(fontSize: 22)),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                displayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: selected ? YurichColors.textPrimary : null,
-                  fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${kindLabel(profile.kind)} · ${profile.endpoint}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: _mutedGold),
-              ),
-              if (subscriptionStatus != null) ...[
-                const SizedBox(height: 4),
-                Text(
-                  '$subscriptionLabel · $subscriptionStatus',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: subscriptionNeedsAttention
-                        ? _dangerSoft
-                        : _mutedGold,
-                    fontSize: 12,
-                    fontWeight: subscriptionNeedsAttention
-                        ? FontWeight.w700
-                        : FontWeight.w400,
-                    letterSpacing: 0,
-                  ),
-                ),
-              ],
-              if (active) ...[
-                const SizedBox(height: 6),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: YurichGradients.activeBadge,
-                        borderRadius: BorderRadius.circular(999),
-                        boxShadow: [
-                          BoxShadow(
-                            color: _cyanGlow.withValues(alpha: 0.28),
-                            blurRadius: 10,
-                          ),
-                        ],
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
-                        ),
-                        child: Text(
-                          activeLabel,
-                          maxLines: 1,
-                          style: const TextStyle(
-                            color: _ink,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 0,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(width: 8),
-        InkResponse(
-          onTap: onPing,
-          radius: 28,
-          child: Container(
-            constraints: const BoxConstraints(minWidth: 64),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            decoration: BoxDecoration(
-              color: _surfaceMetric,
-              borderRadius: BorderRadius.circular(YurichRadii.chip),
-              border: Border.all(color: YurichColors.border),
-            ),
-            alignment: Alignment.center,
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Text(
-                pingLabel,
-                maxLines: 1,
-                style: const TextStyle(
-                  color: _goldSoft,
-                  fontSize: 12,
-                  letterSpacing: 0,
-                ),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          tooltip: deleteTooltip,
-          onPressed: onDelete,
-          icon: const Icon(Icons.delete_outline),
-          color: selected ? _goldSoft : _mutedGold,
-          iconSize: 20,
-          visualDensity: VisualDensity.compact,
-        ),
-      ],
-    );
-
-    return AnimatedBuilder(
-      animation: pulse,
-      builder: (context, child) {
-        final glowPower = selected || active ? pulse.value : 0.0;
-        final borderColor = active
-            ? _cyanGlow.withValues(alpha: 0.98)
-            : selected
-            ? _goldSoft.withValues(alpha: 0.92)
-            : YurichColors.border;
-        return InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(YurichRadii.panel),
-          child: Ink(
-            decoration: BoxDecoration(
-              gradient: selected
-                  ? YurichGradients.selectedProfile
-                  : YurichGradients.inactiveCard,
-              borderRadius: BorderRadius.circular(YurichRadii.panel),
-              border: Border.all(
-                color: borderColor,
-                width: selected || active ? 2 : 1,
-              ),
-              boxShadow: selected || active
-                  ? [
-                      BoxShadow(
-                        color: (active ? _cyanGlow : _gold).withValues(
-                          alpha: 0.22 + glowPower * 0.2,
-                        ),
-                        blurRadius: 22 + glowPower * 16,
-                        spreadRadius: 1 + glowPower * 1.5,
-                        offset: const Offset(0, 7),
-                      ),
-                    ]
-                  : null,
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(YurichRadii.panel - 2),
-              child: Stack(
-                children: [
-                  if (selected || active)
-                    Positioned.fill(
-                      left: 0,
-                      right: null,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: active
-                                ? YurichGradients.activeBadge.colors
-                                : const [
-                                    YurichColors.accentSoft,
-                                    YurichColors.accentCyan,
-                                  ],
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: _cyanGlow.withValues(alpha: 0.5),
-                              blurRadius: 12,
-                            ),
-                          ],
-                        ),
-                        child: const SizedBox(width: 5),
-                      ),
-                    ),
-                  Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      selected || active ? 18 : 14,
-                      14,
-                      14,
-                      14,
-                    ),
-                    child: child,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-      child: content,
-    );
-  }
-}
-
-class _EmptyProfiles extends StatelessWidget {
-  const _EmptyProfiles({this.strings, this.message});
-
-  final _Strings? strings;
-  final String? message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: YurichColors.surface,
-        borderRadius: BorderRadius.circular(YurichRadii.panel),
-        border: Border.all(color: YurichColors.border),
-      ),
-      child: Text(message ?? strings!.emptyProfiles),
-    );
-  }
-}
-
-class _ProfileInsightPanel extends StatelessWidget {
-  const _ProfileInsightPanel({
-    required this.strings,
-    required this.profile,
-    required this.kindLabel,
-    required this.countryFlag,
-    required this.pingLabel,
-    required this.subscriptionStatus,
-    required this.subscriptionNeedsAttention,
-    required this.canRefreshSubscriptions,
-    required this.subscriptionRefreshBusy,
-    required this.batteryOptimizationIgnored,
-    required this.smartRouteRuDirect,
-    required this.keeperStatus,
-    required this.idleKeeperStatus,
-    required this.lastHealthStatus,
-    required this.autoRecoveryStatus,
-    required this.healthFailuresStatus,
-    required this.stabilityNeedsAttention,
-    required this.profileStabilityStatus,
-    required this.onRefreshSubscriptions,
-    required this.onRequestBackgroundAccess,
-    required this.onSmartRouteChanged,
-    required this.onPing,
-  });
-
-  final _Strings strings;
-  final VpnProfile? profile;
-  final String Function(VpnProfileKind kind) kindLabel;
-  final String? countryFlag;
-  final String? pingLabel;
-  final String? subscriptionStatus;
-  final bool subscriptionNeedsAttention;
-  final bool canRefreshSubscriptions;
-  final bool subscriptionRefreshBusy;
-  final bool batteryOptimizationIgnored;
-  final bool smartRouteRuDirect;
-  final String keeperStatus;
-  final String idleKeeperStatus;
-  final String lastHealthStatus;
-  final String autoRecoveryStatus;
-  final String healthFailuresStatus;
-  final bool stabilityNeedsAttention;
-  final String? profileStabilityStatus;
-  final VoidCallback onRefreshSubscriptions;
-  final VoidCallback onRequestBackgroundAccess;
-  final ValueChanged<bool> onSmartRouteChanged;
-  final VoidCallback? onPing;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            _surfaceMetric.withValues(alpha: 0.9),
-            YurichColors.surfaceElevated.withValues(alpha: 0.88),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(YurichRadii.panel),
-        border: Border.all(color: YurichColors.border),
-        boxShadow: [
-          BoxShadow(
-            color: _deepGlow.withValues(alpha: 0.12),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.health_and_safety_outlined, color: _goldSoft),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    strings.profileInsight,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            if (profile == null)
-              Text(
-                strings.profileInsightEmpty,
-                style: const TextStyle(color: _mutedGold),
-              )
-            else
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Column(
-                    children: [
-                      _InsightRow(
-                        icon: Icons.route_outlined,
-                        label: strings.protocolLabel,
-                        value: kindLabel(profile!.kind),
-                      ),
-                      _InsightRow(
-                        icon: Icons.network_cell_outlined,
-                        label: strings.networkLabel,
-                        value: strings.mobileReady,
-                      ),
-                      _InsightRow(
-                        icon: Icons.hub_outlined,
-                        label: strings.smartRouteLabel,
-                        value: smartRouteRuDirect
-                            ? strings.smartRouteEnabledValue
-                            : strings.smartRouteDisabledValue,
-                        trailing: Switch.adaptive(
-                          value: smartRouteRuDirect,
-                          onChanged: onSmartRouteChanged,
-                          activeThumbColor: _cyanGlow,
-                        ),
-                        onTap: () => onSmartRouteChanged(!smartRouteRuDirect),
-                      ),
-                      _InsightRow(
-                        icon: Icons.dns_outlined,
-                        label: strings.dnsLabel,
-                        value: strings.dnsCountryValue,
-                      ),
-                      _InsightRow(
-                        icon: Icons.security_update_good_outlined,
-                        label: strings.stabilityLabel,
-                        value: stabilityNeedsAttention
-                            ? strings.stabilityNeedsAttention
-                            : strings.stabilityValue,
-                        valueColor: stabilityNeedsAttention
-                            ? _dangerSoft
-                            : null,
-                      ),
-                      if (profileStabilityStatus != null)
-                        _InsightRow(
-                          icon: Icons.verified_outlined,
-                          label: strings.profileStabilityLabel,
-                          value: profileStabilityStatus!,
-                          valueColor:
-                              profileStabilityStatus ==
-                                      strings.profileStabilityWeak ||
-                                  profileStabilityStatus ==
-                                      strings.profileStabilityCoolingDown
-                              ? _dangerSoft
-                              : null,
-                        ),
-                      _InsightRow(
-                        icon: Icons.monitor_heart_outlined,
-                        label: strings.keeperLabel,
-                        value: keeperStatus,
-                        valueColor: stabilityNeedsAttention
-                            ? _dangerSoft
-                            : null,
-                      ),
-                      _InsightRow(
-                        icon: Icons.nightlight_round_outlined,
-                        label: strings.idleKeeperLabel,
-                        value: idleKeeperStatus,
-                      ),
-                      _InsightRow(
-                        icon: Icons.schedule_outlined,
-                        label: strings.lastCheckLabel,
-                        value: lastHealthStatus,
-                      ),
-                      _InsightRow(
-                        icon: Icons.restart_alt_outlined,
-                        label: strings.autoRecoveryLabel,
-                        value: autoRecoveryStatus,
-                      ),
-                      _InsightRow(
-                        icon: Icons.error_outline,
-                        label: strings.healthFailuresLabel,
-                        value: healthFailuresStatus,
-                        valueColor: stabilityNeedsAttention
-                            ? _dangerSoft
-                            : null,
-                      ),
-                      _InsightRow(
-                        icon: Icons.battery_saver_outlined,
-                        label: strings.backgroundModeLabel,
-                        value: batteryOptimizationIgnored
-                            ? strings.backgroundModeAllowed
-                            : strings.backgroundModeRestricted,
-                        valueColor: batteryOptimizationIgnored
-                            ? null
-                            : _dangerSoft,
-                        onTap: batteryOptimizationIgnored
-                            ? null
-                            : onRequestBackgroundAccess,
-                      ),
-                      _InsightRow(
-                        icon: Icons.event_available_outlined,
-                        label: strings.subscriptionLabel,
-                        value:
-                            subscriptionStatus ?? strings.subscriptionUnknown,
-                        valueColor: subscriptionNeedsAttention
-                            ? _dangerSoft
-                            : null,
-                        trailing: subscriptionRefreshBusy
-                            ? const SizedBox.square(
-                                dimension: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : null,
-                        onTap:
-                            canRefreshSubscriptions && !subscriptionRefreshBusy
-                            ? onRefreshSubscriptions
-                            : null,
-                      ),
-                      if (countryFlag != null)
-                        _InsightRow(
-                          icon: Icons.flag_outlined,
-                          label: strings.countryLabel,
-                          value: countryFlag!,
-                        ),
-                      _InsightRow(
-                        icon: Icons.speed_outlined,
-                        label: strings.pingLabel,
-                        value: pingLabel ?? 'ping',
-                        onTap: onPing,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    strings.mobileNetworkAdvice,
-                    style: const TextStyle(color: _mutedGold, height: 1.35),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    strings.androidVpnVisibleNote,
-                    style: const TextStyle(
-                      color: _mutedGold,
-                      height: 1.35,
-                      fontSize: 13,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    '${strings.endpointLabel}: ${profile!.endpoint}',
-                    style: const TextStyle(color: _mutedGold),
-                  ),
-                ],
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _InsightRow extends StatelessWidget {
-  const _InsightRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-    this.valueColor,
-    this.trailing,
-    this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-  final Color? valueColor;
-  final Widget? trailing;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final child = Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
-      child: Row(
-        children: [
-          Icon(icon, color: _goldSoft, size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: _mutedGold, letterSpacing: 0),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                color: _goldSoft,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0,
-              ).copyWith(color: valueColor),
-            ),
-          ),
-          if (trailing != null) ...[
-            const SizedBox(width: 6),
-            trailing!,
-          ] else if (onTap != null) ...[
-            const SizedBox(width: 6),
-            const Icon(Icons.refresh, color: _mutedGold, size: 16),
-          ],
-        ],
-      ),
-    );
-
-    if (onTap == null) {
-      return child;
-    }
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(YurichRadii.control),
-      child: child,
-    );
-  }
-}
-
-class _AppCenterPanel extends StatelessWidget {
-  const _AppCenterPanel({
-    required this.strings,
-    required this.selectedTab,
-    required this.onTabChanged,
-    required this.language,
-    required this.onLanguageChanged,
-    required this.onSupport,
-    required this.onTelegram,
-    required this.onVk,
-    required this.onDonate,
-    required this.onDeveloper,
-    required this.currentVersion,
-    required this.availableVersion,
-    required this.updateMessage,
-    required this.updateBusy,
-    required this.updateProgress,
-    required this.onCheck,
-    required this.logs,
-    required this.onExpansionChanged,
-  });
-
-  final _Strings strings;
-  final _SupportTab selectedTab;
-  final ValueChanged<_SupportTab> onTabChanged;
-  final _AppLanguage language;
-  final ValueChanged<_AppLanguage> onLanguageChanged;
-  final VoidCallback onSupport;
-  final VoidCallback onTelegram;
-  final VoidCallback onVk;
-  final VoidCallback onDonate;
-  final VoidCallback onDeveloper;
-  final String currentVersion;
-  final String? availableVersion;
-  final String? updateMessage;
-  final bool updateBusy;
-  final double? updateProgress;
-  final VoidCallback onCheck;
-  final List<String> logs;
-  final ValueChanged<bool> onExpansionChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: YurichGradients.centerPanel,
-        borderRadius: BorderRadius.circular(YurichRadii.card),
-        border: Border.all(color: YurichColors.border),
-        boxShadow: [
-          BoxShadow(
-            color: _gold.withValues(alpha: 0.06),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _SupportPanel(
-              strings: strings,
-              selectedTab: selectedTab,
-              onTabChanged: onTabChanged,
-              language: language,
-              onLanguageChanged: onLanguageChanged,
-              onSupport: onSupport,
-              onTelegram: onTelegram,
-              onVk: onVk,
-              onDonate: onDonate,
-              onDeveloper: onDeveloper,
-            ),
-            const _PanelDivider(),
-            _UpdatePanel(
-              strings: strings,
-              currentVersion: currentVersion,
-              availableVersion: availableVersion,
-              message: updateMessage,
-              busy: updateBusy,
-              progress: updateProgress,
-              onCheck: onCheck,
-            ),
-            const _PanelDivider(),
-            _FaqPanel(strings: strings),
-            const _PanelDivider(),
-            _LogsPanel(
-              strings: strings,
-              logs: logs,
-              onExpansionChanged: onExpansionChanged,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PanelDivider extends StatelessWidget {
-  const _PanelDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    return Divider(height: 18, thickness: 1, color: YurichColors.border);
-  }
-}
-
-class _SupportPanel extends StatelessWidget {
-  const _SupportPanel({
-    required this.strings,
-    required this.selectedTab,
-    required this.onTabChanged,
-    required this.language,
-    required this.onLanguageChanged,
-    required this.onSupport,
-    required this.onTelegram,
-    required this.onVk,
-    required this.onDonate,
-    required this.onDeveloper,
-  });
-
-  final _Strings strings;
-  final _SupportTab selectedTab;
-  final ValueChanged<_SupportTab> onTabChanged;
-  final _AppLanguage language;
-  final ValueChanged<_AppLanguage> onLanguageChanged;
-  final VoidCallback onSupport;
-  final VoidCallback onTelegram;
-  final VoidCallback onVk;
-  final VoidCallback onDonate;
-  final VoidCallback onDeveloper;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final actionWidth = constraints.maxWidth >= 340
-            ? (constraints.maxWidth - 10) / 2
-            : constraints.maxWidth;
-        final actions = selectedTab == _SupportTab.help
-            ? [
-                _SupportAction(
-                  icon: Icons.support_agent,
-                  label: strings.support,
-                  onPressed: onSupport,
-                ),
-                _SupportAction(
-                  icon: Icons.mail_outline,
-                  label: strings.developer,
-                  onPressed: onDeveloper,
-                ),
-              ]
-            : [
-                _SupportAction(
-                  icon: Icons.forum_outlined,
-                  label: 'Telegram',
-                  onPressed: onTelegram,
-                ),
-                _SupportAction(
-                  icon: Icons.groups_outlined,
-                  label: 'VK',
-                  onPressed: onVk,
-                ),
-                _SupportAction(
-                  icon: Icons.volunteer_activism_outlined,
-                  label: strings.donate,
-                  onPressed: onDonate,
-                ),
-              ];
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.hub_outlined, color: _goldSoft, size: 22),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    strings.contact,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: SegmentedButton<_SupportTab>(
-                segments: [
-                  ButtonSegment(
-                    value: _SupportTab.help,
-                    label: Text(strings.supportTabLabel(_SupportTab.help)),
-                  ),
-                  ButtonSegment(
-                    value: _SupportTab.community,
-                    label: Text(strings.supportTabLabel(_SupportTab.community)),
-                  ),
-                ],
-                selected: {selectedTab},
-                showSelectedIcon: false,
-                onSelectionChanged: (value) {
-                  final selected = value.isEmpty ? null : value.first;
-                  if (selected != null) {
-                    onTabChanged(selected);
-                  }
-                },
-                style: ButtonStyle(
-                  visualDensity: VisualDensity.compact,
-                  minimumSize: WidgetStateProperty.all(const Size(72, 40)),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                for (final action in actions)
-                  SizedBox(
-                    width: actionWidth,
-                    height: 50,
-                    child: _SupportActionButton(action: action),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: _surfaceMetric,
-                borderRadius: BorderRadius.circular(YurichRadii.control),
-                border: Border.all(color: _gold.withValues(alpha: 0.16)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.translate, color: _mutedGold, size: 20),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      strings.language,
-                      style: const TextStyle(color: _mutedGold),
-                    ),
-                  ),
-                  SegmentedButton<_AppLanguage>(
-                    segments: const [
-                      ButtonSegment(value: _AppLanguage.ru, label: Text('RU')),
-                      ButtonSegment(value: _AppLanguage.en, label: Text('EN')),
-                    ],
-                    selected: {language},
-                    showSelectedIcon: false,
-                    onSelectionChanged: (value) {
-                      final selected = value.isEmpty ? null : value.first;
-                      if (selected != null) {
-                        onLanguageChanged(selected);
-                      }
-                    },
-                    style: ButtonStyle(
-                      visualDensity: VisualDensity.compact,
-                      minimumSize: WidgetStateProperty.all(const Size(52, 34)),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _SupportAction {
-  const _SupportAction({
-    required this.icon,
-    required this.label,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onPressed;
-}
-
-class _SupportActionButton extends StatelessWidget {
-  const _SupportActionButton({required this.action});
-
-  final _SupportAction action;
-
-  @override
-  Widget build(BuildContext context) {
-    return OutlinedButton(
-      onPressed: action.onPressed,
-      style: OutlinedButton.styleFrom(
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        side: BorderSide(color: _gold.withValues(alpha: 0.28)),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(YurichRadii.control),
-        ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(action.icon, size: 20),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              action.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _UpdatePanel extends StatelessWidget {
-  const _UpdatePanel({
-    required this.strings,
-    required this.currentVersion,
-    required this.availableVersion,
-    required this.message,
-    required this.busy,
-    required this.progress,
-    required this.onCheck,
-  });
-
-  final _Strings strings;
-  final String currentVersion;
-  final String? availableVersion;
-  final String? message;
-  final bool busy;
-  final double? progress;
-  final VoidCallback onCheck;
-
-  @override
-  Widget build(BuildContext context) {
-    final hasUpdate = availableVersion != null;
-    return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      leading: Icon(
-        hasUpdate ? Icons.new_releases_outlined : Icons.system_update_alt,
-        color: hasUpdate ? _gold : _goldSoft,
-      ),
-      title: Text(strings.updates),
-      subtitle: Text(
-        hasUpdate
-            ? strings.updateAvailable(availableVersion!)
-            : message ?? strings.updateIdle(currentVersion),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(color: hasUpdate ? _goldSoft : _mutedGold),
-      ),
-      children: [
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: _surface,
-            borderRadius: BorderRadius.circular(YurichRadii.panel),
-            border: Border.all(color: _gold.withValues(alpha: 0.18)),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (hasUpdate) ...[
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: _gold.withValues(alpha: 0.13),
-                      borderRadius: BorderRadius.circular(YurichRadii.control),
-                      border: Border.all(color: _gold.withValues(alpha: 0.32)),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.notifications_active_outlined,
-                            color: _goldSoft,
-                            size: 22,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              strings.updateAvailableBody(availableVersion!),
-                              style: const TextStyle(
-                                color: _goldSoft,
-                                height: 1.3,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                Text(
-                  strings.updateDescription,
-                  style: const TextStyle(color: _mutedGold, height: 1.35),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.verified_outlined,
-                      color: _goldSoft,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        strings.updateChannel,
-                        style: const TextStyle(color: _goldSoft, height: 1.25),
-                      ),
-                    ),
-                  ],
-                ),
-                if (busy) ...[
-                  const SizedBox(height: 12),
-                  LinearProgressIndicator(value: progress),
-                ],
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: busy ? null : onCheck,
-                  icon: busy
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.download_for_offline_outlined),
-                  label: Text(strings.checkUpdates),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _FaqPanel extends StatelessWidget {
-  const _FaqPanel({required this.strings});
-
-  final _Strings strings;
-
-  @override
-  Widget build(BuildContext context) {
-    return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      leading: const Icon(Icons.help_outline, color: _goldSoft),
-      title: Text(strings.faq),
-      children: [
-        for (final item in strings.faqItems)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: _surface,
-                borderRadius: BorderRadius.circular(YurichRadii.panel),
-                border: Border.all(color: YurichColors.border),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      item.question,
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      item.answer,
-                      style: const TextStyle(color: _mutedGold, height: 1.35),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _LogsPanel extends StatelessWidget {
-  const _LogsPanel({
-    required this.strings,
-    required this.logs,
-    required this.onExpansionChanged,
-  });
-
-  final _Strings strings;
-  final List<String> logs;
-  final ValueChanged<bool> onExpansionChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return ExpansionTile(
-      onExpansionChanged: onExpansionChanged,
-      tilePadding: EdgeInsets.zero,
-      title: Text(strings.logs),
-      children: [
-        Container(
-          width: double.infinity,
-          constraints: const BoxConstraints(minHeight: 92),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: _ink,
-            borderRadius: BorderRadius.circular(YurichRadii.panel),
-            border: Border.all(color: _gold.withValues(alpha: 0.18)),
-          ),
-          child: Text(
-            logs.isEmpty ? strings.noLogs : logs.join('\n'),
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 12,
-              height: 1.35,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _FaqItem {
-  const _FaqItem({required this.question, required this.answer});
-
-  final String question;
-  final String answer;
-}
-
-class _Strings {
-  const _Strings._({
-    required this.addProfileHint,
-    required this.nothingToImport,
-    required this.supportedProtocolsOnly,
-    required this.switchingProfile,
-    required this.importFirst,
-    required this.autoConnectNoStableProfile,
-    required this.configSaveFailed,
-    required this.vpnStartFailed,
-    required this.connectionProbeFailed,
-    required this.disconnectingVpn,
-    required this.vpnStopServiceFailed,
-    required this.vpnStopped,
-    required this.profileDeleted,
-    required this.linkCopied,
-    required this.close,
-    required this.working,
-    required this.report,
-    required this.cannotOpenLink,
-    required this.mailSubject,
-    required this.mailFallback,
-    required this.vpnStoppedUnexpectedly,
-    required this.openLogsMessage,
-    required this.languageChanged,
-    required this.addProfile,
-    required this.importHint,
-    required this.importAction,
-    required this.clipboard,
-    required this.scanQr,
-    required this.pasteFromClipboard,
-    required this.language,
-    required this.connected,
-    required this.connectionProblem,
-    required this.connecting,
-    required this.disconnecting,
-    required this.stopped,
-    required this.profiles,
-    required this.activeProfile,
-    required this.refreshPing,
-    required this.collapseProfiles,
-    required this.serverPickerEmpty,
-    required this.autoConnectMode,
-    required this.openServers,
-    required this.hideServers,
-    required this.showQr,
-    required this.copy,
-    required this.delete,
-    required this.emptyProfiles,
-    required this.profileInsight,
-    required this.profileInsightEmpty,
-    required this.protocolLabel,
-    required this.networkLabel,
-    required this.dnsLabel,
-    required this.dnsCountryValue,
-    required this.smartRouteLabel,
-    required this.smartRouteEnabledValue,
-    required this.smartRouteDisabledValue,
-    required this.smartRouteEnabled,
-    required this.smartRouteDisabled,
-    required this.smartRouteApplying,
-    required this.stabilityLabel,
-    required this.stabilityValue,
-    required this.backgroundModeLabel,
-    required this.backgroundModeAllowed,
-    required this.backgroundModeRestricted,
-    required this.backgroundModeRequest,
-    required this.batteryOptimizationSnack,
-    required this.batteryOptimizationOpened,
-    required this.countryLabel,
-    required this.pingLabel,
-    required this.subscriptionLabel,
-    required this.subscriptionUnknown,
-    required this.subscriptionExpired,
-    required this.refreshSubscriptions,
-    required this.refreshingSubscriptions,
-    required this.noSubscriptionsToRefresh,
-    required this.subscriptionReminderTitle,
-    required this.mobileReady,
-    required this.mobileNetworkAdvice,
-    required this.androidVpnVisibleNote,
-    required this.endpointLabel,
-    required this.connect,
-    required this.disconnect,
-    required this.contact,
-    required this.support,
-    required this.donate,
-    required this.developer,
-    required this.updates,
-    required this.updateDescription,
-    required this.updateChannel,
-    required this.checkUpdates,
-    required this.updateChecking,
-    required this.updateInstallerOpened,
-    required this.updateInstallPermission,
-    required this.openSettings,
-    required this.faq,
-    required this.faqItems,
-    required this.logs,
-    required this.noLogs,
-    required this.notificationDescription,
-  });
-
-  final String addProfileHint;
-  final String nothingToImport;
-  final String supportedProtocolsOnly;
-  final String switchingProfile;
-  final String importFirst;
-  final String autoConnectNoStableProfile;
-  final String configSaveFailed;
-  final String vpnStartFailed;
-  final String connectionProbeFailed;
-  final String disconnectingVpn;
-  final String vpnStopServiceFailed;
-  final String vpnStopped;
-  final String profileDeleted;
-  final String linkCopied;
-  final String close;
-  final String working;
-  final String report;
-  final String cannotOpenLink;
-  final String mailSubject;
-  final String mailFallback;
-  final String vpnStoppedUnexpectedly;
-  final String openLogsMessage;
-  final String languageChanged;
-  final String addProfile;
-  final String importHint;
-  final String importAction;
-  final String clipboard;
-  final String scanQr;
-  final String pasteFromClipboard;
-  final String language;
-  final String connected;
-  final String connectionProblem;
-  final String connecting;
-  final String disconnecting;
-  final String stopped;
-  final String profiles;
-  final String activeProfile;
-  final String refreshPing;
-  final String collapseProfiles;
-  final String serverPickerEmpty;
-  final String autoConnectMode;
-  final String openServers;
-  final String hideServers;
-  final String showQr;
-  final String copy;
-  final String delete;
-  final String emptyProfiles;
-  final String profileInsight;
-  final String profileInsightEmpty;
-  final String protocolLabel;
-  final String networkLabel;
-  final String dnsLabel;
-  final String dnsCountryValue;
-  final String smartRouteLabel;
-  final String smartRouteEnabledValue;
-  final String smartRouteDisabledValue;
-  final String smartRouteEnabled;
-  final String smartRouteDisabled;
-  final String smartRouteApplying;
-  final String stabilityLabel;
-  final String stabilityValue;
-  final String backgroundModeLabel;
-  final String backgroundModeAllowed;
-  final String backgroundModeRestricted;
-  final String backgroundModeRequest;
-  final String batteryOptimizationSnack;
-  final String batteryOptimizationOpened;
-  final String countryLabel;
-  final String pingLabel;
-  final String subscriptionLabel;
-  final String subscriptionUnknown;
-  final String subscriptionExpired;
-  final String refreshSubscriptions;
-  final String refreshingSubscriptions;
-  final String noSubscriptionsToRefresh;
-  final String subscriptionReminderTitle;
-  final String mobileReady;
-  final String mobileNetworkAdvice;
-  final String androidVpnVisibleNote;
-  final String endpointLabel;
-  final String connect;
-  final String disconnect;
-  final String contact;
-  final String support;
-  final String donate;
-  final String developer;
-  final String updates;
-  final String updateDescription;
-  final String updateChannel;
-  final String checkUpdates;
-  final String updateChecking;
-  final String updateInstallerOpened;
-  final String updateInstallPermission;
-  final String openSettings;
-  final String faq;
-  final List<_FaqItem> faqItems;
-  final String logs;
-  final String noLogs;
-  final String notificationDescription;
-
-  static _Strings forLanguage(_AppLanguage language) {
-    return switch (language) {
-      _AppLanguage.en => en,
-      _ => ru,
-    };
-  }
-
-  String loadedProfiles(int count) => switch (this) {
-    _Strings.en => 'Profiles loaded: $count',
-    _ => 'Загружено профилей: $count',
-  };
-
-  String imported(int count) => switch (this) {
-    _Strings.en => 'Imported: $count',
-    _ => 'Импортировано: $count',
-  };
-
-  String importedProfiles(int count) => switch (this) {
-    _Strings.en => 'Profiles imported: $count',
-    _ => 'Импортировано профилей: $count',
-  };
-
-  String subscriptionsUpdated(int count) => switch (this) {
-    _Strings.en => 'Subscriptions updated: $count profiles',
-    _ => 'Подписки обновлены: $count профилей',
-  };
-
-  String subscriptionRefreshFailed(String error) => switch (this) {
-    _Strings.en => 'Subscription update failed: $error',
-    _ => 'Обновление подписок не удалось: $error',
-  };
-
-  String subscriptionReminderBody(String profileName, String status) =>
-      switch (this) {
-        _Strings.en => '$profileName: $status. Time to renew the subscription.',
-        _ => '$profileName: $status. Пора продлить подписку.',
-      };
-
-  String subscriptionReminderMany(
-    int count,
-    String profileName,
-    String status,
-  ) => switch (this) {
-    _Strings.en =>
-      '$count subscriptions need attention. First: $profileName, $status.',
-    _ => '$count подписки требуют внимания. Первая: $profileName, $status.',
-  };
-
-  String profileTabLabel(_ProfileTab tab, int count) {
-    final label = switch (tab) {
-      _ProfileTab.all => switch (this) {
-        _Strings.en => 'All',
-        _ => 'Все',
-      },
-      _ProfileTab.vless => 'Reality',
-      _ProfileTab.naive => 'HTTPS',
-      _ProfileTab.hysteria => 'Turbo',
-    };
-    return '$label $count';
-  }
-
-  String get stabilityNeedsAttention => switch (this) {
-    _Strings.en => 'Needs attention',
-    _ => 'Требует внимания',
-  };
-
-  String get profileStabilityLabel => switch (this) {
-    _Strings.en => 'Profile rating',
-    _ => 'Рейтинг профиля',
-  };
-
-  String get profileStabilityGood => switch (this) {
-    _Strings.en => 'Stable',
-    _ => 'Стабильный',
-  };
-
-  String get profileStabilityLearning => switch (this) {
-    _Strings.en => 'Learning',
-    _ => 'Наблюдение',
-  };
-
-  String get profileStabilityWeak => switch (this) {
-    _Strings.en => 'Weak',
-    _ => 'Слабый',
-  };
-
-  String get profileStabilityCoolingDown => switch (this) {
-    _Strings.en => 'Cooling down',
-    _ => 'Остывает',
-  };
-
-  String get keeperLabel => switch (this) {
-    _Strings.en => 'Keeper',
-    _ => 'Keeper',
-  };
-
-  String get keeperActive => switch (this) {
-    _Strings.en => 'Active',
-    _ => 'Активен',
-  };
-
-  String get keeperIdle => switch (this) {
-    _Strings.en => 'Waiting',
-    _ => 'Ожидает',
-  };
-
-  String get keeperChecking => switch (this) {
-    _Strings.en => 'Checking',
-    _ => 'Проверка',
-  };
-
-  String get keeperReconnecting => switch (this) {
-    _Strings.en => 'Reconnecting',
-    _ => 'Переподключение',
-  };
-
-  String get keeperDegraded => switch (this) {
-    _Strings.en => 'Degraded',
-    _ => 'Нестабильно',
-  };
-
-  String get idleKeeperLabel => switch (this) {
-    _Strings.en => 'Idle keeper',
-    _ => 'Ночной keeper',
-  };
-
-  String get idleKeeperReady => switch (this) {
-    _Strings.en => 'Ready',
-    _ => 'Готов',
-  };
-
-  String get idleKeeperActive => switch (this) {
-    _Strings.en => 'Checked',
-    _ => 'Проверено',
-  };
-
-  String get idleConnection => switch (this) {
-    _Strings.en => 'Idle',
-    _ => 'Ожидание',
-  };
-
-  String get reconnectingConnection => switch (this) {
-    _Strings.en => 'Reconnecting',
-    _ => 'Переподключение',
-  };
-
-  String get lastCheckLabel => switch (this) {
-    _Strings.en => 'Last check',
-    _ => 'Проверка',
-  };
-
-  String get lastCheckNever => switch (this) {
-    _Strings.en => 'Not yet',
-    _ => 'Ещё не было',
-  };
-
-  String lastCheckAgo(Duration duration) {
-    final safe = duration.isNegative ? Duration.zero : duration;
-    if (safe.inSeconds < 60) {
-      final seconds = safe.inSeconds.clamp(1, 59);
-      return switch (this) {
-        _Strings.en => '${seconds}s ago',
-        _ => '$seconds сек назад',
-      };
-    }
-    if (safe.inMinutes < 60) {
-      return switch (this) {
-        _Strings.en => '${safe.inMinutes}m ago',
-        _ => '${safe.inMinutes} мин назад',
-      };
-    }
-    return switch (this) {
-      _Strings.en => '${safe.inHours}h ago',
-      _ => '${safe.inHours} ч назад',
-    };
-  }
-
-  String get autoRecoveryLabel => switch (this) {
-    _Strings.en => 'Recovery',
-    _ => 'Автовосстановление',
-  };
-
-  String get autoRecoveryOn => switch (this) {
-    _Strings.en => 'On',
-    _ => 'Включено',
-  };
-
-  String get autoRecoveryOff => switch (this) {
-    _Strings.en => 'Off',
-    _ => 'Выключено',
-  };
-
-  String get healthFailuresLabel => switch (this) {
-    _Strings.en => 'Failures',
-    _ => 'Сбои',
-  };
-
-  String get healthFailuresNone => switch (this) {
-    _Strings.en => 'None',
-    _ => 'Нет',
-  };
-
-  String healthFailuresCount(int count) => switch (this) {
-    _Strings.en => '$count in a row',
-    _ => '$count подряд',
-  };
-
-  String noProfilesInTab(_ProfileTab tab) => switch (this) {
-    _Strings.en => 'No profiles in this tab yet.',
-    _ => 'В этой вкладке пока нет профилей.',
-  };
-
-  String showMoreProfiles(int count) => switch (this) {
-    _Strings.en => 'Show $count more',
-    _ => 'Показать ещё: $count',
-  };
-
-  String supportTabLabel(_SupportTab tab) => switch (tab) {
-    _SupportTab.help => switch (this) {
-      _Strings.en => 'Help',
-      _ => 'Помощь',
-    },
-    _SupportTab.community => switch (this) {
-      _Strings.en => 'Project',
-      _ => 'Проект',
-    },
-  };
-
-  String selectedProfile(String name) => switch (this) {
-    _Strings.en => 'Selected profile: $name',
-    _ => 'Выбран профиль: $name',
-  };
-
-  String autoSelectedProfile(String name) => switch (this) {
-    _Strings.en => 'Auto selected: $name',
-    _ => 'Автовыбор: $name',
-  };
-
-  String serverPickerTitle(int count) => switch (this) {
-    _Strings.en => 'Servers: $count',
-    _ => 'Серверы: $count',
-  };
-
-  String visibleServers(int count) => switch (this) {
-    _Strings.en => 'In tab: $count',
-    _ => 'В разделе: $count',
-  };
-
-  String connectingTo(String name) => switch (this) {
-    _Strings.en => 'Connecting to $name...',
-    _ => 'Подключаю $name...',
-  };
-
-  String connectingStatus(String name) => switch (this) {
-    _Strings.en => 'Connecting: $name',
-    _ => 'Подключаюсь: $name',
-  };
-
-  String connectionProfile(String name) => switch (this) {
-    _Strings.en => 'Connection: $name',
-    _ => 'Подключение: $name',
-  };
-
-  String unsupportedProtocol(VpnProfileKind kind) => switch (this) {
-    _Strings.en =>
-      '${kind.label} is not enabled in this Android build. Use VLESS Reality, NaiveProxy, or Hysteria/Hysteria2.',
-    _ =>
-      '${kind.label} отключён в этой Android-сборке. Используй VLESS Reality, NaiveProxy или Hysteria/Hysteria2.',
-  };
-
-  String networkRecoveryPaused(String name) => switch (this) {
-    _Strings.en =>
-      'Mobile network is unstable. Auto reconnect is paused for $name.',
-    _ => 'Мобильная сеть нестабильна. Автовосстановление для $name на паузе.',
-  };
-
-  String vpnNotConnected(String status) => switch (this) {
-    _Strings.en => 'VPN did not reach Connected. Last status: $status.',
-    _ => 'VPN не вышел в статус "Подключено". Последний статус: $status.',
-  };
-
-  String vpnStopTimeout(String status) => switch (this) {
-    _Strings.en => 'VPN did not fully stop in time. Last status: $status.',
-    _ => 'VPN не успел полностью остановиться. Последний статус: $status.',
-  };
-
-  String updateIdle(String version) => switch (this) {
-    _Strings.en => 'Installed version: $version',
-    _ => 'Установлена версия: $version',
-  };
-
-  String updateAvailable(String version) => switch (this) {
-    _Strings.en => 'New version available: $version',
-    _ => 'Доступна новая версия: $version',
-  };
-
-  String updateAvailableSnack(String version) => switch (this) {
-    _Strings.en => 'Yurich Connect $version is available.',
-    _ => 'Вышла новая версия Yurich Connect $version.',
-  };
-
-  String get updateAvailableTitle => switch (this) {
-    _Strings.en => 'Yurich Connect update',
-    _ => 'Обновление Yurich Connect',
-  };
-
-  String updateAvailableBody(String version) => switch (this) {
-    _Strings.en => 'Version $version is ready. Open Updates to install it.',
-    _ => 'Версия $version готова. Открой обновления и установи её.',
-  };
-
-  String get updateNow => switch (this) {
-    _Strings.en => 'Update',
-    _ => 'Обновить',
-  };
-
-  String get downloadApk => switch (this) {
-    _Strings.en => 'APK',
-    _ => 'APK',
-  };
-
-  String updateNoUpdates(String version) => switch (this) {
-    _Strings.en => 'Version $version is current.',
-    _ => 'Версия $version актуальна.',
-  };
-
-  String updateDownloading(String version) => switch (this) {
-    _Strings.en => 'Downloading version $version...',
-    _ => 'Скачиваю версию $version...',
-  };
-
-  String updateDownloadingProgress(String version, int percent) =>
-      switch (this) {
-        _Strings.en => 'Downloading version $version: $percent%',
-        _ => 'Скачиваю версию $version: $percent%',
-      };
-
-  String updateInstalling(String version) => switch (this) {
-    _Strings.en => 'Version $version downloaded. Opening installer...',
-    _ => 'Версия $version скачана. Открываю установщик...',
-  };
-
-  String updateFailed(String error) => switch (this) {
-    _Strings.en => 'Update failed: $error',
-    _ => 'Обновление не удалось: $error',
-  };
-
-  String subscriptionStatus(DateTime? expiresAt) {
-    if (expiresAt == null) {
-      return subscriptionUnknown;
-    }
-
-    final remaining = expiresAt.toUtc().difference(DateTime.now().toUtc());
-    if (remaining.isNegative) {
-      return subscriptionExpired;
-    }
-
-    if (remaining.inHours < 24) {
-      final hours = remaining.inHours.clamp(1, 23);
-      return switch (this) {
-        _Strings.en => '$hours h left',
-        _ => 'Осталось $hours ч',
-      };
-    }
-
-    final days = remaining.inDays + (remaining.inHours % 24 == 0 ? 0 : 1);
-    return switch (this) {
-      _Strings.en => '$days d left',
-      _ => 'Осталось $days дн.',
-    };
-  }
-
-  static const ru = _Strings._(
-    addProfileHint: 'Добавь подписку Remnawave, QR или отдельный ключ',
-    nothingToImport: 'Нечего импортировать.',
-    supportedProtocolsOnly:
-        'В этой сборке поддерживаются VLESS Reality, NaiveProxy и Hysteria/Hysteria2.',
-    switchingProfile: 'Переключаю профиль...',
-    importFirst: 'Сначала импортируй профиль.',
-    autoConnectNoStableProfile:
-        'Для авто-подключения нужен рабочий Reality или HTTPS профиль. Turbo/Hysteria не запускается автоматически.',
-    configSaveFailed: 'sing-box не сохранил config.',
-    vpnStartFailed: 'VPN не стартовал. Открой логи ниже.',
-    connectionProbeFailed:
-        'VPN запустился, но проверка интернета через туннель не прошла.',
-    disconnectingVpn: 'Отключаю VPN...',
-    vpnStopServiceFailed: 'VPN-сервис не смог полностью остановиться.',
-    vpnStopped: 'VPN остановлен',
-    profileDeleted: 'Профиль удалён',
-    linkCopied: 'Ссылка скопирована',
-    close: 'Закрыть',
-    working: 'Работаю...',
-    report: 'Отчёт',
-    cannotOpenLink: 'Не смог открыть ссылку.',
-    mailSubject: 'Yurich Connect: диагностика VPN',
-    mailFallback: 'Почта не открылась. Отчёт скопирован в буфер.',
-    vpnStoppedUnexpectedly: 'VPN остановлен неожиданно',
-    openLogsMessage: 'VPN остановлен. Открой логи sing-box.',
-    languageChanged: 'Язык переключён',
-    addProfile: 'Добавить профиль',
-    importHint:
-        'https://sub... или vless:// Reality или naive+https://... или hy2://...',
-    importAction: 'Импорт',
-    clipboard: 'Буфер',
-    scanQr: 'Сканировать QR',
-    pasteFromClipboard: 'Вставить из буфера',
-    language: 'Язык',
-    connected: 'Подключено',
-    connectionProblem: 'Нет стабильного соединения',
-    connecting: 'Подключаюсь',
-    disconnecting: 'Отключаюсь',
-    stopped: 'Остановлено',
-    profiles: 'Профили',
-    activeProfile: 'Активен',
-    refreshPing: 'Обновить пинг',
-    collapseProfiles: 'Свернуть список',
-    serverPickerEmpty: 'Сервер не выбран',
-    autoConnectMode: 'Автовыбор Reality/HTTPS, Turbo только вручную',
-    openServers: 'Открыть',
-    hideServers: 'Скрыть',
-    showQr: 'Показать QR',
-    copy: 'Скопировать',
-    delete: 'Удалить',
-    emptyProfiles:
-        'Пока нет профилей. Нажми +, вставь подписку или сканируй QR.',
-    profileInsight: 'Профиль и сеть',
-    profileInsightEmpty:
-        'Выбери профиль, чтобы увидеть параметры подключения и рекомендации.',
-    protocolLabel: 'Протокол',
-    networkLabel: 'Сеть',
-    dnsLabel: 'DNS',
-    dnsCountryValue: 'Через профиль',
-    smartRouteLabel: 'Smart Route',
-    smartRouteEnabledValue: 'RU direct / Global VPN',
-    smartRouteDisabledValue: 'Всё через VPN',
-    smartRouteEnabled: 'Smart Route включён',
-    smartRouteDisabled: 'Smart Route выключен',
-    smartRouteApplying: 'Применяю Smart Route...',
-    stabilityLabel: 'Стабильность',
-    stabilityValue: 'Фоновый keeper',
-    backgroundModeLabel: 'Фон',
-    backgroundModeAllowed: 'Без ограничений',
-    backgroundModeRestricted: 'Ограничен батареей',
-    backgroundModeRequest: 'Разрешить',
-    batteryOptimizationSnack:
-        'Для круглосуточной работы разреши Yurich Connect работу без ограничений батареи.',
-    batteryOptimizationOpened:
-        'Открыл настройки батареи. Разреши работу без ограничений и вернись в приложение.',
-    countryLabel: 'Страна',
-    pingLabel: 'Пинг',
-    subscriptionLabel: 'Подписка',
-    subscriptionUnknown: 'Срок не указан',
-    subscriptionExpired: 'Истекла',
-    refreshSubscriptions: 'Обновить подписки',
-    refreshingSubscriptions: 'Обновляю подписки...',
-    noSubscriptionsToRefresh:
-        'Не нашёл исходную ссылку подписки. Вставь https://.../s/... или https://.../links.txt один раз.',
-    subscriptionReminderTitle: 'Пора продлить подписку',
-    mobileReady: 'Wi‑Fi / LTE',
-    mobileNetworkAdvice:
-        'Wi‑Fi/LTE: строгий TUN, FakeIP и DNS через выбранный профиль; keeper перепроверяет туннель без открытия приложения.',
-    androidVpnVisibleNote:
-        'Android может показать приложениям факт VPN. Yurich Connect защищает IP/DNS, но системный VpnService не скрывается без root/прошивки.',
-    endpointLabel: 'Сервер',
-    connect: 'Подключить',
-    disconnect: 'Отключить',
-    contact: 'Связь',
-    support: 'Поддержка',
-    donate: 'Донат',
-    developer: 'Разработчику',
-    updates: 'Обновления',
-    updateDescription:
-        'Приложение само проверит свежий APK, выберет файл под телефон и откроет установщик Android. Переходить на страницу релиза не нужно.',
-    updateChannel: 'Канал обновлений: GitHub Releases',
-    checkUpdates: 'Проверить и установить',
-    updateChecking: 'Проверяю обновления...',
-    updateInstallerOpened: 'Установщик Android открыт',
-    updateInstallPermission:
-        'Разреши установку приложений из Yurich Connect и нажми кнопку ещё раз.',
-    openSettings: 'Настройки',
-    faq: 'FAQ',
-    faqItems: [
-      _FaqItem(
-        question: 'Как добавить подписку или ключ?',
-        answer:
-            'Нажми + в разделе профилей. Можно вставить ссылку вручную, из буфера или отсканировать QR.',
-      ),
-      _FaqItem(
-        question: 'Какие протоколы поддерживаются?',
-        answer:
-            'В Android-клиенте оставлены стабильные направления: VLESS Reality, NaiveProxy и Hysteria/Hysteria2. XHTTP, mKCP, TLS-only VLESS и raw sing-box JSON не показываются в профилях этой сборки.',
-      ),
-      _FaqItem(
-        question: 'Что делать, если после смены профиля пропал интернет?',
-        answer:
-            'Нажми Отключить, подожди статус Остановлено и подключи профиль снова. Если проблема повторяется, отправь отчёт разработчику.',
-      ),
-      _FaqItem(
-        question: 'Почему нужна шторка уведомления?',
-        answer:
-            'Android требует постоянное уведомление для VPN. Разреши уведомления, чтобы видеть статус и скорость в шторке.',
-      ),
-      _FaqItem(
-        question: 'Почему теперь лучше работает мобильная сеть?',
-        answer:
-            'Приложение использует единый сетевой режим для Wi‑Fi и LTE: DNS сервера VPN, аккуратное переподключение и устойчивую маршрутизацию через туннель.',
-      ),
-      _FaqItem(
-        question: 'Безопасно ли отправлять отчёт?',
-        answer:
-            'Отчёт открывается в твоей почте перед отправкой. Пароли, UUID и ключи скрываются автоматически.',
-      ),
-    ],
-    logs: 'Логи sing-box',
-    noLogs: 'Логов пока нет.',
-    notificationDescription: 'VPN подключение активно',
-  );
-
-  static const en = _Strings._(
-    addProfileHint: 'Add a Remnawave subscription, QR code, or single key',
-    nothingToImport: 'Nothing to import.',
-    supportedProtocolsOnly:
-        'This build supports VLESS Reality, NaiveProxy, and Hysteria/Hysteria2.',
-    switchingProfile: 'Switching profile...',
-    importFirst: 'Import a profile first.',
-    autoConnectNoStableProfile:
-        'Auto connect needs a working Reality or HTTPS profile. Turbo/Hysteria is not started automatically.',
-    configSaveFailed: 'sing-box did not save the config.',
-    vpnStartFailed: 'VPN did not start. Check the logs below.',
-    connectionProbeFailed:
-        'VPN started, but the tunnel internet probe did not pass.',
-    disconnectingVpn: 'Disconnecting VPN...',
-    vpnStopServiceFailed: 'VPN service could not fully stop.',
-    vpnStopped: 'VPN stopped',
-    profileDeleted: 'Profile deleted',
-    linkCopied: 'Link copied',
-    close: 'Close',
-    working: 'Working...',
-    report: 'Report',
-    cannotOpenLink: 'Could not open the link.',
-    mailSubject: 'Yurich Connect: VPN diagnostics',
-    mailFallback: 'Mail did not open. Report copied to clipboard.',
-    vpnStoppedUnexpectedly: 'VPN stopped unexpectedly',
-    openLogsMessage: 'VPN stopped. Open sing-box logs.',
-    languageChanged: 'Language changed',
-    addProfile: 'Add profile',
-    importHint:
-        'https://sub... or VLESS Reality or naive+https://... or hy2://...',
-    importAction: 'Import',
-    clipboard: 'Clipboard',
-    scanQr: 'Scan QR',
-    pasteFromClipboard: 'Paste from clipboard',
-    language: 'Language',
-    connected: 'Connected',
-    connectionProblem: 'Connection problem',
-    connecting: 'Connecting',
-    disconnecting: 'Disconnecting',
-    stopped: 'Stopped',
-    profiles: 'Profiles',
-    activeProfile: 'Active',
-    refreshPing: 'Refresh ping',
-    collapseProfiles: 'Collapse list',
-    serverPickerEmpty: 'No server selected',
-    autoConnectMode: 'Auto selects Reality/HTTPS; Turbo is manual only',
-    openServers: 'Open',
-    hideServers: 'Hide',
-    showQr: 'Show QR',
-    copy: 'Copy',
-    delete: 'Delete',
-    emptyProfiles: 'No profiles yet. Tap +, paste a subscription, or scan QR.',
-    profileInsight: 'Profile and network',
-    profileInsightEmpty:
-        'Select a profile to see connection parameters and recommendations.',
-    protocolLabel: 'Protocol',
-    networkLabel: 'Network',
-    dnsLabel: 'DNS',
-    dnsCountryValue: 'Through profile',
-    smartRouteLabel: 'Smart Route',
-    smartRouteEnabledValue: 'RU direct / Global VPN',
-    smartRouteDisabledValue: 'All traffic through VPN',
-    smartRouteEnabled: 'Smart Route enabled',
-    smartRouteDisabled: 'Smart Route disabled',
-    smartRouteApplying: 'Applying Smart Route...',
-    stabilityLabel: 'Stability',
-    stabilityValue: 'Background keeper',
-    backgroundModeLabel: 'Background',
-    backgroundModeAllowed: 'Unrestricted',
-    backgroundModeRestricted: 'Battery restricted',
-    backgroundModeRequest: 'Allow',
-    batteryOptimizationSnack:
-        'For 24/7 VPN, allow Yurich Connect to run without battery restrictions.',
-    batteryOptimizationOpened:
-        'Battery settings opened. Allow unrestricted background work, then return to the app.',
-    countryLabel: 'Country',
-    pingLabel: 'Ping',
-    subscriptionLabel: 'Subscription',
-    subscriptionUnknown: 'Not provided',
-    subscriptionExpired: 'Expired',
-    refreshSubscriptions: 'Refresh subscriptions',
-    refreshingSubscriptions: 'Refreshing subscriptions...',
-    noSubscriptionsToRefresh:
-        'No saved subscription source. Paste the https://.../s/... or https://.../links.txt URL once.',
-    subscriptionReminderTitle: 'Subscription renewal',
-    mobileReady: 'Wi‑Fi / LTE',
-    mobileNetworkAdvice:
-        'Wi-Fi/LTE: strict TUN, FakeIP, DNS through the selected profile, and a background keeper that checks the tunnel without opening the app.',
-    androidVpnVisibleNote:
-        'Android can expose VPN status to apps. Yurich Connect protects IP/DNS, but system VpnService cannot be hidden without root/custom firmware.',
-    endpointLabel: 'Server',
-    connect: 'Connect',
-    disconnect: 'Disconnect',
-    contact: 'Contact',
-    support: 'Support',
-    donate: 'Donate',
-    developer: 'Developer',
-    updates: 'Updates',
-    updateDescription:
-        'The app checks for a fresh APK, picks the right file for this phone, and opens the Android installer. No release page is opened.',
-    updateChannel: 'Update channel: GitHub Releases',
-    checkUpdates: 'Check and install',
-    updateChecking: 'Checking updates...',
-    updateInstallerOpened: 'Android installer opened',
-    updateInstallPermission:
-        'Allow app installs from Yurich Connect, then press the button again.',
-    openSettings: 'Settings',
-    faq: 'FAQ',
-    faqItems: [
-      _FaqItem(
-        question: 'How do I add a subscription or key?',
-        answer:
-            'Use the add button in Profiles. You can paste manually, import from clipboard, or scan a QR code.',
-      ),
-      _FaqItem(
-        question: 'Which protocols are supported?',
-        answer:
-            'The Android client focuses on stable profiles: VLESS Reality, NaiveProxy, and Hysteria/Hysteria2. XHTTP, mKCP, TLS-only VLESS, and raw sing-box JSON are hidden in this build.',
-      ),
-      _FaqItem(
-        question: 'What if internet stops after switching profiles?',
-        answer:
-            'Tap Disconnect, wait for Stopped, then connect again. If it repeats, send a developer report.',
-      ),
-      _FaqItem(
-        question: 'Why does Android need a notification?',
-        answer:
-            'Android requires a persistent notification for VPN. Allow notifications to see status and speed in the shade.',
-      ),
-      _FaqItem(
-        question: 'Why should mobile networks work better now?',
-        answer:
-            'The app uses one network baseline for Wi‑Fi and LTE: VPN server DNS, smoother reconnects, and stable tunnel routing.',
-      ),
-      _FaqItem(
-        question: 'Is sending a report safe?',
-        answer:
-            'The report opens in your email before sending. Passwords, UUIDs, and keys are hidden automatically.',
-      ),
-    ],
-    logs: 'sing-box logs',
-    noLogs: 'No logs yet.',
-    notificationDescription: 'VPN connection is active',
-  );
 }

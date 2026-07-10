@@ -6,6 +6,7 @@ enum VpnProfileKind {
   naive,
   hysteria2,
   hysteria,
+  pingTunnelExperimental,
   singBoxConfig,
 }
 
@@ -18,17 +19,19 @@ extension VpnProfileKindLabel on VpnProfileKind {
     VpnProfileKind.naive => 'NaiveProxy',
     VpnProfileKind.hysteria2 => 'Hysteria2',
     VpnProfileKind.hysteria => 'Hysteria',
+    VpnProfileKind.pingTunnelExperimental => 'PingTunnel Experimental',
     VpnProfileKind.singBoxConfig => 'Sing-box',
   };
 
   bool get isClientSupported => switch (this) {
     VpnProfileKind.vlessReality ||
+    VpnProfileKind.vlessXhttp ||
+    VpnProfileKind.vlessTls ||
     VpnProfileKind.naive ||
     VpnProfileKind.hysteria2 ||
     VpnProfileKind.hysteria => true,
-    VpnProfileKind.vlessTls ||
-    VpnProfileKind.vlessXhttp ||
     VpnProfileKind.vlessMkcp ||
+    VpnProfileKind.pingTunnelExperimental ||
     VpnProfileKind.singBoxConfig => false,
   };
 }

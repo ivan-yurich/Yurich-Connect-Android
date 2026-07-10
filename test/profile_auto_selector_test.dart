@@ -37,6 +37,30 @@ void main() {
     expect(selected?.id, 'https');
   });
 
+  test('does not auto-select experimental profiles', () {
+    final profiles = [
+      _profile(
+        'experimental',
+        VpnProfileKind.pingTunnelExperimental,
+        'tunnel.example',
+        outbound: const {'type': 'pingtunnel'},
+      ),
+      _profile(
+        'https',
+        VpnProfileKind.naive,
+        'https.example',
+        outbound: {'type': 'naive'},
+      ),
+    ];
+
+    final selected = selector.choose(
+      profiles,
+      pingMs: const {'experimental': 1, 'https': 120},
+    );
+
+    expect(selected?.id, 'https');
+  });
+
   test('prefers healthy Reality before HTTPS when both are usable', () {
     final profiles = [
       _profile('https', VpnProfileKind.naive, 'https.example'),
@@ -133,6 +157,7 @@ VpnProfile _profile(
   VpnProfileKind kind,
   String server, {
   DateTime? expiresAt,
+  Map<String, dynamic>? outbound,
 }) {
   return VpnProfile(
     id: id,
@@ -142,6 +167,7 @@ VpnProfile _profile(
     server: server,
     port: 443,
     subscriptionExpiresAt: expiresAt,
-    outbound: {'type': kind == VpnProfileKind.naive ? 'naive' : 'vless'},
+    outbound:
+        outbound ?? {'type': kind == VpnProfileKind.naive ? 'naive' : 'vless'},
   );
 }

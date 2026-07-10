@@ -83,7 +83,6 @@ Add the required permissions:
     
     <!-- Foreground service permissions - Required for VPN to run in background -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     
     <!-- Network and connectivity -->
@@ -96,9 +95,6 @@ Add the required permissions:
     
     <!-- Boot receiver - Auto-start VPN if enabled -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    
-    <!-- Per-app tunneling - Query installed apps -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     
     <application
         android:label="Your App"

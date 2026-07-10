@@ -50,6 +50,7 @@ class VlessProfileValidator {
     final shortId = reality?['short_id']?.toString().trim() ?? '';
     final flow = outbound['flow']?.toString().trim() ?? '';
     final packetEncoding = outbound['packet_encoding']?.toString().trim() ?? '';
+    final insecure = tls?['insecure'] == true;
     final fingerprint =
         _map(tls?['utls'])?['fingerprint']?.toString().trim() ?? '';
 
@@ -62,6 +63,9 @@ class VlessProfileValidator {
     }
     if (tls?['enabled'] != true) {
       errors.add('tls.enabled');
+    }
+    if (insecure) {
+      errors.add('tls.insecure');
     }
     if (reality?['enabled'] != true) {
       errors.add('reality.enabled');
@@ -116,12 +120,34 @@ class VlessProfileValidator {
   ) {
     final normalized = Map<String, dynamic>.from(outbound);
     normalized['type'] = 'vless';
-    normalized.remove('network');
-    normalized['packet_encoding'] = 'xudp';
-    normalized.putIfAbsent('flow', () => 'xtls-rprx-vision');
+    normalized.remove('unsupported_transport');
+    normalized.remove('transport_options');
+
+    final network = normalized['network']?.toString().trim().toLowerCase();
+    if (network == null || network.isEmpty || network == 'tcp') {
+      normalized.remove('network');
+    }
+
+    final transport = _map(normalized['transport']);
+    final transportType =
+        transport?['type']?.toString().trim().toLowerCase() ?? '';
+    if (transportType.isEmpty || transportType == 'tcp') {
+      normalized.remove('transport');
+    }
+
+    final packetEncoding = normalized['packet_encoding']?.toString().trim();
+    if (packetEncoding == null || packetEncoding.isEmpty) {
+      normalized['packet_encoding'] = 'xudp';
+    }
+
+    final flow = normalized['flow']?.toString().trim();
+    if (flow == null || flow.isEmpty) {
+      normalized['flow'] = 'xtls-rprx-vision';
+    }
 
     final tls = _deepMap(normalized['tls']);
     tls['enabled'] = true;
+    tls.remove('insecure');
     tls.putIfAbsent('server_name', () => normalized['server']);
     final utls = _deepMap(tls['utls']);
     utls['enabled'] = true;

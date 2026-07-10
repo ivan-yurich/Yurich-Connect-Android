@@ -29,6 +29,9 @@ class ProtocolDisplayMapper {
         transport: 'mkcp',
         security: security ?? 'reality',
       ),
+      VpnProfileKind.pingTunnelExperimental => mapProtocolToDisplayName(
+        'pingtunnel',
+      ),
       VpnProfileKind.naive => mapProtocolToDisplayName('naive'),
       VpnProfileKind.hysteria2 => mapProtocolToDisplayName('hysteria2'),
       VpnProfileKind.hysteria => mapProtocolToDisplayName('hysteria'),
@@ -67,7 +70,10 @@ class ProtocolDisplayMapper {
     if (normalizedProtocol == 'hysteria2' ||
         normalizedProtocol == 'hy2' ||
         normalizedProtocol == 'hysteria') {
-      return 'Hysteria 2 / Турбо';
+      return 'Turbo WARP / Hysteria2';
+    }
+    if (normalizedProtocol == 'pingtunnel') {
+      return 'PingTunnel / Эксперимент';
     }
 
     final fallback = protocol.trim();

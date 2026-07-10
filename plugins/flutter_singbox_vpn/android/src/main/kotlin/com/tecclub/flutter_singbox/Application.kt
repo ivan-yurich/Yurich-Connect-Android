@@ -26,6 +26,8 @@ class Application {
         private var libboxInitialized = false
         @Volatile
         private var libboxInitializing = false
+        @Volatile
+        private var seqContextSet = false
         private val libboxLock = Any()
         
         // Quick access to common system services
@@ -81,8 +83,6 @@ class Application {
          */
         fun initialize(context: Context) {
             application = context.applicationContext
-            
-            Seq.setContext(application)
             
             // Initialize config manager
             SimpleConfigManager.init(application)
@@ -201,6 +201,8 @@ class Application {
          * Initialize the libbox library with the application's directories
          */
         private fun initializeLibbox(context: Context) {
+            ensureSeqContext(context)
+
             val baseDir = context.filesDir
             baseDir.mkdirs()
             val workingDir = context.getExternalFilesDir(null) ?: return
@@ -224,6 +226,18 @@ class Application {
             
             Libbox.setup(setupOptions)
             Libbox.redirectStderr(File(workingDir, "stderr.log").path)
+        }
+
+        private fun ensureSeqContext(context: Context) {
+            if (seqContextSet) {
+                return
+            }
+            synchronized(libboxLock) {
+                if (!seqContextSet) {
+                    Seq.setContext(context.applicationContext)
+                    seqContextSet = true
+                }
+            }
         }
     }
 }

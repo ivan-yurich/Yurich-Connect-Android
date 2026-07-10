@@ -1,5 +1,6 @@
 package online.dnsai.ivanvpn
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
@@ -13,6 +14,8 @@ import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -20,10 +23,35 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 class MainActivity : FlutterActivity() {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var firstFrameRendered = false
+    private var firstFrameWatchdog: Runnable? = null
+    private var firstFrameListener: FlutterUiDisplayListener? = null
+    private var firstFrameEngine: FlutterEngine? = null
+
+    @Volatile
+    private var ioExecutor: ExecutorService = newIoExecutor()
+
+    private fun newIoExecutor(): ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "YurichConnectIo").apply { isDaemon = true }
+    }
+
+    @Synchronized
+    private fun currentIoExecutor(): ExecutorService {
+        if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
+            ioExecutor = newIoExecutor()
+        }
+        return ioExecutor
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handlePackageInstallerCallback(intent)
@@ -37,6 +65,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        armFirstFrameWatchdog(flutterEngine)
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -78,39 +107,38 @@ class MainActivity : FlutterActivity() {
             "online.dnsai.ivanvpn/apps",
         ).setMethodCallHandler { call, result ->
             when (call.method) {
-                "getInstalledPackages" -> result.success(getInstalledPackages())
+                "getInstalledPackages" -> runIo(result) { getInstalledPackages() }
                 else -> result.notImplemented()
             }
         }
     }
 
     private fun inspectApk(path: String?, result: MethodChannel.Result) {
+        runIo(result) { inspectApkData(path) }
+    }
+
+    private fun inspectApkData(path: String?): Map<String, Any> {
         if (path.isNullOrBlank()) {
-            result.error("BAD_PATH", "APK path is empty", null)
-            return
+            throw NativeMethodFailure("BAD_PATH", "APK path is empty")
         }
 
         val apkFile = File(path)
         if (!apkFile.exists() || !apkFile.canRead() || apkFile.length() <= 0L) {
-            result.error("APK_NOT_READABLE", "APK file is empty or not readable", null)
-            return
+            throw NativeMethodFailure("APK_NOT_READABLE", "APK file is empty or not readable")
         }
 
         try {
             val packageInfo = getArchivePackageInfo(apkFile)
                 ?: throw IllegalStateException("Android cannot parse update APK")
-            result.success(
-                mapOf(
-                    "packageName" to (packageInfo.packageName ?: ""),
-                    "versionName" to (packageInfo.versionName ?: ""),
-                    "versionCode" to packageInfo.versionCodeCompat(),
-                ),
+            return mapOf(
+                "packageName" to (packageInfo.packageName ?: ""),
+                "versionName" to (packageInfo.versionName ?: ""),
+                "versionCode" to packageInfo.versionCodeCompat(),
             )
         } catch (error: Exception) {
-            result.error(
+            throw NativeMethodFailure(
                 "APK_INVALID",
                 "${error.javaClass.simpleName}: ${error.message}",
-                null,
             )
         }
     }
@@ -138,6 +166,15 @@ class MainActivity : FlutterActivity() {
             return
         }
 
+        if (!hasExternalInstallPermission()) {
+            result.error(
+                "EXTERNAL_INSTALL_DISABLED",
+                "External APK installation is disabled in this Play-ready build.",
+                null,
+            )
+            return
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !packageManager.canRequestPackageInstalls()
         ) {
@@ -147,32 +184,48 @@ class MainActivity : FlutterActivity() {
         }
 
         val apkFile = File(path)
+        executeIo(result) {
+            try {
+                validateInstallSource(apkFile)
+                val installFile = prepareInstallFile(apkFile)
+                try {
+                    installWithPackageInstaller(installFile)
+                    successOnMain(result, null)
+                } catch (error: Exception) {
+                    Log.w(TAG, "PackageInstaller update failed, falling back to ACTION_VIEW", error)
+                    openInstallIntentOnMain(installFile, result)
+                }
+            } catch (error: NativeMethodFailure) {
+                errorOnMain(result, error.code, error.message ?: "Native method failed")
+            } catch (error: Exception) {
+                errorOnMain(
+                    result,
+                    "INSTALL_FAILED",
+                    "${error.javaClass.simpleName}: ${error.message}",
+                )
+            }
+        }
+    }
+
+    private fun validateInstallSource(apkFile: File) {
         if (!apkFile.exists()) {
-            result.error("APK_NOT_FOUND", "APK file not found", null)
-            return
+            throw NativeMethodFailure("APK_NOT_FOUND", "APK file not found")
         }
         if (!apkFile.canRead() || apkFile.length() <= 0L) {
-            result.error("APK_NOT_READABLE", "APK file is empty or not readable", null)
-            return
+            throw NativeMethodFailure("APK_NOT_READABLE", "APK file is empty or not readable")
         }
         if (!isReadableApk(apkFile)) {
-            result.error(
+            throw NativeMethodFailure(
                 "APK_INVALID",
                 "Downloaded update file is not a valid APK. Please retry the update.",
-                null,
             )
-            return
         }
+    }
 
-        try {
-            val installFile = prepareInstallFile(apkFile)
-            installWithPackageInstaller(installFile)
-            result.success(null)
-        } catch (error: Exception) {
-            Log.w(TAG, "PackageInstaller update failed, falling back to ACTION_VIEW", error)
+    private fun openInstallIntentOnMain(apkFile: File, result: MethodChannel.Result) {
+        mainHandler.post {
             try {
-                val installFile = prepareInstallFile(apkFile)
-                openInstallIntent(installFile)
+                openInstallIntent(apkFile)
                 result.success(null)
             } catch (fallbackError: ActivityNotFoundException) {
                 result.error("INSTALL_FAILED", "Android package installer was not found", null)
@@ -417,12 +470,37 @@ class MainActivity : FlutterActivity() {
         }
 
     private fun openInstallSettings() {
+        if (!hasExternalInstallPermission()) {
+            Toast.makeText(
+                this,
+                "External APK installation is disabled in this build",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val intent = Intent(
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.fromParts("package", packageName, null),
             ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
+        }
+    }
+
+    private fun hasExternalInstallPermission(): Boolean {
+        return try {
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong()),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
+            }
+            info.requestedPermissions?.contains(Manifest.permission.REQUEST_INSTALL_PACKAGES) == true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -475,12 +553,157 @@ class MainActivity : FlutterActivity() {
                 0
             }
 
+    override fun onDestroy() {
+        disarmFirstFrameWatchdog()
+        ioExecutor.shutdown()
+        super.onDestroy()
+    }
+
+    private fun armFirstFrameWatchdog(flutterEngine: FlutterEngine) {
+        firstFrameRendered = false
+        disarmFirstFrameWatchdog()
+        firstFrameEngine = flutterEngine
+
+        val listener = object : FlutterUiDisplayListener {
+            override fun onFlutterUiDisplayed() {
+                firstFrameRendered = true
+                resetFirstFrameRecoveryWindow()
+                disarmFirstFrameWatchdog()
+                Log.d(TAG, "Flutter first frame displayed")
+            }
+
+            override fun onFlutterUiNoLongerDisplayed() {
+                // No-op. The watchdog only cares about the first visible frame.
+            }
+        }
+        firstFrameListener = listener
+        flutterEngine.renderer.addIsDisplayingFlutterUiListener(listener)
+
+        val watchdog = Runnable {
+            recoverFromMissingFirstFrame()
+        }
+        firstFrameWatchdog = watchdog
+        mainHandler.postDelayed(watchdog, FIRST_FRAME_TIMEOUT_MS)
+    }
+
+    private fun disarmFirstFrameWatchdog() {
+        firstFrameWatchdog?.let(mainHandler::removeCallbacks)
+        firstFrameWatchdog = null
+        val engine = firstFrameEngine
+        val listener = firstFrameListener
+        if (engine != null && listener != null) {
+            runCatching {
+                engine.renderer.removeIsDisplayingFlutterUiListener(listener)
+            }
+        }
+        firstFrameListener = null
+        firstFrameEngine = null
+    }
+
+    private fun recoverFromMissingFirstFrame() {
+        if (firstFrameRendered || isFinishing || isActivityDestroyedCompat()) {
+            return
+        }
+        if (!takeFirstFrameRecoverySlot()) {
+            Log.w(TAG, "Flutter first frame watchdog skipped by cooldown")
+            return
+        }
+
+        Log.w(TAG, "Flutter first frame was not rendered within timeout")
+        disarmFirstFrameWatchdog()
+    }
+
+    private fun isActivityDestroyedCompat(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed
+
+    private fun executeIo(result: MethodChannel.Result, task: () -> Unit) {
+        try {
+            currentIoExecutor().execute(task)
+        } catch (error: RejectedExecutionException) {
+            Log.w(TAG, "IO executor rejected task, recreating", error)
+            try {
+                currentIoExecutor().execute(task)
+            } catch (retryError: Exception) {
+                Log.w(TAG, "Native channel retry failed", retryError)
+                errorOnMain(
+                    result,
+                    "NATIVE_ERROR",
+                    "${retryError.javaClass.simpleName}: ${retryError.message}",
+                )
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Native channel submission failed", error)
+            errorOnMain(
+                result,
+                "NATIVE_ERROR",
+                "${error.javaClass.simpleName}: ${error.message}",
+            )
+        }
+    }
+
+    private fun <T> runIo(result: MethodChannel.Result, task: () -> T) {
+        executeIo(result) {
+            try {
+                successOnMain(result, task())
+            } catch (error: NativeMethodFailure) {
+                errorOnMain(result, error.code, error.message ?: "Native method failed")
+            } catch (error: Exception) {
+                Log.w(TAG, "Native channel call failed", error)
+                errorOnMain(
+                    result,
+                    "NATIVE_ERROR",
+                    "${error.javaClass.simpleName}: ${error.message}",
+                )
+            }
+        }
+    }
+
+    private fun successOnMain(result: MethodChannel.Result, value: Any?) {
+        mainHandler.post { result.success(value) }
+    }
+
+    private fun errorOnMain(result: MethodChannel.Result, code: String, message: String) {
+        mainHandler.post { result.error(code, message, null) }
+    }
+
+    private fun takeFirstFrameRecoverySlot(): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(MainActivity::class.java) {
+            if (now - firstFrameRecoveryWindowStartedAt > FIRST_FRAME_RECOVERY_WINDOW_MS) {
+                firstFrameRecoveryWindowStartedAt = now
+                firstFrameRecoveryCount = 0
+            }
+            if (firstFrameRecoveryCount >= FIRST_FRAME_RECOVERY_LIMIT) {
+                return false
+            }
+            firstFrameRecoveryCount += 1
+            return true
+        }
+    }
+
+    private fun resetFirstFrameRecoveryWindow() {
+        synchronized(MainActivity::class.java) {
+            firstFrameRecoveryWindowStartedAt = 0L
+            firstFrameRecoveryCount = 0
+        }
+    }
+
+    private class NativeMethodFailure(
+        val code: String,
+        override val message: String,
+    ) : Exception(message)
+
     private companion object {
         const val TAG = "YurichUpdater"
         const val APK_MIN_BYTES = 64 * 1024L
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val ACTION_PACKAGE_INSTALL_STATUS = "online.dnsai.ivanvpn.UPDATE_INSTALL_STATUS"
         const val EXTRA_PACKAGE_INSTALL_SESSION_ID = "package_install_session_id"
+        const val FIRST_FRAME_TIMEOUT_MS = 8_000L
+        const val FIRST_FRAME_RECOVERY_WINDOW_MS = 60_000L
+        const val FIRST_FRAME_RECOVERY_LIMIT = 2
+        var firstFrameRecoveryWindowStartedAt = 0L
+        var firstFrameRecoveryCount = 0
         val INSTALL_CONFIRMATION_ALLOWED_FLAGS =
             Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or

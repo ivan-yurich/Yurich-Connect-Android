@@ -1,6 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
 import android.content.Intent
+import android.os.Binder
 import android.os.RemoteException
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
@@ -11,7 +12,7 @@ import com.tecclub.flutter_singbox.constant.Status
 
 class ServiceBinder(
     private val statusLiveData: MutableLiveData<Status>
-) {
+) : Binder() {
     
     companion object {
         private val callbackList = mutableListOf<ServiceCallback>()

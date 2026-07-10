@@ -129,6 +129,31 @@ class ConnectionUiState {
     );
   }
 
+  factory ConnectionUiState.networkChanging({
+    required String uploadSpeed,
+    required String downloadSpeed,
+    required String totalTraffic,
+    String? profileName,
+    String? protocolDisplayName,
+    String? countryName,
+    String? countryCode,
+    int? pingMs,
+    String? sessionDuration,
+  }) {
+    return ConnectionUiState(
+      status: ConnectionStatus.networkChanging,
+      profileName: profileName,
+      protocolDisplayName: protocolDisplayName,
+      countryName: countryName,
+      countryCode: countryCode,
+      pingMs: pingMs,
+      uploadSpeed: uploadSpeed,
+      downloadSpeed: downloadSpeed,
+      totalTraffic: totalTraffic,
+      sessionDuration: sessionDuration,
+    );
+  }
+
   factory ConnectionUiState.reconnecting({
     String? profileName,
     String? protocolDisplayName,

@@ -70,6 +70,8 @@ try {
     Copy-Item -LiteralPath "build\app\outputs\flutter-apk\app-release.apk" `
         -Destination (Join-Path $apkOut "app-release.apk") -Force
     Copy-Item -LiteralPath "build\app\outputs\flutter-apk\app-release.apk" `
+        -Destination (Join-Path $apkOut "Yurich-Connect-Android-v$versionName.apk") -Force
+    Copy-Item -LiteralPath "build\app\outputs\flutter-apk\app-release.apk" `
         -Destination (Join-Path $apkOut "YurichConnect-android-release.apk") -Force
     Copy-Item -LiteralPath "build\app\outputs\flutter-apk\app-arm64-v8a-release.apk" `
         -Destination (Join-Path $apkOut "YurichConnect-android-arm64-v8a-v$versionName.apk") -Force

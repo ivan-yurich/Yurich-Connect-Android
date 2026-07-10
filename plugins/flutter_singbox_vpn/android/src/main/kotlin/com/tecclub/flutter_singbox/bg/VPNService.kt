@@ -6,6 +6,7 @@ import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.tecclub.flutter_singbox.Application
 import com.tecclub.flutter_singbox.constant.Alert
@@ -18,12 +19,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.FileDescriptor
-import java.net.InetAddress
 
 class VPNService : VpnService(), PlatformInterfaceWrapper {
 
     companion object {
         private const val TAG = "VPNService"
+        private val XRAY_TUN_DNS_SERVERS = listOf("1.1.1.1", "8.8.8.8")
     }
 
     private val service = BoxService(this, this)
@@ -212,6 +213,36 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             builder.establish() ?: error("android: the application is not prepared or is revoked")
         service.fileDescriptor = pfd
         return pfd.fd
+    }
+
+    fun openXrayTun(): ParcelFileDescriptor {
+        if (prepare(this) != null) error("android: missing vpn permission")
+
+        service.fileDescriptor?.close()
+        service.fileDescriptor = null
+        val dnsServers = XRAY_TUN_DNS_SERVERS
+        val builder = Builder()
+            .setSession("Yurich Connect Xray")
+            .setMtu(1380)
+            .addAddress("172.19.0.1", 30)
+            .addRoute("0.0.0.0", 0)
+        dnsServers.take(4).forEach { builder.addDnsServer(it) }
+        Log.i(TAG, "Xray TUN DNS servers: ${dnsServers.take(4).joinToString(",")}")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setMetered(false)
+        }
+
+        runCatching {
+            builder.addDisallowedApplication(packageName)
+        }.onFailure {
+            Log.w(TAG, "Unable to exclude own package from Xray VPN", it)
+        }
+
+        val pfd =
+            builder.establish() ?: error("android: the application is not prepared or is revoked")
+        service.fileDescriptor = pfd
+        return pfd
     }
     
     override fun protect(fd: Int): Boolean {

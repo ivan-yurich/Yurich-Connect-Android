@@ -23,7 +23,7 @@ class _FetchedSubscription {
 
 class ProfileImporter {
   static final _linkPattern = RegExp(
-    "(?:vless://|naive\\+https://|naive://|hy2://|hysteria2://|hysteria://)[^\\s<>\"']+",
+    "(?:vless://|naive\\+https://|naive://|hy2://|hysteria2://|hysteria://|pingtunnel://)[^\\s<>\"']+",
     caseSensitive: false,
   );
 
@@ -257,7 +257,7 @@ class ProfileImporter {
     }
 
     throw const ProfileImportException(
-      'Не нашёл поддерживаемых ссылок. Поддерживаются vless://, naive+https://, hy2://, hysteria://, sing-box JSON и raw-подписки.',
+      'Не нашёл поддерживаемых ссылок. Поддерживаются vless://, naive+https://, hy2://, hysteria://, pingtunnel://, sing-box JSON и raw-подписки.',
     );
   }
 
@@ -580,6 +580,18 @@ class ProfileImporter {
       );
     }
 
+    if (type == 'pingtunnel') {
+      return VpnProfile(
+        id: _stableId(originalText),
+        name: _displayName('', fallback: server),
+        kind: VpnProfileKind.pingTunnelExperimental,
+        originalInput: source.isEmpty ? originalText : source,
+        server: server,
+        port: port,
+        outbound: normalized,
+      );
+    }
+
     return null;
   }
 
@@ -688,8 +700,6 @@ class ProfileImporter {
       if (reality != null &&
           (reality['shortId'] as String?)?.isNotEmpty == true)
         'sid': reality['shortId'] as String,
-      if (_asMap(stream['xhttpSettings'])?['path'] is String)
-        'path': _asMap(stream['xhttpSettings'])!['path'] as String,
       if (_asMap(stream['splitHTTPSettings'])?['path'] is String)
         'path': _asMap(stream['splitHTTPSettings'])!['path'] as String,
       if (_asMap(stream['kcpSettings'])?['header'] is Map)
@@ -698,6 +708,31 @@ class ProfileImporter {
                 as String?) ??
             '',
     };
+
+    final xhttpSettings =
+        _asMap(stream['xhttpSettings']) ?? _asMap(stream['splitHTTPSettings']);
+    if (xhttpSettings != null) {
+      final path = xhttpSettings['path'] as String?;
+      final host = xhttpSettings['host'] as String?;
+      final mode = xhttpSettings['mode'] as String?;
+      final extra = xhttpSettings['extra'] as String?;
+      final xmux = xhttpSettings['xmux'];
+      if (path != null && path.isNotEmpty) {
+        query['path'] = path;
+      }
+      if (host != null && host.isNotEmpty) {
+        query['host'] = host;
+      }
+      if (mode != null && mode.isNotEmpty) {
+        query['mode'] = mode;
+      }
+      if (extra != null && extra.isNotEmpty) {
+        query['extra'] = extra;
+      }
+      if (xmux != null) {
+        query['xmux'] = jsonEncode(xmux);
+      }
+    }
 
     final alpn = reality?['alpn'] ?? tls?['alpn'];
     final alpnValue = _listOrString(alpn);
@@ -742,6 +777,8 @@ class ProfileImporter {
           profiles.add(_parseHysteria2(link));
         } else if (lower.startsWith('hysteria://')) {
           profiles.add(_parseHysteria(link));
+        } else if (lower.startsWith('pingtunnel://')) {
+          profiles.add(_parsePingTunnel(link));
         }
       } on Object catch (error) {
         errors.add('$link: $error');
@@ -764,7 +801,6 @@ class ProfileImporter {
     final query = _query(uri);
     final security = (query['security'] ?? '').toLowerCase();
     final transportType = _vlessTransportType(query);
-    final unsupportedTransport = _unsupportedVlessTransport(transportType);
     final port = uri.hasPort ? uri.port : 443;
     final name = _displayName(uri.fragment, fallback: uri.host);
     final tls = <String, dynamic>{};
@@ -816,6 +852,7 @@ class ProfileImporter {
       if (tls.isNotEmpty) 'tls': tls,
     };
 
+    final unsupportedTransport = _unsupportedVlessTransport(transportType);
     if (unsupportedTransport != null) {
       outbound['unsupported_transport'] = unsupportedTransport;
       outbound['transport_options'] = _unsupportedTransportOptions(query);
@@ -896,7 +933,7 @@ class ProfileImporter {
         query['password'] ??
         query['auth'] ??
         query['auth_str'] ??
-        Uri.decodeComponent(uri.userInfo);
+        _hysteriaPasswordFromUserInfo(uri.userInfo);
     if (password.isEmpty || uri.host.isEmpty) {
       throw const ProfileImportException(
         'Hysteria2 ссылка без пароля или host.',
@@ -959,7 +996,7 @@ class ProfileImporter {
         query['auth_str'] ??
         query['authstr'] ??
         query['auth'] ??
-        Uri.decodeComponent(uri.userInfo);
+        _hysteriaPasswordFromUserInfo(uri.userInfo);
     final obfs = query['obfs'];
     final tls = _tlsFromQuery(query, fallbackServerName: uri.host);
     final outbound = <String, dynamic>{
@@ -984,6 +1021,43 @@ class ProfileImporter {
       originalInput: link,
       server: uri.host,
       port: port,
+      outbound: outbound,
+    );
+  }
+
+  VpnProfile _parsePingTunnel(String link) {
+    final uri = Uri.parse(link);
+    if (uri.host.isEmpty) {
+      throw const ProfileImportException('PingTunnel ссылка без host.');
+    }
+
+    final query = _query(uri);
+    final userParts = uri.userInfo.split(':');
+    final username = userParts.isNotEmpty
+        ? Uri.decodeComponent(userParts.first)
+        : '';
+    final password = userParts.length > 1
+        ? Uri.decodeComponent(userParts.sublist(1).join(':'))
+        : (query['password'] ?? query['token'] ?? query['auth'] ?? '');
+    final outbound = <String, dynamic>{
+      'type': 'pingtunnel',
+      'tag': 'proxy',
+      'server': uri.host,
+      'server_port': uri.hasPort ? uri.port : 443,
+      if (username.isNotEmpty) 'username': username,
+      if (password.isNotEmpty) 'password': password,
+      if ((query['psk'] ?? '').isNotEmpty) 'psk': query['psk']!,
+      if ((query['sni'] ?? '').isNotEmpty) 'server_name': query['sni']!,
+      if ((query['path'] ?? '').isNotEmpty) 'path': query['path']!,
+    };
+
+    return VpnProfile(
+      id: _stableId(link),
+      name: _displayName(uri.fragment, fallback: uri.host),
+      kind: VpnProfileKind.pingTunnelExperimental,
+      originalInput: link,
+      server: uri.host,
+      port: uri.hasPort ? uri.port : 443,
       outbound: outbound,
     );
   }
@@ -1016,6 +1090,10 @@ class ProfileImporter {
     );
   }
 
+  String _hysteriaPasswordFromUserInfo(String rawUserInfo) {
+    return Uri.decodeComponent(rawUserInfo);
+  }
+
   Map<String, dynamic>? _v2rayTransport(Map<String, String> query) {
     final type = _vlessTransportType(query);
     if (type == 'tcp' || type.isEmpty) {
@@ -1040,6 +1118,19 @@ class ProfileImporter {
         'type': 'grpc',
         if ((query['serviceName'] ?? query['service_name'] ?? '').isNotEmpty)
           'service_name': query['serviceName'] ?? query['service_name'],
+      };
+    }
+
+    if (type == 'xhttp' || type == 'splithttp') {
+      final headers = _headersFromQuery(query);
+      return {
+        'type': 'xhttp',
+        if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
+        if ((query['host'] ?? '').isNotEmpty) 'host': query['host'],
+        if ((query['mode'] ?? query['xhttpMode'] ?? '').isNotEmpty)
+          'mode': query['mode'] ?? query['xhttpMode'],
+        if ((query['extra'] ?? '').isNotEmpty) 'extra': query['extra'],
+        if (headers.isNotEmpty) 'headers': headers,
       };
     }
 
@@ -1092,9 +1183,6 @@ class ProfileImporter {
   }
 
   String? _unsupportedVlessTransport(String type) {
-    if (type == 'xhttp' || type == 'splithttp') {
-      return 'xhttp';
-    }
     if (type == 'mkcp' || type == 'kcp') {
       return 'mkcp';
     }
@@ -1121,6 +1209,31 @@ class ProfileImporter {
       }
     }
     return entries;
+  }
+
+  Map<String, String> _headersFromQuery(Map<String, String> query) {
+    final headers = <String, String>{};
+    final host = query['host'];
+    if (host != null && host.isNotEmpty) {
+      headers['Host'] = host;
+    }
+    final header = query['header'] ?? query['headers'];
+    if (header == null || header.isEmpty) {
+      return headers;
+    }
+
+    for (final part in header.split('|')) {
+      final separator = part.indexOf(':');
+      if (separator <= 0) {
+        continue;
+      }
+      final key = part.substring(0, separator).trim();
+      final value = part.substring(separator + 1).trim();
+      if (key.isNotEmpty && value.isNotEmpty) {
+        headers[key] = value;
+      }
+    }
+    return headers;
   }
 
   String _vlessPacketEncoding(Map<String, String> query) {

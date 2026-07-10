@@ -1,6 +1,7 @@
 enum ConnectionStatus {
   connected('Подключено'),
   idle('Ожидание'),
+  networkChanging('Смена сети'),
   degraded('Нестабильно'),
   reconnecting('Переподключение'),
   failed('Сбой'),

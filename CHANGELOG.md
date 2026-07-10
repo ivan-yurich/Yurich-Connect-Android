@@ -1,5 +1,68 @@
 # Changelog
 
+## 1.0.107 - 2026-07-09
+
+- Applied the complete Hysteria2 auth fix to the bundled native config parser,
+  keeping direct native link parsing consistent with Flutter imports.
+- Removed live subscription and credential literals from local diagnostics and
+  parser fixtures; diagnostics now require an environment-provided URL.
+
+## 1.0.106 - 2026-07-09
+
+- Fixed Hysteria2 `username:password` authentication by preserving the complete
+  percent-decoded URI auth value required by the protocol specification.
+- Replaced profiles from a successfully refreshed subscription instead of
+  retaining stale credentials and duplicating the server list.
+- Preserved manual profiles and profiles from subscription sources that failed
+  to refresh, and remapped the selected profile to its refreshed endpoint.
+
+## 1.0.105 - 2026-07-09
+
+- Added a real HTTP traffic gate for managed VLESS and Hysteria profiles, so
+  Android no longer reports a connection before the outbound is usable.
+- Automatically restarts the tunnel once when a protocol reports `Started`
+  without providing internet access.
+- Kept NaiveProxy startup probing tolerant of known server-side DNS failures,
+  and left XHTTP and imported raw sing-box configs on their existing path.
+
+## 1.0.104 - 2026-07-09
+
+- Fixed profile switching getting stuck after the old VPN service had already
+  reported `Stopped` but was still present in Android's service list.
+- Made synchronous VPN status polling side-effect free to prevent status-event,
+  notification, and UI update storms during stop and reconnect transitions.
+- Added regression coverage for stale-service, shutdown, startup, and Xray
+  active-network status resolution.
+
+## 1.0.87 - 2026-06-21
+
+- Published a control Android update release for validating the in-app updater
+  path from already installed builds.
+- Kept GitHub Releases as the first update metadata source and preserved the
+  legacy APK asset name for older updater clients.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
+## 1.0.86 - 2026-06-21
+
+- Re-published Android update assets with both the current versioned APK name
+  and the legacy `YurichConnect-android-release.apk` name, so older in-app
+  updaters can discover the release.
+- Kept `versionCode` monotonic above the previous updater builds to avoid
+  Android downgrade protection.
+- Prefer GitHub Releases before the temporary site metadata endpoint when
+  checking for app updates.
+- Kept VPN protocols, Smart Route, and routing behavior unchanged.
+
+## 1.0.85 - 2026-06-21
+
+- Added an engine selector layer for VPN profiles: supported protocols stay on
+  sing-box, while Xray-only VLESS transports fail clearly instead of starting a
+  broken tunnel.
+- Hardened VLESS Reality TCP normalization and validation for Android startup.
+- Removed unsafe `tls.insecure` from normalized Reality outbounds.
+- Kept NaiveProxy, Hysteria/Hysteria2, Smart Route, and routing behavior
+  unchanged.
+
 ## 1.0.84 - 2026-06-21
 
 - Fixed Android auto-update downgrade failures by moving the app to a high

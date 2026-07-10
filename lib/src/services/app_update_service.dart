@@ -5,8 +5,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 const _releaseApiUrls = [
-  'https://ivan-it.net/yurich-connect/android/latest.json',
   'https://api.github.com/repos/ivan-yurich/Yurich-Connect-Android/releases/latest',
+  'https://ivan-it.net/yurich-connect/android/latest.json',
 ];
 const _githubRepository = 'ivan-yurich/Yurich-Connect-Android';
 const _githubReleaseAssetName = 'YurichConnect-android-release.apk';

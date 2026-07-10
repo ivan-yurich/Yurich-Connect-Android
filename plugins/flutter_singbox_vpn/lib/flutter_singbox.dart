@@ -41,6 +41,11 @@ class FlutterSingbox {
     return FlutterSingboxPlatform.instance.getVPNStatus();
   }
 
+  /// Get current Android network snapshot.
+  Future<Map<String, dynamic>> getNetworkSnapshot() {
+    return FlutterSingboxPlatform.instance.getNetworkSnapshot();
+  }
+
   /// Stream of VPN status updates
   ///
   /// Emits a map with the following keys:
