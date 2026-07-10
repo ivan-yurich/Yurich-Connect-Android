@@ -226,7 +226,7 @@ void main() {
     final tunInbound = inbounds.firstWhere(
       (inbound) => inbound['type'] == 'tun',
     );
-    expect(tunInbound['address'], ['172.19.0.1/30']);
+    expect(tunInbound['address'], ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']);
     expect(tunInbound['mtu'], 1380);
     expect(tunInbound['interface_name'], 'tun0');
     expect(tunInbound['strict_route'], isTrue);
@@ -395,7 +395,16 @@ void main() {
         (config['inbounds'] as List).first as Map<String, dynamic>;
 
     expect(tunInbound['settings']['dns'], ['1.1.1.1', '8.8.8.8']);
-    expect((dnsServers.first as Map<String, dynamic>)['address'], '1.1.1.1');
+    expect((dnsServers.first as Map<String, dynamic>)['address'], 'localhost');
+    expect((dnsServers.first as Map<String, dynamic>)['domains'], [
+      'full:example.com',
+    ]);
+    expect(
+      dnsServers
+          .skip(1)
+          .map((server) => (server as Map<String, dynamic>)['address']),
+      ['1.1.1.1', '8.8.8.8'],
+    );
     expect(rules.first['protocol'], ['dns']);
     expect(rules.first['outboundTag'], 'dns-out');
     expect(rules[1]['port'], '53');
@@ -439,19 +448,21 @@ void main() {
       expect(dns['final'], 'remote-dns-primary');
       expect(remoteDns['type'], 'https');
       expect(remoteDns['server'], '1.1.1.1');
+      expect(remoteDns['detour'], 'proxy');
+      expect(remoteDns['tls']['server_name'], 'cloudflare-dns.com');
       expect(
         (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
         'remote-dns-primary',
       );
-      expect(proxy['domain_resolver'], 'remote-dns-primary');
-      expect(serverRule['server'], 'remote-dns-primary');
+      expect(proxy['domain_resolver'], 'local-dns');
+      expect(serverRule['server'], 'local-dns');
       expect(
         dnsServers.where((server) => server['tag'] == 'remote-dns-secondary'),
         isNotEmpty,
       );
       expect(
         dnsServers.where((server) => server['tag'] == 'local-dns'),
-        isEmpty,
+        hasLength(1),
       );
     },
   );
@@ -487,12 +498,16 @@ void main() {
     expect(dns['final'], 'remote-dns-primary');
     expect(remoteDns['type'], 'https');
     expect(remoteDns['server'], '1.1.1.1');
+    expect(remoteDns['detour'], 'proxy');
     expect(
       (config['route'] as Map<String, dynamic>)['default_domain_resolver'],
       'remote-dns-primary',
     );
-    expect(serverRule['server'], 'remote-dns-primary');
-    expect(dnsServers.where((server) => server['tag'] == 'local-dns'), isEmpty);
+    expect(serverRule['server'], 'local-dns');
+    expect(
+      dnsServers.where((server) => server['tag'] == 'local-dns'),
+      hasLength(1),
+    );
   });
 
   test('adds Smart Route direct rules for Russian apps and domains', () async {
@@ -1156,5 +1171,56 @@ void main() {
     } finally {
       await server.close(force: true);
     }
+  });
+
+  test('rejects oversized import payloads before parsing', () async {
+    final oversized = List.filled(
+      ProfileImporter.maxImportCharacters + 1,
+      'x',
+      growable: false,
+    ).join();
+
+    await expectLater(
+      ProfileImporter().importFromText(oversized),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('2 MiB'),
+        ),
+      ),
+    );
+  });
+
+  test('rejects cleartext remote subscription URLs', () async {
+    await expectLater(
+      ProfileImporter().importFromText('http://example.com/subscription'),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('HTTPS'),
+        ),
+      ),
+    );
+  });
+
+  test('rejects subscriptions with too many profiles', () async {
+    final links = List.generate(ProfileImporter.maxImportedProfiles + 1, (i) {
+      final suffix = i.toRadixString(16).padLeft(12, '0');
+      return 'vless://00000000-0000-4000-8000-$suffix@example.com:443'
+          '?security=tls&type=tcp&sni=example.com#profile-$i';
+    }).join('\n');
+
+    await expectLater(
+      ProfileImporter().importFromText(links),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('1000'),
+        ),
+      ),
+    );
   });
 }

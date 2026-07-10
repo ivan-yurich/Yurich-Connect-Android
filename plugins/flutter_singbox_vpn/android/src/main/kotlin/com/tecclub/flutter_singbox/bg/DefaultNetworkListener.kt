@@ -28,100 +28,141 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.tecclub.flutter_singbox.Application
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.ObsoleteCoroutinesApi
-import kotlinx.coroutines.channels.actor
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 
 object DefaultNetworkListener {
     private sealed class NetworkMessage {
-        class Start(val key: Any, val listener: (Network?) -> Unit) : NetworkMessage()
+        class Start(val key: Any, val listener: (Network?) -> Unit) : NetworkMessage() {
+            val response = CompletableDeferred<Unit>()
+        }
+
         class Get : NetworkMessage() {
             val response = CompletableDeferred<Network>()
         }
 
-        class Stop(val key: Any) : NetworkMessage()
+        class Stop(val key: Any) : NetworkMessage() {
+            val response = CompletableDeferred<Unit>()
+        }
 
         class Put(val network: Network) : NetworkMessage()
         class Update(val network: Network) : NetworkMessage()
         class Lost(val network: Network) : NetworkMessage()
     }
 
-    @OptIn(DelicateCoroutinesApi::class, ObsoleteCoroutinesApi::class)
-    private val networkActor = GlobalScope.actor<NetworkMessage>(Dispatchers.Unconfined) {
+    private const val TAG = "DefaultNetworkListener"
+    private val listenerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val networkMessages = Channel<NetworkMessage>(Channel.UNLIMITED)
+
+    init {
+        listenerScope.launch {
+            consumeNetworkMessages()
+        }
+    }
+
+    private suspend fun consumeNetworkMessages() {
         val listeners = mutableMapOf<Any, (Network?) -> Unit>()
         var network: Network? = null
         val pendingRequests = arrayListOf<NetworkMessage.Get>()
-        for (message in channel) when (message) {
-            is NetworkMessage.Start -> {
-                if (listeners.isEmpty()) register()
-                listeners[message.key] = message.listener
-                if (network != null) message.listener(network)
-            }
+        for (message in networkMessages) {
+            try {
+                when (message) {
+                    is NetworkMessage.Start -> {
+                        if (listeners.isEmpty()) {
+                            register()
+                            if (fallback && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                network = Application.connectivity.activeNetwork
+                            }
+                        }
+                        listeners[message.key] = message.listener
+                        network?.let { notifyListener(message.listener, it) }
+                        message.response.complete(Unit)
+                    }
 
-            is NetworkMessage.Get -> {
-                check(listeners.isNotEmpty()) { "Getting network without any listeners is not supported" }
-                if (network == null) pendingRequests += message else message.response.complete(
-                    network
-                )
-            }
+                    is NetworkMessage.Get -> {
+                        check(listeners.isNotEmpty()) {
+                            "Getting network without any listeners is not supported"
+                        }
+                        if (network == null) {
+                            pendingRequests += message
+                        } else {
+                            message.response.complete(network)
+                        }
+                    }
 
-            is NetworkMessage.Stop -> if (listeners.isNotEmpty() && // was not empty
-                listeners.remove(message.key) != null && listeners.isEmpty()
-            ) {
-                network = null
-                unregister()
-            }
+                    is NetworkMessage.Stop -> {
+                        if (listeners.remove(message.key) != null && listeners.isEmpty()) {
+                            network = null
+                            unregister()
+                            val error = IllegalStateException("Default network listener stopped")
+                            pendingRequests.forEach { it.response.completeExceptionally(error) }
+                            pendingRequests.clear()
+                        }
+                        message.response.complete(Unit)
+                    }
 
-            is NetworkMessage.Put -> {
-                network = message.network
-                pendingRequests.forEach { it.response.complete(message.network) }
-                pendingRequests.clear()
-                listeners.values.forEach { it(network) }
-            }
+                    is NetworkMessage.Put -> {
+                        network = message.network
+                        pendingRequests.forEach { it.response.complete(message.network) }
+                        pendingRequests.clear()
+                        listeners.values.forEach { notifyListener(it, network) }
+                    }
 
-            is NetworkMessage.Update -> if (network == message.network) listeners.values.forEach {
-                it(
-                    network
-                )
-            }
+                    is NetworkMessage.Update -> if (network == message.network) {
+                        listeners.values.forEach { notifyListener(it, network) }
+                    }
 
-            is NetworkMessage.Lost -> if (network == message.network) {
-                network = null
-                listeners.values.forEach { it(null) }
+                    is NetworkMessage.Lost -> if (network == message.network) {
+                        network = null
+                        listeners.values.forEach { notifyListener(it, null) }
+                    }
+                }
+            } catch (error: Exception) {
+                when (message) {
+                    is NetworkMessage.Start -> message.response.completeExceptionally(error)
+                    is NetworkMessage.Get -> message.response.completeExceptionally(error)
+                    is NetworkMessage.Stop -> message.response.completeExceptionally(error)
+                    else -> Log.e(TAG, "Network event processing failed", error)
+                }
             }
         }
     }
 
-    suspend fun start(key: Any, listener: (Network?) -> Unit) = networkActor.send(
-        NetworkMessage.Start(
-            key,
-            listener
-        )
-    )
+    private fun notifyListener(listener: (Network?) -> Unit, network: Network?) {
+        runCatching { listener(network) }
+            .onFailure { Log.e(TAG, "Default network listener callback failed", it) }
+    }
+
+    suspend fun start(key: Any, listener: (Network?) -> Unit) {
+        val message = NetworkMessage.Start(key, listener)
+        networkMessages.send(message)
+        message.response.await()
+    }
 
     suspend fun get() = if (fallback) @TargetApi(23) {
         Application.connectivity.activeNetwork
             ?: error("missing default network") // failed to listen, return current if available
     } else NetworkMessage.Get().run {
-        networkActor.send(this)
+        networkMessages.send(this)
         response.await()
     }
 
-    suspend fun stop(key: Any) = networkActor.send(NetworkMessage.Stop(key))
+    suspend fun stop(key: Any) {
+        val message = NetworkMessage.Stop(key)
+        networkMessages.send(message)
+        message.response.await()
+    }
 
     // NB: this runs in ConnectivityThread, and this behavior cannot be changed until API 26
     private object Callback : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) = runBlocking {
-            networkActor.send(
-                NetworkMessage.Put(
-                    network
-                )
-            )
+        override fun onAvailable(network: Network) {
+            enqueueCallback(NetworkMessage.Put(network))
         }
 
         override fun onCapabilitiesChanged(
@@ -129,18 +170,21 @@ object DefaultNetworkListener {
             networkCapabilities: NetworkCapabilities
         ) {
             // it's a good idea to refresh capabilities
-            runBlocking { networkActor.send(NetworkMessage.Update(network)) }
+            enqueueCallback(NetworkMessage.Update(network))
         }
 
-        override fun onLost(network: Network) = runBlocking {
-            networkActor.send(
-                NetworkMessage.Lost(
-                    network
-                )
-            )
+        override fun onLost(network: Network) {
+            enqueueCallback(NetworkMessage.Lost(network))
         }
     }
 
+    private fun enqueueCallback(message: NetworkMessage) {
+        if (networkMessages.trySend(message).isFailure) {
+            Log.w(TAG, "Dropping network callback because dispatcher is unavailable")
+        }
+    }
+
+    @Volatile
     private var fallback = false
     private val request = NetworkRequest.Builder().apply {
         addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)

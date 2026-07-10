@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.108 - 2026-07-10
+
+- Added a generation-safe VPN session state machine so stale connect, stop,
+  profile-switch, and reconnect callbacks cannot override the newest command.
+- Kept profile selection responsive during VPN transitions and made rapid
+  switches latest-wins, skipping superseded profiles instead of queueing them.
+- Removed the unsupported mandatory local-proxy probe from sing-box startup,
+  eliminating false failures and the extra delayed restart after a valid TUN.
+- Removed blocking work from Android network callbacks and bounded native DNS
+  resolution to prevent startup hangs and ANRs during network changes.
+- Fixed Xray TUN, DNS bootstrap, IPv6 routing, Smart Route fallback, and XHTTP
+  startup verification through a real proxied HTTPS request.
+- Encrypted profile/subscription data and native runtime configs, with automatic
+  one-time migration from legacy plaintext preferences.
+- Hardened subscription imports with HTTPS-only remote sources, size/profile
+  limits, redirect limits, and sensitive-data redaction.
+- Split GitHub and Google Play distributions: only the GitHub APK can request
+  package installation, while the Play AAB updates exclusively through Play.
+- Added signer/package/version verification for downloaded APK updates, a VPN
+  disclosure, privacy policy, release shrinking rules, CI, and regression tests.
+
 ## 1.0.107 - 2026-07-09
 
 - Applied the complete Hysteria2 auth fix to the bundled native config parser,

@@ -32,12 +32,8 @@ class XrayRunner(
             }
         }
 
-        val configFile = File(datDir, "xray-config.json").apply {
-            writeText(configJson, StandardCharsets.UTF_8)
-        }
         bridge.ensureInitialized(service.applicationContext)
-        val testRequest = bridge.newRunRequest(datDir.absolutePath, configFile.absolutePath)
-        val testResponse = bridge.testXray(testRequest)
+        val testResponse = validateConfig(datDir, configJson)
         if (looksFailed(testResponse)) {
             throw IllegalStateException("Xray config validation failed: $testResponse")
         }
@@ -55,6 +51,27 @@ class XrayRunner(
         started = true
         Log.i(TAG, "Xray started: ${redact(response)}")
         response
+    }
+
+    private fun validateConfig(datDir: File, configJson: String): String {
+        val validationDir = File(service.cacheDir, "xray-validation").apply {
+            if (!exists() && !mkdirs()) {
+                error("Unable to create Xray validation directory: $absolutePath")
+            }
+            listFiles()?.forEach { stale ->
+                runCatching { stale.delete() }
+            }
+        }
+        val configFile = File.createTempFile("config-", ".json", validationDir)
+        return try {
+            configFile.writeText(configJson, StandardCharsets.UTF_8)
+            val request = bridge.newRunRequest(datDir.absolutePath, configFile.absolutePath)
+            bridge.testXray(request)
+        } finally {
+            if (!configFile.delete()) {
+                Log.w(TAG, "Unable to remove temporary Xray validation config")
+            }
+        }
     }
 
     fun stop() = synchronized(runnerLock) {

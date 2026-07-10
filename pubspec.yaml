@@ -14,7 +14,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
 # Read more about iOS versioning at
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
-version: 1.0.107+22107
+version: 1.0.108+22108
 
 environment:
   sdk: ^3.11.5
@@ -35,10 +35,11 @@ dependencies:
   flutter_singbox_vpn:
     path: plugins/flutter_singbox_vpn
   mobile_scanner: ^7.2.0
+  flutter_secure_storage: ^10.3.1
   shared_preferences: ^2.5.5
   qr_flutter: ^4.1.0
   url_launcher: ^6.3.2
-  package_info_plus: ^10.1.0
+  package_info_plus: ^10.2.0
 
 dev_dependencies:
   flutter_test:

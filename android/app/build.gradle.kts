@@ -13,6 +13,9 @@ val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
+val hasReleaseSigning = keystorePropertiesFile.exists() &&
+    listOf("keyAlias", "keyPassword", "storeFile", "storePassword")
+        .all { keystoreProperties[it]?.toString()?.isNotBlank() == true }
 
 android {
     namespace = "online.dnsai.ivanvpn"
@@ -30,7 +33,7 @@ android {
 
     defaultConfig {
         applicationId = "online.dnsai.ivanvpn"
-        minSdk = flutter.minSdkVersion
+        minSdk = maxOf(23, flutter.minSdkVersion)
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -48,8 +51,26 @@ android {
         disable += "PropertyEscape"
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("github") {
+            dimension = "distribution"
+            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"github\"")
+        }
+        create("play") {
+            dimension = "distribution"
+            // Keep Play builds above Flutter's per-ABI APK version-code offsets.
+            versionCode = flutter.versionCode + 10000
+            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"play\"")
+        }
+    }
+
     signingConfigs {
-        create("release") {
+        if (hasReleaseSigning) create("release") {
             keyAlias = keystoreProperties["keyAlias"] as String
             keyPassword = keystoreProperties["keyPassword"] as String
             storeFile = file(keystoreProperties["storeFile"] as String)
@@ -59,7 +80,13 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

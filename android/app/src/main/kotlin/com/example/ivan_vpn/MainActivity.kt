@@ -26,6 +26,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -73,6 +74,7 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "getSupportedAbis" -> result.success(Build.SUPPORTED_ABIS.toList())
+                "getDistributionChannel" -> result.success(BuildConfig.DISTRIBUTION_CHANNEL)
                 "inspectApk" -> inspectApk(call.argument<String>("path"), result)
                 "installApk" -> installApk(call.argument<String>("path"), result)
                 "openInstallSettings" -> {
@@ -130,10 +132,19 @@ class MainActivity : FlutterActivity() {
         try {
             val packageInfo = getArchivePackageInfo(apkFile)
                 ?: throw IllegalStateException("Android cannot parse update APK")
+            val archiveDigests = signingCertificateDigests(packageInfo)
+            val installedDigests = currentPackageInfoWithSignatures()
+                ?.let(::signingCertificateDigests)
+                .orEmpty()
             return mapOf(
                 "packageName" to (packageInfo.packageName ?: ""),
                 "versionName" to (packageInfo.versionName ?: ""),
                 "versionCode" to packageInfo.versionCodeCompat(),
+                "signingCertificateSha256" to archiveDigests.sorted(),
+                "signatureMatchesInstalled" to
+                    (archiveDigests.isNotEmpty() &&
+                        installedDigests.isNotEmpty() &&
+                        archiveDigests.any(installedDigests::contains)),
             )
         } catch (error: Exception) {
             throw NativeMethodFailure(
@@ -145,15 +156,21 @@ class MainActivity : FlutterActivity() {
 
     private fun getInstalledPackages(): List<String> {
         return try {
-            val apps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                packageManager.getInstalledApplications(
-                    PackageManager.ApplicationInfoFlags.of(0L),
+            val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
+            val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.queryIntentActivities(
+                    launcherIntent,
+                    PackageManager.ResolveInfoFlags.of(0L),
                 )
             } else {
                 @Suppress("DEPRECATION")
-                packageManager.getInstalledApplications(0)
+                packageManager.queryIntentActivities(launcherIntent, 0)
             }
-            apps.map { it.packageName }.distinct().sorted()
+            (activities.mapNotNull { it.activityInfo?.packageName } + packageName)
+                .distinct()
+                .sorted()
         } catch (error: Exception) {
             Log.w(TAG, "Failed to list installed packages", error)
             emptyList()
@@ -424,6 +441,7 @@ class MainActivity : FlutterActivity() {
                 "Update package mismatch: expected $packageName, got $archivePackageName",
             )
         }
+        validateUpdateSignature(packageInfo)
         val currentVersionCode = currentVersionCode()
         val updateVersionCode = packageInfo.versionCodeCompat()
         if (currentVersionCode > 0L && updateVersionCode <= currentVersionCode) {
@@ -438,12 +456,78 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             packageManager.getPackageArchiveInfo(
                 file.absolutePath,
-                PackageManager.PackageInfoFlags.of(0),
+                PackageManager.PackageInfoFlags.of(
+                    PackageManager.GET_SIGNING_CERTIFICATES.toLong(),
+                ),
             )
         } else {
             @Suppress("DEPRECATION")
-            packageManager.getPackageArchiveInfo(file.absolutePath, 0)
+            packageManager.getPackageArchiveInfo(
+                file.absolutePath,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    PackageManager.GET_SIGNING_CERTIFICATES
+                } else {
+                    PackageManager.GET_SIGNATURES
+                },
+            )
         }
+
+    private fun validateUpdateSignature(updateInfo: android.content.pm.PackageInfo) {
+        val installedInfo = currentPackageInfoWithSignatures()
+            ?: throw IllegalStateException("Unable to read installed signing certificate")
+        val installedDigests = signingCertificateDigests(installedInfo)
+        val updateDigests = signingCertificateDigests(updateInfo)
+        if (installedDigests.isEmpty() || updateDigests.isEmpty()) {
+            throw IllegalStateException("Update signing certificate is missing")
+        }
+        if (updateDigests.none(installedDigests::contains)) {
+            throw IllegalStateException("Update signing certificate does not match installed app")
+        }
+    }
+
+    private fun currentPackageInfoWithSignatures(): android.content.pm.PackageInfo? =
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(
+                        PackageManager.GET_SIGNING_CERTIFICATES.toLong(),
+                    ),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(
+                    packageName,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        PackageManager.GET_SIGNING_CERTIFICATES
+                    } else {
+                        PackageManager.GET_SIGNATURES
+                    },
+                )
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "Unable to inspect installed signing certificate", error)
+            null
+        }
+
+    @Suppress("DEPRECATION")
+    private fun signingCertificateDigests(info: android.content.pm.PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = info.signingInfo ?: return emptySet()
+            if (signingInfo.hasMultipleSigners()) {
+                signingInfo.apkContentsSigners
+            } else {
+                signingInfo.signingCertificateHistory
+            }
+        } else {
+            info.signatures
+        }
+        return signatures.orEmpty().mapTo(linkedSetOf()) { signature ->
+            MessageDigest.getInstance("SHA-256")
+                .digest(signature.toByteArray())
+                .joinToString("") { byte -> "%02x".format(byte) }
+        }
+    }
 
     private fun android.content.pm.PackageInfo.versionCodeCompat(): Long =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -505,44 +589,21 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun isIgnoringBatteryOptimizations(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return true
-        }
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         return powerManager.isIgnoringBatteryOptimizations(packageName)
     }
 
     private fun requestIgnoreBatteryOptimizations() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            isIgnoringBatteryOptimizations()
-        ) {
+        if (isIgnoringBatteryOptimizations()) {
             return
         }
-
-        val requestIntent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-            data = Uri.parse("package:$packageName")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        try {
-            startActivity(requestIntent)
-        } catch (error: ActivityNotFoundException) {
-            openBatteryOptimizationSettings()
-        } catch (error: SecurityException) {
-            Log.w(TAG, "Battery optimization exemption request rejected", error)
-            openBatteryOptimizationSettings()
-        }
+        openBatteryOptimizationSettings()
     }
 
     private fun openBatteryOptimizationSettings() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-        } else {
-            val intent = Intent(Settings.ACTION_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-        }
+        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
     }
 
     private fun pendingIntentFlags(): Int =
@@ -613,8 +674,7 @@ class MainActivity : FlutterActivity() {
         disarmFirstFrameWatchdog()
     }
 
-    private fun isActivityDestroyedCompat(): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed
+    private fun isActivityDestroyedCompat(): Boolean = isDestroyed
 
     private fun executeIo(result: MethodChannel.Result, task: () -> Unit) {
         try {

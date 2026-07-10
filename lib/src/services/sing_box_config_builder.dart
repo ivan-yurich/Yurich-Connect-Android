@@ -15,6 +15,8 @@ class SingBoxConfigBuilder {
   static const localMixedProxyPort = 20808;
   static const _remoteDnsTag = 'remote-dns-primary';
   static const _localDnsTag = 'local-dns';
+  static const _tunIpv4Address = '172.19.0.1/30';
+  static const _tunIpv6Address = 'fdfe:dcba:9876::1/126';
 
   String build(
     VpnProfile profile, {
@@ -47,11 +49,7 @@ class SingBoxConfigBuilder {
     proxyOutbound['tag'] = 'proxy';
     final useRemoteDns = _usesRemoteDns(profile, dnsProtectionMode);
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
-    _applyDialStability(
-      profile: profile,
-      proxyOutbound: proxyOutbound,
-      useRemoteDns: useRemoteDns,
-    );
+    _applyDialStability(profile: profile, proxyOutbound: proxyOutbound);
     final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
 
     final config = <String, dynamic>{
@@ -88,8 +86,7 @@ class SingBoxConfigBuilder {
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
-        'default_domain_resolver':
-            useRemoteDns ? _remoteDnsTag : _localDnsTag,
+        'default_domain_resolver': useRemoteDns ? _remoteDnsTag : _localDnsTag,
         'auto_detect_interface': true,
         'final': 'proxy',
       },
@@ -105,7 +102,7 @@ class SingBoxConfigBuilder {
     final inbound = <String, dynamic>{
       'type': 'tun',
       'tag': 'tun-in',
-      'address': ['172.19.0.1/30'],
+      'address': [_tunIpv4Address, _tunIpv6Address],
       'mtu': 1380,
       'auto_route': true,
       'strict_route': true,
@@ -155,6 +152,8 @@ class SingBoxConfigBuilder {
         'server': '1.1.1.1',
         'server_port': 443,
         'path': '/dns-query',
+        'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
+        'detour': 'proxy',
       },
       {
         'type': 'https',
@@ -162,13 +161,13 @@ class SingBoxConfigBuilder {
         'server': '8.8.8.8',
         'server_port': 443,
         'path': '/dns-query',
+        'tls': {'enabled': true, 'server_name': 'dns.google'},
+        'detour': 'proxy',
       },
     ];
     final servers = <Map<String, dynamic>>[
-      if (useRemoteDns)
-        ...remoteDnsServers
-      else
-        {'type': 'local', 'tag': 'local-dns'},
+      {'type': 'local', 'tag': _localDnsTag},
+      if (useRemoteDns) ...remoteDnsServers,
       {
         'type': 'fakeip',
         'tag': 'fakeip',
@@ -180,11 +179,10 @@ class SingBoxConfigBuilder {
     final rules = <Map<String, dynamic>>[];
     final server = profile.server?.trim();
     if (server != null && server.isNotEmpty && !_isIpLiteral(server)) {
-      final serverResolverTag = useRemoteDns ? _remoteDnsTag : _localDnsTag;
       rules.add({
         'domain': [server],
         'action': 'route',
-        'server': serverResolverTag,
+        'server': _localDnsTag,
       });
     }
     rules.add({
@@ -240,15 +238,11 @@ class SingBoxConfigBuilder {
   void _applyDialStability({
     required VpnProfile profile,
     required Map<String, dynamic> proxyOutbound,
-    required bool useRemoteDns,
   }) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
-    proxyOutbound.putIfAbsent(
-      'domain_resolver',
-      () => useRemoteDns ? _remoteDnsTag : _localDnsTag,
-    );
+    proxyOutbound.putIfAbsent('domain_resolver', () => _localDnsTag);
     proxyOutbound.putIfAbsent('domain_strategy', () => 'ipv4_only');
     proxyOutbound.putIfAbsent('network_strategy', () => 'fallback');
     proxyOutbound.putIfAbsent(

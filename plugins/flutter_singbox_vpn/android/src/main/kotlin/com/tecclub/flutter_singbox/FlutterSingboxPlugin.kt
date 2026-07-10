@@ -63,7 +63,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Compatibility facade for older plugin code paths.
@@ -181,6 +184,11 @@ class FlutterSingboxPlugin :
     // Job for stop cleanup - can be cancelled when starting new connection
     private var stopCleanupJob: kotlinx.coroutines.Job? = null
     @Volatile private var stopCleanupCompleted = false
+    private val lifecycleGeneration = AtomicLong(0L)
+    @Volatile private var pendingVpnPermissionGeneration = 0L
+    @Volatile private var activeStopGeneration = 0L
+    private val configSaveGeneration = AtomicLong(0L)
+    private val configSaveMutex = Mutex()
     private var periodicStatusJob: kotlinx.coroutines.Job? = null
     @Volatile private var serviceStatusCheckInFlight = false
     private var networkGenerationId = 0
@@ -1035,24 +1043,47 @@ class FlutterSingboxPlugin :
         manager.createNotificationChannel(channel)
     }
     
-    private var configContent: String? = null
+    @Volatile private var configContent: String? = null
     
     private fun saveConfig(config: String, result: Result) {
         android.util.Log.e("FlutterSingboxPlugin", "Saving config: ${config.length} bytes")
-        configContent = config // Store locally for immediate use when starting VPN
-        
-        coroutineScope.launch {
+        val generation = configSaveGeneration.incrementAndGet()
+        if (!SimpleConfigManager.cacheConfig(config)) {
+            result.error("CONFIG_SAVE_FAILED", "Configuration is empty", null)
+            return
+        }
+        configContent = config
+
+        coroutineScope.launch(Dispatchers.IO) {
             try {
-                val success = SimpleConfigManager.saveConfig(config)
+                var superseded = false
+                val success = configSaveMutex.withLock {
+                    if (generation != configSaveGeneration.get()) {
+                        superseded = true
+                        false
+                    } else {
+                        SimpleConfigManager.persistConfig(config)
+                    }
+                }
                 android.util.Log.e("FlutterSingboxPlugin", "Config save result: $success")
-                if (success) {
-                    result.success(true)
-                } else {
-                    result.error("CONFIG_SAVE_FAILED", "Failed to save configuration", null)
+                withContext(Dispatchers.Main) {
+                    if (superseded || generation != configSaveGeneration.get()) {
+                        result.error(
+                            "CONFIG_SAVE_SUPERSEDED",
+                            "A newer runtime configuration replaced this save",
+                            null,
+                        )
+                    } else if (success) {
+                        result.success(true)
+                    } else {
+                        result.error("CONFIG_SAVE_FAILED", "Failed to save configuration", null)
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.e("FlutterSingboxPlugin", "Error saving config: ${e.message}", e)
-                result.error("CONFIG_SAVE_ERROR", e.message, null)
+                withContext(Dispatchers.Main) {
+                    result.error("CONFIG_SAVE_ERROR", e.message, null)
+                }
             }
         }
     }
@@ -1070,6 +1101,7 @@ class FlutterSingboxPlugin :
     
     private fun startVPN(result: Result) {
         android.util.Log.e("FlutterSingboxPlugin", "Starting VPN...")
+        val generation = lifecycleGeneration.incrementAndGet()
         // Reset shutdown flag when starting a new connection
         isShuttingDown = false
         stopCleanupCompleted = false
@@ -1078,10 +1110,11 @@ class FlutterSingboxPlugin :
             if (intent != null) {
                 android.util.Log.e("FlutterSingboxPlugin", "VPN permission required, showing dialog")
                 pendingVpnPermissionResult = result
+                pendingVpnPermissionGeneration = generation
                 it.startActivityForResult(intent, VPN_REQUEST_CODE)
             } else {
                 android.util.Log.e("FlutterSingboxPlugin", "VPN permission already granted, starting service")
-                startVPNService(result)
+                startVPNService(result, generation)
             }
         } ?: run {
             android.util.Log.e("FlutterSingboxPlugin", "Activity unavailable, cannot start VPN")
@@ -1089,8 +1122,12 @@ class FlutterSingboxPlugin :
         }
     }
     
-    private fun startVPNService(result: Result) {
+    private fun startVPNService(result: Result, generation: Long) {
         android.util.Log.e("FlutterSingboxPlugin", "Starting VPN Service...")
+        if (generation != lifecycleGeneration.get()) {
+            result.error("START_CANCELLED", "A newer VPN lifecycle operation replaced this start", null)
+            return
+        }
         
         // Cancel any pending stop cleanup job from previous stopVPN call
         stopCleanupJob?.cancel()
@@ -1130,6 +1167,10 @@ class FlutterSingboxPlugin :
             coroutineScope.launch {
                 android.util.Log.e("FlutterSingboxPlugin", "Waiting for service to initialize...")
                 kotlinx.coroutines.delay(1500) // Wait 1.5 seconds for service to start
+                if (generation != lifecycleGeneration.get() || isShuttingDown) {
+                    android.util.Log.e("FlutterSingboxPlugin", "Skipping stale delayed service connection")
+                    return@launch
+                }
                 
                 // Check if there was a startup error
                 if (hasStartupError) {
@@ -1144,7 +1185,9 @@ class FlutterSingboxPlugin :
                 
                 // Reset starting flag after connection attempt
                 kotlinx.coroutines.delay(500) // Additional delay for connection to stabilize
-                isStarting = false
+                if (generation == lifecycleGeneration.get()) {
+                    isStarting = false
+                }
                 android.util.Log.e("FlutterSingboxPlugin", "Starting phase complete")
             }
             
@@ -1152,9 +1195,11 @@ class FlutterSingboxPlugin :
             result.success(true)
         } catch (e: Exception) {
             android.util.Log.e("FlutterSingboxPlugin", "Error starting VPN service: ${e.message}", e)
-            isStarting = false
-            SimpleConfigManager.setStartedByUser(false)
-            _vpnStatus.value = Status.Stopped
+            if (generation == lifecycleGeneration.get()) {
+                isStarting = false
+                SimpleConfigManager.setStartedByUser(false)
+                _vpnStatus.value = Status.Stopped
+            }
             result.error("START_VPN_ERROR", e.message, null)
         }
     }
@@ -1173,7 +1218,9 @@ class FlutterSingboxPlugin :
              }
              
             // Load config from SimpleConfigManager and set it as an extra
-            val config = SimpleConfigManager.getConfig()
+            val config = configContent
+                ?.takeIf { it.isNotBlank() && it != "{}" }
+                ?: SimpleConfigManager.getConfig()
             android.util.Log.e("FlutterSingboxPlugin", "Loaded config from SimpleConfigManager, length: ${config.length}")
 
             val isXrayRuntime = runCatching { XrayRuntimeConfig.isXray(config) }
@@ -1236,6 +1283,8 @@ class FlutterSingboxPlugin :
     private fun stopVPN(result: Result) {
         try {
             android.util.Log.e("FlutterSingboxPlugin", "Stopping VPN")
+            val generation = lifecycleGeneration.incrementAndGet()
+            activeStopGeneration = generation
             
             // Set shutting down flag and clear starting flag
             isShuttingDown = true
@@ -1282,7 +1331,7 @@ class FlutterSingboxPlugin :
                         }
 
                         // Check if we're still shutting down (might have been cancelled by startVPN)
-                        if (!isShuttingDown) {
+                        if (!isShuttingDown || generation != lifecycleGeneration.get()) {
                             android.util.Log.e("FlutterSingboxPlugin", "Stop cleanup cancelled")
                             return@launch
                         }
@@ -1325,7 +1374,11 @@ class FlutterSingboxPlugin :
                         }
                     }
 
-                    completeStopCleanup("cleanup-job running=$running", cancelJob = false)
+                    completeStopCleanup(
+                        "cleanup-job running=$running",
+                        generation = generation,
+                        cancelJob = false,
+                    )
                 } catch (e: CancellationException) {
                     android.util.Log.e(
                         "FlutterSingboxPlugin",
@@ -1354,8 +1407,16 @@ class FlutterSingboxPlugin :
         }
     }
 
-    private fun completeStopCleanup(reason: String, cancelJob: Boolean = true) {
-        if (stopCleanupCompleted) {
+    private fun completeStopCleanup(
+        reason: String,
+        generation: Long = activeStopGeneration,
+        cancelJob: Boolean = true,
+    ) {
+        if (stopCleanupCompleted ||
+            generation == 0L ||
+            generation != activeStopGeneration ||
+            generation != lifecycleGeneration.get()
+        ) {
             return
         }
         stopCleanupCompleted = true
@@ -1469,7 +1530,16 @@ class FlutterSingboxPlugin :
                     android.util.Log.e("FlutterSingboxPlugin", "Loaded config from SimpleConfigManager: ${configContent.length} bytes")
                     
                     // Start VPN service with the config
-                    startVPNService(it)
+                    val generation = pendingVpnPermissionGeneration
+                    if (generation == lifecycleGeneration.get()) {
+                        startVPNService(it, generation)
+                    } else {
+                        it.error(
+                            "START_CANCELLED",
+                            "VPN permission completed for a stale start request",
+                            null,
+                        )
+                    }
                 } ?: run {
                     android.util.Log.e("FlutterSingboxPlugin", "WARNING: No pending result found after permission granted")
                 }
@@ -1478,6 +1548,7 @@ class FlutterSingboxPlugin :
                 pendingVpnPermissionResult?.error("VPN_PERMISSION_DENIED", "VPN permission denied", null)
             }
             pendingVpnPermissionResult = null
+            pendingVpnPermissionGeneration = 0L
             return true
         }
         return false

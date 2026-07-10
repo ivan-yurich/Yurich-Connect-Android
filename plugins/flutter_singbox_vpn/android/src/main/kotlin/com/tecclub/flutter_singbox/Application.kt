@@ -12,8 +12,9 @@ import com.tecclub.flutter_singbox.config.SimpleConfigManager
 import go.Seq
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -29,6 +30,7 @@ class Application {
         @Volatile
         private var seqContextSet = false
         private val libboxLock = Any()
+        private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         
         // Quick access to common system services
         val powerManager: PowerManager by lazy { 
@@ -95,8 +97,7 @@ class Application {
                 }
             }
             if (shouldInitializeLibbox) {
-                @Suppress("OPT_IN_USAGE")
-                GlobalScope.launch(Dispatchers.IO) {
+                applicationScope.launch {
                     try {
                         initializeLibbox(application)
                         synchronized(libboxLock) {

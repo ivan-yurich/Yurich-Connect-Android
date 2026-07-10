@@ -518,6 +518,23 @@ class _Strings {
     _ => 'Установлена версия: $version',
   };
 
+  String get playUpdateDescription => switch (this) {
+    _Strings.en =>
+      'This build receives signed updates only through Google Play. The app does not download or install APK files.',
+    _ =>
+      'Эта сборка получает подписанные обновления только через Google Play. Приложение не скачивает и не устанавливает APK-файлы.',
+  };
+
+  String get playUpdateChannel => switch (this) {
+    _Strings.en => 'Update channel: Google Play',
+    _ => 'Канал обновлений: Google Play',
+  };
+
+  String get openGooglePlay => switch (this) {
+    _Strings.en => 'Open Google Play',
+    _ => 'Открыть Google Play',
+  };
+
   String updateAvailable(String version) => switch (this) {
     _Strings.en => 'New version available: $version',
     _ => 'Доступна новая версия: $version',

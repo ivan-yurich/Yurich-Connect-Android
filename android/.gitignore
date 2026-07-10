@@ -12,3 +12,8 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# The Gradle wrapper is required for reproducible clean-clone and CI builds.
+!gradle/wrapper/gradle-wrapper.jar
+!/gradlew
+!/gradlew.bat

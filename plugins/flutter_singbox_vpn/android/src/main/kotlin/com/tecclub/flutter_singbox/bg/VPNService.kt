@@ -15,9 +15,6 @@ import com.tecclub.flutter_singbox.ktx.toIpPrefix
 import com.tecclub.flutter_singbox.ktx.toList
 import com.tecclub.flutter_singbox.database.Settings
 import io.nekohasekai.libbox.Libbox
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import java.io.FileDescriptor
 
 class VPNService : VpnService(), PlatformInterfaceWrapper {
@@ -41,9 +38,10 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             android.util.Log.e("VPNService", "Config content received: ${configContent?.length ?: 0} bytes")
             
             if (configContent != null) {
-                // Save to SimpleConfigManager for use in BoxService
-                android.util.Log.e("VPNService", "Saving received config to SimpleConfigManager")
-                com.tecclub.flutter_singbox.config.SimpleConfigManager.saveConfig(configContent)
+                // The app process already persisted it. Cache the exact intent payload
+                // here so BoxService never performs Keystore I/O on the service main thread.
+                android.util.Log.e("VPNService", "Caching received runtime config")
+                com.tecclub.flutter_singbox.config.SimpleConfigManager.cacheConfig(configContent)
             } else {
                 android.util.Log.e("VPNService", "WARNING: No config content received in intent")
             }
@@ -225,7 +223,9 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             .setSession("Yurich Connect Xray")
             .setMtu(1380)
             .addAddress("172.19.0.1", 30)
+            .addAddress("fdfe:dcba:9876::1", 126)
             .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
         dnsServers.take(4).forEach { builder.addDnsServer(it) }
         Log.i(TAG, "Xray TUN DNS servers: ${dnsServers.take(4).joinToString(",")}")
 

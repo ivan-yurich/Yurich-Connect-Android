@@ -3,7 +3,7 @@
 Yurich Connect is a gold/dark Android VPN client powered by sing-box. It focuses on
 simple profile import, stable reconnects, protected DNS, and clear diagnostics
 for VLESS Reality, VLESS TLS, NaiveProxy, Remnawave subscriptions, and sing-box
-JSON profiles.
+JSON profiles. XHTTP is available as an experimental Xray-core transport.
 
 Русская версия ниже.
 
@@ -23,7 +23,8 @@ published and verified by Play Protect.
   `naive+https://` links, clipboard, QR code, and sing-box JSON.
 - Android VPNService integration through the bundled sing-box plugin.
 - Persistent Android notification with connection status and traffic.
-- Protected DNS through the VPN tunnel using Cloudflare DoH and FakeDNS.
+- Protected DNS through the VPN tunnel with explicit endpoint bootstrap and
+  IPv4/IPv6 leak protection.
 - Wi-Fi and LTE compatible TUN settings with gVisor stack and strict routing.
 - Two languages: Russian and English.
 - Built-in diagnostics report with sensitive values redacted before sharing.
@@ -44,21 +45,25 @@ Install Flutter and Android SDK, then run:
 flutter pub get
 flutter analyze
 flutter test
-flutter build apk --release
+flutter build apk --release --flavor github
+flutter build appbundle --release --flavor play
 ```
 
 The release APK is created at:
 
 ```text
-build/app/outputs/apk/release/app-release.apk
+build/app/outputs/flutter-apk/app-github-release.apk
+build/app/outputs/bundle/playRelease/app-play-release.aab
 ```
 
 ## Release Checklist
 
-1. Build the APK with the release keystore outside git.
-2. Verify the APK signature.
-3. Upload the APK to GitHub Releases.
-4. Keep signing files, real VPN profiles, subscriptions, and production configs
+1. Build the GitHub APK and Play AAB with the release keystore outside git.
+2. Verify both signatures and package identity.
+3. Upload the APK to GitHub Releases and the AAB to Google Play Console.
+4. Complete the VPN service, foreground service, Data safety, and privacy policy
+   declarations described in [`PLAY_RELEASE.md`](PLAY_RELEASE.md).
+5. Keep signing files, real VPN profiles, subscriptions, and production configs
    out of git.
 
 ## Links
@@ -76,7 +81,8 @@ Yurich Connect Android — Android-клиент VPN в золотом стиле
 
 ### Возможности
 
-- VLESS Reality, VLESS TLS, NaiveProxy и sing-box JSON.
+- VLESS Reality, VLESS TLS, Hysteria2, NaiveProxy, sing-box JSON и
+  экспериментальный XHTTP через Xray-core.
 - Защищённый DNS через VPN-туннель.
 - Настройки TUN для Wi-Fi и LTE.
 - Шторка Android со статусом подключения и трафиком.
@@ -95,13 +101,15 @@ Yurich Connect Android — Android-клиент VPN в золотом стиле
 flutter pub get
 flutter analyze
 flutter test
-flutter build apk --release
+flutter build apk --release --flavor github
+flutter build appbundle --release --flavor play
 ```
 
 APK будет здесь:
 
 ```text
-build/app/outputs/apk/release/app-release.apk
+build/app/outputs/flutter-apk/app-github-release.apk
+build/app/outputs/bundle/playRelease/app-play-release.aab
 ```
 
 Windows-версия ведётся отдельно в репозитории
