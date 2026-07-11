@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -14,6 +15,8 @@ const _updaterUserAgent = 'YurichConnect-Updater';
 const _updateConnectTimeout = Duration(seconds: 30);
 const _updateMetadataTimeout = Duration(seconds: 25);
 const _updateDownloadOpenTimeout = Duration(seconds: 60);
+const _maxUpdateMetadataBytes = 1024 * 1024;
+const _maxApkDownloadBytes = 512 * 1024 * 1024;
 const _updateRetryDelays = [
   Duration(seconds: 2),
   Duration(seconds: 5),
@@ -43,11 +46,15 @@ class AppUpdateApkInfo {
     required this.packageName,
     required this.version,
     required this.buildNumber,
+    required this.signatureMatchesInstalled,
+    required this.signingCertificateSha256,
   });
 
   final String packageName;
   final String version;
   final int buildNumber;
+  final bool signatureMatchesInstalled;
+  final List<String> signingCertificateSha256;
 }
 
 class _UpdateHttpException implements Exception {
@@ -81,6 +88,15 @@ class AppUpdateDowngradeException implements Exception {
       'downloaded build $updateBuildNumber.';
 }
 
+class AppUpdateIdentityException implements Exception {
+  const AppUpdateIdentityException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class AppUpdateService {
   AppUpdateService({HttpClient? client, List<Uri>? releaseApiUris})
     : _client = client ?? HttpClient(),
@@ -109,6 +125,17 @@ class AppUpdateService {
     );
     return value?.whereType<String>().toList(growable: false) ?? const [];
   }
+
+  Future<String> distributionChannel() async {
+    if (!Platform.isAndroid) {
+      return 'play';
+    }
+    return await _channel.invokeMethod<String>('getDistributionChannel') ??
+        'play';
+  }
+
+  Future<bool> externalUpdatesEnabled() async =>
+      await distributionChannel() == 'github';
 
   Future<AppUpdateInfo?> findLatest({
     required String currentVersion,
@@ -206,6 +233,7 @@ class AppUpdateService {
     File file,
     void Function(double? progress) onProgress,
   ) async {
+    _validateRemoteUpdateUri(url);
     final request = await _client.getUrl(url);
     request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
     request.headers.set(
@@ -214,9 +242,16 @@ class AppUpdateService {
     );
     request.followRedirects = true;
     final response = await request.close().timeout(_updateDownloadOpenTimeout);
+    for (final redirect in response.redirects) {
+      _validateRemoteUpdateUri(redirect.location);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       await response.drain<void>();
       throw _UpdateHttpException(response.statusCode);
+    }
+    if (response.contentLength > _maxApkDownloadBytes) {
+      await response.drain<void>();
+      throw StateError('Update APK exceeds the 512 MiB safety limit.');
     }
 
     final sink = file.openWrite();
@@ -227,6 +262,9 @@ class AppUpdateService {
     try {
       await for (final chunk in response) {
         received += chunk.length;
+        if (received > _maxApkDownloadBytes) {
+          throw StateError('Update APK exceeds the 512 MiB safety limit.');
+        }
         sink.add(chunk);
         if (total != null && total > 0) {
           onProgress((received / total).clamp(0, 1).toDouble());
@@ -240,6 +278,19 @@ class AppUpdateService {
     onProgress(1);
 
     await _verifyApkFile(file, update.size);
+  }
+
+  void _validateRemoteUpdateUri(Uri uri) {
+    if (uri.scheme == 'https' && uri.host.isNotEmpty) {
+      return;
+    }
+    final address = InternetAddress.tryParse(uri.host);
+    final loopback =
+        uri.scheme == 'http' &&
+        (uri.host.toLowerCase() == 'localhost' || address?.isLoopback == true);
+    if (!loopback) {
+      throw StateError('Update downloads require HTTPS.');
+    }
   }
 
   Future<bool> _isCompleteDownloadedFile(File file, int? expectedSize) async {
@@ -294,19 +345,18 @@ class AppUpdateService {
       packageName: value['packageName']?.toString() ?? '',
       version: value['versionName']?.toString() ?? '',
       buildNumber: _toInt(value['versionCode']),
+      signatureMatchesInstalled: value['signatureMatchesInstalled'] == true,
+      signingCertificateSha256:
+          (value['signingCertificateSha256'] as List?)
+              ?.whereType<String>()
+              .toList(growable: false) ??
+          const [],
     );
   }
 
   Future<void> installApk(File file, {int? currentBuildNumber}) async {
     final apkInfo = await inspectApk(file);
-    if (currentBuildNumber != null &&
-        currentBuildNumber > 0 &&
-        apkInfo.buildNumber <= currentBuildNumber) {
-      throw AppUpdateDowngradeException(
-        currentBuildNumber: currentBuildNumber,
-        updateBuildNumber: apkInfo.buildNumber,
-      );
-    }
+    validateInspectedApk(apkInfo, currentBuildNumber: currentBuildNumber);
     try {
       await _channel.invokeMethod<void>('installApk', {'path': file.path});
     } on PlatformException catch (error) {
@@ -314,6 +364,31 @@ class AppUpdateService {
         throw const AppUpdatePermissionException();
       }
       rethrow;
+    }
+  }
+
+  void validateInspectedApk(
+    AppUpdateApkInfo apkInfo, {
+    int? currentBuildNumber,
+  }) {
+    if (apkInfo.packageName != 'online.dnsai.ivanvpn') {
+      throw AppUpdateIdentityException(
+        'Update package mismatch: ${apkInfo.packageName}.',
+      );
+    }
+    if (!apkInfo.signatureMatchesInstalled ||
+        apkInfo.signingCertificateSha256.isEmpty) {
+      throw const AppUpdateIdentityException(
+        'Update signing certificate does not match installed app.',
+      );
+    }
+    if (currentBuildNumber != null &&
+        currentBuildNumber > 0 &&
+        apkInfo.buildNumber <= currentBuildNumber) {
+      throw AppUpdateDowngradeException(
+        currentBuildNumber: currentBuildNumber,
+        updateBuildNumber: apkInfo.buildNumber,
+      );
     }
   }
 
@@ -375,6 +450,7 @@ class AppUpdateService {
   }
 
   Future<Map<String, dynamic>?> _fetchReleaseJson(Uri uri) async {
+    _validateRemoteUpdateUri(uri);
     Object? lastError;
     for (var attempt = 0; attempt < _updateRetryDelays.length; attempt += 1) {
       try {
@@ -383,6 +459,9 @@ class AppUpdateService {
         request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
         request.followRedirects = true;
         final response = await request.close().timeout(_updateMetadataTimeout);
+        for (final redirect in response.redirects) {
+          _validateRemoteUpdateUri(redirect.location);
+        }
         if (response.statusCode == HttpStatus.notFound) {
           await response.drain<void>();
           return null;
@@ -392,7 +471,7 @@ class AppUpdateService {
           throw _UpdateHttpException(response.statusCode);
         }
 
-        final raw = await utf8.decodeStream(response);
+        final raw = await _readLimitedMetadata(response);
         return jsonDecode(raw) as Map<String, dynamic>;
       } on Object catch (error) {
         lastError = error;
@@ -405,6 +484,23 @@ class AppUpdateService {
     }
 
     throw StateError('$lastError');
+  }
+
+  Future<String> _readLimitedMetadata(HttpClientResponse response) async {
+    if (response.contentLength > _maxUpdateMetadataBytes) {
+      await response.drain<void>();
+      throw StateError('Update metadata exceeds the 1 MiB safety limit.');
+    }
+    final bytes = BytesBuilder(copy: false);
+    var received = 0;
+    await for (final chunk in response.timeout(_updateMetadataTimeout)) {
+      received += chunk.length;
+      if (received > _maxUpdateMetadataBytes) {
+        throw StateError('Update metadata exceeds the 1 MiB safety limit.');
+      }
+      bytes.add(chunk);
+    }
+    return utf8.decode(bytes.takeBytes());
   }
 
   Future<AppUpdateInfo?> _fetchLatestGitHubReleaseViaRedirect(

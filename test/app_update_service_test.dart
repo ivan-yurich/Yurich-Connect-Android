@@ -201,4 +201,63 @@ void main() {
       throwsA(isA<StateError>()),
     );
   });
+
+  test('accepts only the installed package and signing certificate', () {
+    final service = AppUpdateService();
+    const apk = AppUpdateApkInfo(
+      packageName: 'online.dnsai.ivanvpn',
+      version: '1.0.108',
+      buildNumber: 22108,
+      signatureMatchesInstalled: true,
+      signingCertificateSha256: ['abc123'],
+    );
+
+    expect(
+      () => service.validateInspectedApk(apk, currentBuildNumber: 22107),
+      returnsNormally,
+    );
+  });
+
+  test('rejects update APK from another package or signer', () {
+    final service = AppUpdateService();
+    const wrongPackage = AppUpdateApkInfo(
+      packageName: 'example.attacker',
+      version: '9.9.9',
+      buildNumber: 99999,
+      signatureMatchesInstalled: true,
+      signingCertificateSha256: ['abc123'],
+    );
+    const wrongSigner = AppUpdateApkInfo(
+      packageName: 'online.dnsai.ivanvpn',
+      version: '1.0.108',
+      buildNumber: 22108,
+      signatureMatchesInstalled: false,
+      signingCertificateSha256: ['attacker'],
+    );
+
+    expect(
+      () => service.validateInspectedApk(wrongPackage),
+      throwsA(isA<AppUpdateIdentityException>()),
+    );
+    expect(
+      () => service.validateInspectedApk(wrongSigner),
+      throwsA(isA<AppUpdateIdentityException>()),
+    );
+  });
+
+  test('rejects update APK with a non-increasing build number', () {
+    final service = AppUpdateService();
+    const apk = AppUpdateApkInfo(
+      packageName: 'online.dnsai.ivanvpn',
+      version: '1.0.107',
+      buildNumber: 22107,
+      signatureMatchesInstalled: true,
+      signingCertificateSha256: ['abc123'],
+    );
+
+    expect(
+      () => service.validateInspectedApk(apk, currentBuildNumber: 22107),
+      throwsA(isA<AppUpdateDowngradeException>()),
+    );
+  });
 }

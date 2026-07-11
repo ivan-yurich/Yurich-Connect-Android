@@ -1,18 +1,25 @@
+import 'dart:convert';
+
 import 'package:aurum_vpn/src/models/dns_protection_mode.dart';
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/models/profile_network_stability.dart';
 import 'package:aurum_vpn/src/models/profile_stability.dart';
 import 'package:aurum_vpn/src/services/profile_store.dart';
+import 'package:aurum_vpn/src/services/secure_profile_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  late _MemorySecureProfileStorage secureStorage;
+  late ProfileStore store;
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    secureStorage = _MemorySecureProfileStorage();
+    store = ProfileStore(secureStorage: secureStorage);
   });
 
   test('remembers deleted subscription profile ids by source', () async {
-    final store = ProfileStore();
     const profile = VpnProfile(
       id: 'profile-1',
       name: 'Finland',
@@ -33,7 +40,6 @@ void main() {
   test(
     'clears deleted profile ids when subscription is imported again',
     () async {
-      final store = ProfileStore();
       const source = 'https://example.com/sub/links.txt';
       const profile = VpnProfile(
         id: 'profile-1',
@@ -56,7 +62,6 @@ void main() {
   test(
     'ignores manually deleted profiles without subscription source',
     () async {
-      final store = ProfileStore();
       const profile = VpnProfile(
         id: 'manual-profile',
         name: 'Manual',
@@ -74,8 +79,6 @@ void main() {
   );
 
   test('stores Smart Route preference', () async {
-    final store = ProfileStore();
-
     expect(await store.loadSmartRouteRuDirect(), isFalse);
 
     await store.saveSmartRouteRuDirect(true);
@@ -86,8 +89,6 @@ void main() {
   });
 
   test('stores DNS protection mode', () async {
-    final store = ProfileStore();
-
     expect(await store.loadDnsProtectionMode(), DnsProtectionMode.stable);
 
     await store.saveDnsProtectionMode(DnsProtectionMode.leakGuard);
@@ -95,8 +96,6 @@ void main() {
   });
 
   test('stores manual disconnect guard', () async {
-    final store = ProfileStore();
-
     expect(await store.loadManualDisconnectRequested(), isFalse);
 
     await store.saveManualDisconnectRequested(true);
@@ -107,7 +106,6 @@ void main() {
   });
 
   test('stores profile stability stats', () async {
-    final store = ProfileStore();
     final lastFailureAt = DateTime.utc(2026, 6, 18, 8);
 
     await store.saveProfileStabilityStats({
@@ -131,7 +129,6 @@ void main() {
   });
 
   test('stores profile network stability stats by network type', () async {
-    final store = ProfileStore();
     final lastHealthyAt = DateTime.utc(2026, 6, 30, 9);
 
     await store.saveProfileNetworkStabilityStats({
@@ -161,4 +158,62 @@ void main() {
       'health-probe:watchdog',
     );
   });
+
+  test('migrates plaintext profiles to secure storage once', () async {
+    const profile = VpnProfile(
+      id: 'secure-profile',
+      name: 'Secure',
+      kind: VpnProfileKind.vlessReality,
+      originalInput: 'vless://secret@example.com:443',
+      server: 'example.com',
+      port: 443,
+      outbound: {'type': 'vless', 'uuid': 'secret'},
+    );
+    SharedPreferences.setMockInitialValues({
+      'profiles': jsonEncode([profile.toJson()]),
+    });
+
+    final loaded = await store.loadProfiles();
+
+    expect(loaded.single.id, profile.id);
+    expect(await secureStorage.read('profiles.v1'), isNotEmpty);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.containsKey('profiles'), isFalse);
+  });
+
+  test('saves profile secrets only in secure storage', () async {
+    const profile = VpnProfile(
+      id: 'secure-profile',
+      name: 'Secure',
+      kind: VpnProfileKind.hysteria2,
+      originalInput: 'hy2://password@example.com:443',
+      server: 'example.com',
+      port: 443,
+      outbound: {'type': 'hysteria2', 'password': 'password'},
+    );
+
+    await store.saveProfiles([profile]);
+
+    final secured = await secureStorage.read('profiles.v1');
+    expect(secured, contains('password'));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.containsKey('profiles'), isFalse);
+  });
+}
+
+final class _MemorySecureProfileStorage implements SecureProfileStorage {
+  final _values = <String, String>{};
+
+  @override
+  Future<void> delete(String key) async {
+    _values.remove(key);
+  }
+
+  @override
+  Future<String?> read(String key) async => _values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    _values[key] = value;
+  }
 }

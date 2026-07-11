@@ -21,14 +21,30 @@ void main() {
 
     final inbound = (xray['inbounds'] as List).first as Map<String, dynamic>;
     expect(inbound['protocol'], 'tun');
-    expect(inbound['settings']['address'], '172.19.0.1/30');
+    expect(inbound['settings']['address'], isNull);
+    expect(inbound['settings']['gateway'], [
+      '172.19.0.1/30',
+      'fdfe:dcba:9876::1/126',
+    ]);
     expect(inbound['settings']['mtu'], 1380);
     expect(inbound['settings']['dns'], ['1.1.1.1', '8.8.8.8']);
+    final healthInbound = (xray['inbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .firstWhere((item) => item['tag'] == 'health-http-in');
+    expect(healthInbound['listen'], '127.0.0.1');
+    expect(healthInbound['port'], 20808);
+    expect(healthInbound['protocol'], 'http');
     expect(xray['dns']['queryStrategy'], 'UseIPv4');
     expect(
       ((xray['dns']['servers'] as List).first
           as Map<String, dynamic>)['address'],
-      '1.1.1.1',
+      'localhost',
+    );
+    expect(
+      (xray['dns']['servers'] as List)
+          .skip(1)
+          .map((server) => (server as Map<String, dynamic>)['address']),
+      ['1.1.1.1', '8.8.8.8'],
     );
 
     final proxy = (xray['outbounds'] as List).first as Map<String, dynamic>;
@@ -74,7 +90,12 @@ void main() {
       'outboundTag': 'dns-out',
     });
     expect(rules[1], {'type': 'field', 'port': '53', 'outboundTag': 'dns-out'});
-    expect(routing['final'], 'proxy');
+    expect(routing['final'], isNull);
+    expect(rules.last, {
+      'type': 'field',
+      'network': 'tcp,udp',
+      'outboundTag': 'proxy',
+    });
   });
 
   test('builds wrapped Xray VLESS Reality TCP config', () async {
@@ -99,7 +120,8 @@ void main() {
     final vnext = proxy['settings']['vnext'] as List;
     final users = vnext.first['users'] as List;
     expect(users.first['flow'], 'xtls-rprx-vision');
-    expect(xray['routing']['final'], 'proxy');
+    expect(xray['routing']['final'], isNull);
+    expect(xray['routing']['rules'].last['outboundTag'], 'proxy');
   });
 
   test('builds smart-route rules when enabled for Xray', () async {
@@ -107,40 +129,38 @@ void main() {
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&sni=www.microsoft.com&flow=xtls-rprx-vision&fp=chrome&pbk=abc123&sid=01#REALITY';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
-    final wrapper = jsonDecode(
-      XrayConfigBuilder().build(
-        profile,
-        smartRouteRuDirect: true,
-      ),
-    ) as Map<String, dynamic>;
+    final wrapper =
+        jsonDecode(XrayConfigBuilder().build(profile, smartRouteRuDirect: true))
+            as Map<String, dynamic>;
     final xray = wrapper['xray'] as Map<String, dynamic>;
     final rules = xray['routing']['rules'] as List;
 
     final hasProxyDomainRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'proxy' &&
-          (rule['domain'] as List?)?.contains('chat.openai.com') == true,
+          (rule['domain'] as List?)?.contains('full:chat.openai.com') == true,
     );
     final hasProxySuffixRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'proxy' &&
-          (rule['domain_suffix'] as List?)?.contains('google.com') == true,
+          (rule['domain'] as List?)?.contains('domain:google.com') == true,
     );
     final hasDirectDomainRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'direct' &&
-          (rule['domain'] as List?)?.contains('vk.com') == true,
+          (rule['domain'] as List?)?.contains('full:vk.com') == true,
     );
     final hasDirectSuffixRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'direct' &&
-          (rule['domain_suffix'] as List?)?.contains('ru') == true,
+          (rule['domain'] as List?)?.contains('domain:ru') == true,
     );
 
     expect(hasProxyDomainRule, isTrue);
     expect(hasProxySuffixRule, isTrue);
     expect(hasDirectDomainRule, isTrue);
     expect(hasDirectSuffixRule, isTrue);
+    expect(rules.any((rule) => rule.containsKey('domain_suffix')), isFalse);
   });
 
   test('builds leak-guard DNS settings for Xray', () async {
@@ -148,20 +168,35 @@ void main() {
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&sni=www.microsoft.com&flow=xtls-rprx-vision&fp=chrome&pbk=abc123&sid=01#REALITY';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
-    final wrapper = jsonDecode(
-      XrayConfigBuilder().build(
-        profile,
-        dnsProtectionMode: DnsProtectionMode.leakGuard,
-      ),
-    ) as Map<String, dynamic>;
+    final wrapper =
+        jsonDecode(
+              XrayConfigBuilder().build(
+                profile,
+                dnsProtectionMode: DnsProtectionMode.leakGuard,
+              ),
+            )
+            as Map<String, dynamic>;
     final xray = wrapper['xray'] as Map<String, dynamic>;
     final dnsServers = xray['dns']['servers'] as List;
-    expect(dnsServers.length, 2);
+    expect(dnsServers.length, 3);
+    expect(dnsServers.first['address'], 'localhost');
+    expect(dnsServers.first['domains'], ['full:example.com']);
+    expect(dnsServers.first['finalQuery'], isTrue);
 
-    for (final server in dnsServers) {
+    for (final server in dnsServers.skip(1)) {
       final s = server as Map<String, dynamic>;
       expect('${s['address']}', startsWith('https://'));
       expect(s['queryStrategy'], 'UseIPv4');
     }
+    final rules = xray['routing']['rules'] as List;
+    expect(
+      rules.whereType<Map>().any(
+        (rule) =>
+            rule['type'] == 'field' &&
+            rule['outboundTag'] == 'proxy' &&
+            (rule['inboundTag'] as List?)?.contains('dns-generated') == true,
+      ),
+      isTrue,
+    );
   });
 }

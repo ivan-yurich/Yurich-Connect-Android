@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../models/vpn_profile.dart';
 import 'sing_box_config_builder.dart';
@@ -22,6 +23,12 @@ class _FetchedSubscription {
 }
 
 class ProfileImporter {
+  static const maxImportCharacters = 2 * 1024 * 1024;
+  static const maxSubscriptionBytes = 4 * 1024 * 1024;
+  static const maxImportedProfiles = 1000;
+  static const _maxRedirects = 5;
+  static const _responseTimeout = Duration(seconds: 20);
+
   static final _linkPattern = RegExp(
     "(?:vless://|naive\\+https://|naive://|hy2://|hysteria2://|hysteria://|pingtunnel://)[^\\s<>\"']+",
     caseSensitive: false,
@@ -32,9 +39,11 @@ class ProfileImporter {
     if (text.isEmpty) {
       throw const ProfileImportException('Вставь ссылку, подписку или JSON.');
     }
+    _ensurePayloadSize(text);
 
     final uri = Uri.tryParse(text);
     if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
+      _validateSubscriptionUri(uri);
       final fetched = await _fetchSubscription(uri);
       return _parsePayload(
         fetched.body,
@@ -141,25 +150,83 @@ class ProfileImporter {
           'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
     }
     try {
-      final request = await client.getUrl(uri);
-      request.headers.set(HttpHeaders.userAgentHeader, userAgent);
-      request.headers.set(
-        HttpHeaders.acceptHeader,
-        'text/plain, application/json, */*',
-      );
-      request.followRedirects = true;
+      var currentUri = uri;
+      for (var redirectCount = 0; ; redirectCount += 1) {
+        _validateSubscriptionUri(currentUri);
+        final request = await client.getUrl(currentUri);
+        request.headers.set(HttpHeaders.userAgentHeader, userAgent);
+        request.headers.set(
+          HttpHeaders.acceptHeader,
+          'text/plain, application/json, */*',
+        );
+        request.followRedirects = false;
 
-      final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw ProfileImportException('HTTP ${response.statusCode}: $body');
+        final response = await request.close().timeout(_responseTimeout);
+        if (_isRedirectStatus(response.statusCode)) {
+          final location = response.headers.value(HttpHeaders.locationHeader);
+          await response.drain<void>();
+          if (location == null || redirectCount >= _maxRedirects) {
+            throw const ProfileImportException(
+              'Слишком много перенаправлений подписки.',
+            );
+          }
+          currentUri = currentUri.resolve(location);
+          continue;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          await response.drain<void>();
+          throw ProfileImportException('HTTP ${response.statusCode}.');
+        }
+
+        final body = await _readLimitedBody(response);
+        return _FetchedSubscription(
+          body: body,
+          expiresAt: _subscriptionExpiresAtFromHeaders(response.headers),
+        );
       }
-      return _FetchedSubscription(
-        body: body,
-        expiresAt: _subscriptionExpiresAtFromHeaders(response.headers),
-      );
     } finally {
       client.close(force: true);
+    }
+  }
+
+  Future<String> _readLimitedBody(HttpClientResponse response) async {
+    final contentLength = response.contentLength;
+    if (contentLength > maxSubscriptionBytes) {
+      await response.drain<void>();
+      throw const ProfileImportException('Подписка превышает лимит 4 MiB.');
+    }
+
+    final bytes = BytesBuilder(copy: false);
+    var received = 0;
+    await for (final chunk in response.timeout(_responseTimeout)) {
+      received += chunk.length;
+      if (received > maxSubscriptionBytes) {
+        throw const ProfileImportException('Подписка превышает лимит 4 MiB.');
+      }
+      bytes.add(chunk);
+    }
+    return utf8.decode(bytes.takeBytes());
+  }
+
+  bool _isRedirectStatus(int statusCode) =>
+      statusCode == HttpStatus.movedPermanently ||
+      statusCode == HttpStatus.found ||
+      statusCode == HttpStatus.seeOther ||
+      statusCode == HttpStatus.temporaryRedirect ||
+      statusCode == HttpStatus.permanentRedirect;
+
+  void _validateSubscriptionUri(Uri uri) {
+    if (!uri.hasAuthority || uri.host.isEmpty) {
+      throw const ProfileImportException('Некорректный адрес подписки.');
+    }
+    if (uri.scheme == 'https') {
+      return;
+    }
+    final address = InternetAddress.tryParse(uri.host);
+    final loopback =
+        uri.host.toLowerCase() == 'localhost' || address?.isLoopback == true;
+    if (uri.scheme != 'http' || !loopback) {
+      throw const ProfileImportException('Подписка должна использовать HTTPS.');
     }
   }
 
@@ -173,6 +240,7 @@ class ProfileImporter {
     DateTime? subscriptionExpiresAt,
   }) {
     final text = payload.trim();
+    _ensurePayloadSize(text);
     if (text.isEmpty) {
       throw const ProfileImportException('Подписка пустая.');
     }
@@ -290,7 +358,10 @@ class ProfileImporter {
     }
   }
 
-  DateTime? _subscriptionExpiresAtFromJson(Object? value) {
+  DateTime? _subscriptionExpiresAtFromJson(Object? value, [int depth = 0]) {
+    if (depth >= 32) {
+      return null;
+    }
     if (value is Map) {
       for (final entry in value.entries) {
         final key = entry.key.toString().toLowerCase();
@@ -311,7 +382,7 @@ class ProfileImporter {
       }
 
       for (final entry in value.entries) {
-        final parsed = _subscriptionExpiresAtFromJson(entry.value);
+        final parsed = _subscriptionExpiresAtFromJson(entry.value, depth + 1);
         if (parsed != null) {
           return parsed;
         }
@@ -320,7 +391,7 @@ class ProfileImporter {
 
     if (value is List) {
       for (final item in value) {
-        final parsed = _subscriptionExpiresAtFromJson(item);
+        final parsed = _subscriptionExpiresAtFromJson(item, depth + 1);
         if (parsed != null) {
           return parsed;
         }
@@ -382,6 +453,11 @@ class ProfileImporter {
     DateTime? expiresAt,
     String source,
   ) {
+    if (profiles.length > maxImportedProfiles) {
+      throw const ProfileImportException(
+        'Подписка содержит больше 1000 профилей.',
+      );
+    }
     final subscriptionSource = _isHttpSource(source) ? source : null;
     final nameExpiresAt = [
       for (final profile in profiles)
@@ -401,6 +477,12 @@ class ProfileImporter {
           subscriptionSource: subscriptionSource,
         ),
     ];
+  }
+
+  void _ensurePayloadSize(String value) {
+    if (value.length > maxImportCharacters) {
+      throw const ProfileImportException('Данные превышают лимит 2 MiB.');
+    }
   }
 
   bool _isHttpSource(String source) {

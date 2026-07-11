@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import '../models/dns_protection_mode.dart';
 import '../models/vpn_profile.dart';
@@ -9,8 +10,9 @@ class XrayConfigBuilder {
   static const runtimeCore = 'xray';
   static const runtimeSchema = 1;
   static const _dnsOutboundTag = 'dns-out';
+  static const _healthProxyPort = 20808;
   static const _tunDnsServers = ['1.1.1.1', '8.8.8.8'];
-  static const _tunAddress = '172.19.0.1/30';
+  static const _tunGateways = ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'];
 
   String build(
     VpnProfile profile, {
@@ -34,7 +36,8 @@ class XrayConfigBuilder {
     final config = <String, dynamic>{
       'log': {'loglevel': 'warning'},
       'dns': {
-        'servers': _dnsServers(dnsProtectionMode),
+        'tag': 'dns-generated',
+        'servers': _dnsServers(profile, dnsProtectionMode),
         'queryStrategy': 'UseIPv4',
         'disableFallback': false,
         'disableFallbackIfMatch': false,
@@ -46,7 +49,7 @@ class XrayConfigBuilder {
           'settings': {
             'name': 'yurich-xray0',
             'mtu': 1380,
-            'address': _tunAddress,
+            'gateway': _tunGateways,
             'dns': _tunDnsServers,
             'userLevel': 0,
           },
@@ -56,11 +59,22 @@ class XrayConfigBuilder {
             'routeOnly': false,
           },
         },
+        {
+          'tag': 'health-http-in',
+          'listen': '127.0.0.1',
+          'port': _healthProxyPort,
+          'protocol': 'http',
+          'settings': {'allowTransparent': false},
+        },
       ],
       'outbounds': [
         _vlessOutbound(profile, outbound),
         {'tag': _dnsOutboundTag, 'protocol': 'dns'},
-        {'tag': 'direct', 'protocol': 'freedom'},
+        {
+          'tag': 'direct',
+          'protocol': 'freedom',
+          'settings': {'domainStrategy': 'UseIPv4'},
+        },
         {'tag': 'block', 'protocol': 'blackhole'},
       ],
       'routing': {
@@ -72,6 +86,11 @@ class XrayConfigBuilder {
             'outboundTag': _dnsOutboundTag,
           },
           {'type': 'field', 'port': '53', 'outboundTag': _dnsOutboundTag},
+          {
+            'type': 'field',
+            'inboundTag': ['dns-generated'],
+            'outboundTag': 'proxy',
+          },
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {
             'type': 'field',
@@ -92,8 +111,8 @@ class XrayConfigBuilder {
             'protocol': ['bittorrent'],
             'outboundTag': 'block',
           },
+          {'type': 'field', 'network': 'tcp,udp', 'outboundTag': 'proxy'},
         ],
-        'final': 'proxy',
       },
     };
 
@@ -109,41 +128,82 @@ class XrayConfigBuilder {
 
   List<Map<String, dynamic>> _smartRouteRules() {
     return [
-      {'type': 'field', 'domain': SmartRouteRules.globalProxyDomains, 'outboundTag': 'proxy'},
       {
         'type': 'field',
-        'domain_suffix': SmartRouteRules.globalProxyDomainSuffixes,
+        'domain': [
+          for (final domain in SmartRouteRules.globalProxyDomains)
+            'full:$domain',
+        ],
         'outboundTag': 'proxy',
       },
-      {'type': 'field', 'domain': SmartRouteRules.ruDirectDomains, 'outboundTag': 'direct'},
       {
         'type': 'field',
-        'domain_suffix': SmartRouteRules.ruDirectDomainSuffixes,
+        'domain': [
+          for (final domain in SmartRouteRules.globalProxyDomainSuffixes)
+            'domain:$domain',
+        ],
+        'outboundTag': 'proxy',
+      },
+      {
+        'type': 'field',
+        'domain': [
+          for (final domain in SmartRouteRules.ruDirectDomains) 'full:$domain',
+        ],
+        'outboundTag': 'direct',
+      },
+      {
+        'type': 'field',
+        'domain': [
+          for (final domain in SmartRouteRules.ruDirectDomainSuffixes)
+            'domain:$domain',
+        ],
         'outboundTag': 'direct',
       },
     ];
   }
 
-  List<Map<String, dynamic>> _dnsServers(DnsProtectionMode dnsProtectionMode) {
+  List<Map<String, dynamic>> _dnsServers(
+    VpnProfile profile,
+    DnsProtectionMode dnsProtectionMode,
+  ) {
+    final server = profile.server?.trim();
+    final bootstrap =
+        server != null && server.isNotEmpty && !_isIpLiteral(server)
+        ? <Map<String, dynamic>>[
+            {
+              'address': 'localhost',
+              'domains': ['full:$server'],
+              'skipFallback': true,
+              'finalQuery': true,
+              'queryStrategy': 'UseIPv4',
+            },
+          ]
+        : const <Map<String, dynamic>>[];
     if (!dnsProtectionMode.protectsAgainstLeaks) {
       return [
+        ...bootstrap,
         for (final server in _tunDnsServers)
-          {'address': server, 'queryStrategy': 'UseIPv4'},
+          {'address': server, 'queryStrategy': 'UseIPv4', 'timeoutMs': 4000},
       ];
     }
 
     return [
+      ...bootstrap,
       {
         'tag': 'remote-dns',
         'address': 'https://1.1.1.1/dns-query',
         'queryStrategy': 'UseIPv4',
+        'timeoutMs': 5000,
       },
       {
         'address': 'https://8.8.8.8/dns-query',
         'queryStrategy': 'UseIPv4',
+        'timeoutMs': 5000,
       },
     ];
   }
+
+  bool _isIpLiteral(String value) => InternetAddress.tryParse(value) != null;
 
   Map<String, dynamic> _vlessOutbound(
     VpnProfile profile,
@@ -223,9 +283,7 @@ class XrayConfigBuilder {
     };
   }
 
-  Map<String, dynamic> _xhttpSettings(
-    Map<String, dynamic>? transport,
-) {
+  Map<String, dynamic> _xhttpSettings(Map<String, dynamic>? transport) {
     if (transport == null) {
       return const <String, dynamic>{};
     }

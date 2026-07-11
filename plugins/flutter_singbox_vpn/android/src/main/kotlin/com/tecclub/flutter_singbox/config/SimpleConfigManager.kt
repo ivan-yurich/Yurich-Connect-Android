@@ -23,25 +23,33 @@ object SimpleConfigManager {
     }
     
     // In-memory storage of the config for reliable access
+    @Volatile
     private var cachedConfig: String = DEFAULT_CONFIG
     
-    // Save config JSON string
+    fun cacheConfig(config: String): Boolean {
+        if (config.isBlank()) return false
+        cachedConfig = config
+        return true
+    }
+
     fun saveConfig(config: String): Boolean {
-        Log.e(TAG, "Saving config, length: ${config.length}")
-        if (config.isEmpty()) return false
-        
+        if (!cacheConfig(config)) return false
+        return persistConfig(config)
+    }
+
+    @Synchronized
+    fun persistConfig(config: String): Boolean {
+        Log.e(TAG, "Persisting config, length: ${config.length}")
+        if (config.isBlank()) return false
+
         return try {
-            // Update cache first
-            cachedConfig = config
-            
-            // Then save to preferences for persistence
             val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            if (!prefs.edit().putString(KEY_CONFIG, config).commit()) {
+            val encrypted = SecureConfigCipher.encrypt(config)
+            if (!prefs.edit().putString(KEY_CONFIG, encrypted).commit()) {
                 Log.e(TAG, "Config commit returned false")
                 return false
             }
-            
-            Log.e(TAG, "Config saved successfully")
+            Log.e(TAG, "Config persisted successfully")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save config", e)
@@ -62,9 +70,8 @@ object SimpleConfigManager {
         // Otherwise load from preferences
         try {
             val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            val config = prefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
-            
-            // Cache the loaded config
+            val stored = prefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
+            val config = decodeStoredConfig(prefs, stored)
             cachedConfig = config
             
             Log.e(TAG, "Config loaded from preferences, length: ${config.length}")
@@ -84,12 +91,32 @@ object SimpleConfigManager {
     fun hasValidConfig(context: Context): Boolean {
         return try {
             val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            val config = prefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
+            val stored = prefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
+            val config = decodeStoredConfig(prefs, stored)
             config.isNotEmpty() && config != DEFAULT_CONFIG
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check config with context", e)
             false
         }
+    }
+
+    private fun decodeStoredConfig(
+        prefs: android.content.SharedPreferences,
+        stored: String,
+    ): String {
+        if (stored.isEmpty() || stored == DEFAULT_CONFIG) {
+            return DEFAULT_CONFIG
+        }
+        if (SecureConfigCipher.isEncrypted(stored)) {
+            return SecureConfigCipher.decrypt(stored)
+        }
+
+        val encrypted = SecureConfigCipher.encrypt(stored)
+        if (!prefs.edit().putString(KEY_CONFIG, encrypted).commit()) {
+            error("Unable to migrate runtime config to encrypted storage")
+        }
+        Log.i(TAG, "Migrated runtime config to Android Keystore encryption")
+        return stored
     }
     
     // Set auto-start setting

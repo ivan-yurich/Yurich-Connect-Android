@@ -6,9 +6,11 @@ import '../models/dns_protection_mode.dart';
 import '../models/profile_stability.dart';
 import '../models/profile_network_stability.dart';
 import '../models/vpn_profile.dart';
+import 'secure_profile_storage.dart';
 
 class ProfileStore {
   static const _profilesKey = 'profiles';
+  static const _secureProfilesKey = 'profiles.v1';
   static const _selectedProfileKey = 'selectedProfileId';
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
@@ -16,16 +18,26 @@ class ProfileStore {
   static const _smartRouteRuDirectKey = 'smartRouteRuDirect';
   static const _dnsProtectionModeKey = 'dnsProtectionMode';
   static const _subscriptionReminderStampKey = 'subscriptionReminderStamp';
+  static const _vpnDisclosureVersionKey = 'vpnDisclosureVersion';
   static const _deletedProfileIdsBySubscriptionSourceKey =
       'deletedProfileIdsBySubscriptionSource';
+  static const _secureDeletedProfilesKey =
+      'deletedProfileIdsBySubscriptionSource.v1';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
   static const _profileStabilityKey = 'profileStabilityStats';
   static const _profileNetworkStabilityKey = 'profileNetworkStabilityStats';
 
+  ProfileStore({SecureProfileStorage? secureStorage})
+    : _secureStorage = secureStorage ?? FlutterSecureProfileStorage();
+
+  final SecureProfileStorage _secureStorage;
+
   Future<List<VpnProfile>> loadProfiles() async {
-    final prefs = await SharedPreferences.getInstance();
-    final encoded = prefs.getString(_profilesKey);
+    final encoded = await _readSecureOrMigrate(
+      secureKey: _secureProfilesKey,
+      legacyKey: _profilesKey,
+    );
     if (encoded == null || encoded.isEmpty) {
       return const [];
     }
@@ -38,17 +50,20 @@ class ProfileStore {
   }
 
   Future<void> saveProfiles(List<VpnProfile> profiles) async {
-    final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(
       profiles.map((profile) => profile.toJson()).toList(),
     );
-    await prefs.setString(_profilesKey, encoded);
+    await _secureStorage.write(_secureProfilesKey, encoded);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_profilesKey);
   }
 
   Future<Map<String, Set<String>>>
   loadDeletedProfileIdsBySubscriptionSource() async {
-    final prefs = await SharedPreferences.getInstance();
-    final encoded = prefs.getString(_deletedProfileIdsBySubscriptionSourceKey);
+    final encoded = await _readSecureOrMigrate(
+      secureKey: _secureDeletedProfilesKey,
+      legacyKey: _deletedProfileIdsBySubscriptionSourceKey,
+    );
     if (encoded == null || encoded.isEmpty) {
       return const {};
     }
@@ -113,14 +128,35 @@ class ProfileStore {
     }
 
     if (normalized.isEmpty) {
+      await _secureStorage.delete(_secureDeletedProfilesKey);
       await prefs.remove(_deletedProfileIdsBySubscriptionSourceKey);
       return;
     }
 
-    await prefs.setString(
-      _deletedProfileIdsBySubscriptionSourceKey,
+    await _secureStorage.write(
+      _secureDeletedProfilesKey,
       jsonEncode(normalized),
     );
+    await prefs.remove(_deletedProfileIdsBySubscriptionSourceKey);
+  }
+
+  Future<String?> _readSecureOrMigrate({
+    required String secureKey,
+    required String legacyKey,
+  }) async {
+    final secured = await _secureStorage.read(secureKey);
+    if (secured != null && secured.isNotEmpty) {
+      return secured;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final legacy = prefs.getString(legacyKey);
+    if (legacy == null || legacy.isEmpty) {
+      return null;
+    }
+    await _secureStorage.write(secureKey, legacy);
+    await prefs.remove(legacyKey);
+    return legacy;
   }
 
   static String? subscriptionSourceKeyFor(VpnProfile profile) {
@@ -216,6 +252,16 @@ class ProfileStore {
   Future<void> saveSubscriptionReminderStamp(String stamp) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_subscriptionReminderStampKey, stamp);
+  }
+
+  Future<int> loadVpnDisclosureVersion() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_vpnDisclosureVersionKey) ?? 0;
+  }
+
+  Future<void> saveVpnDisclosureVersion(int version) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_vpnDisclosureVersionKey, version);
   }
 
   Future<List<String>> loadSplitTunnelExcludedProcesses() async {

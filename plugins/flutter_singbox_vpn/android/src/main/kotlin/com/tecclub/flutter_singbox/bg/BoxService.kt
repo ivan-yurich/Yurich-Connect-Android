@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -21,6 +20,8 @@ import com.tecclub.flutter_singbox.constant.Action
 import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Status
 import com.tecclub.flutter_singbox.database.Settings
+import com.tecclub.flutter_singbox.session.VpnSessionPhase
+import com.tecclub.flutter_singbox.session.VpnSessionStateMachine
 import com.tecclub.flutter_singbox.xray.XrayRuntimeConfig
 import com.tecclub.flutter_singbox.xray.XrayRunner
 import io.nekohasekai.libbox.CommandServer
@@ -30,6 +31,7 @@ import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.PlatformInterface
 import io.nekohasekai.libbox.SystemProxyStatus
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -37,7 +39,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -69,13 +72,8 @@ class BoxService(
         private const val LIFECYCLE_RECOVERY_TIMEOUT_MS = 30_000L
 
         fun start() {
-            val intent = runBlocking {
-                withContext(Dispatchers.IO) {
-                    Intent(Application.application, Settings.serviceClass()).apply {
-                        action = ACTION_START
-                        // Config content should be added by the caller
-                    }
-                }
+            val intent = Intent(Application.application, Settings.serviceClass()).apply {
+                action = ACTION_START
             }
             ContextCompat.startForegroundService(Application.application, intent)
         }
@@ -99,6 +97,9 @@ class BoxService(
     private var commandServer: CommandServer? = null
     private var xrayRunner: XrayRunner? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val sessionState = VpnSessionStateMachine()
+    private val lifecycleMutex = Mutex()
+    private var lifecycleJob: Job? = null
     private var watchdogJob: Job? = null
     private var watchdogFailures = 0
     private var watchdogMixedProxyEnabled = false
@@ -119,9 +120,9 @@ class BoxService(
 
                 Action.SERVICE_RESTART -> {
                     serviceScope.launch {
-                        if (status.value == Status.Started) {
+                        if (currentSessionStatus() == Status.Started) {
                             restartFromWatchdog("notification-action")
-                        } else if (status.value == Status.Stopped) {
+                        } else if (currentSessionStatus() == Status.Stopped) {
                             onStartCommand()
                         }
                     }
@@ -136,7 +137,6 @@ class BoxService(
                     handleNetworkWakeEvent("idle-mode")
                 }
 
-                ConnectivityManager.CONNECTIVITY_ACTION,
                 Intent.ACTION_SCREEN_ON,
                 Intent.ACTION_USER_PRESENT -> {
                     handleNetworkWakeEvent(intent.action ?: "network-wake")
@@ -157,15 +157,53 @@ class BoxService(
 
     private var lastProfileName = ""
 
+    private fun currentSessionStatus(): Status = when (sessionState.snapshot().phase) {
+        VpnSessionPhase.Stopped,
+        VpnSessionPhase.Failed -> Status.Stopped
+        VpnSessionPhase.Starting,
+        VpnSessionPhase.Reconnecting -> Status.Starting
+        VpnSessionPhase.Connected -> Status.Started
+        VpnSessionPhase.Stopping -> Status.Stopping
+    }
+
+    private fun publishSessionStatus() {
+        val nextStatus = currentSessionStatus()
+        status.postValue(nextStatus)
+        broadcastStatus(nextStatus)
+    }
+
+    private fun ensureCurrentSession(
+        generation: Long,
+        requireDesiredRunning: Boolean = true,
+    ) {
+        if (!sessionState.isCurrent(generation, requireDesiredRunning)) {
+            throw CancellationException("Stale VPN session generation $generation")
+        }
+    }
+
+    private fun launchLifecycle(
+        generation: Long,
+        block: suspend () -> Unit,
+    ) {
+        lifecycleJob?.cancel()
+        lifecycleJob = serviceScope.launch {
+            lifecycleMutex.withLock {
+                ensureCurrentSession(generation)
+                block()
+            }
+        }
+    }
+
     private fun configFingerprint(config: String): String {
         return MessageDigest.getInstance("SHA-256")
             .digest(config.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> "%02x".format(byte) }
     }
 
-    private suspend fun startService() {
+    private suspend fun startService(generation: Long) {
         android.util.Log.e("BoxService", "Starting SingBox service...")
         try {
+            ensureCurrentSession(generation)
             // withContext(Dispatchers.Main) {
             //     android.util.Log.e("BoxService", "Showing initial notification")
             //     notification.show(lastProfileName, "Starting...")
@@ -175,21 +213,20 @@ class BoxService(
             android.util.Log.e("BoxService", "Loading configuration from SimpleConfigManager")
             val content = SimpleConfigManager.getConfig()
             android.util.Log.e("BoxService", "Config loaded, length: ${content.length}")
-            watchdogMixedProxyEnabled =
-                content.contains("\"type\"") &&
-                content.contains("\"mixed\"") &&
-                content.contains("$WATCHDOG_MIXED_PROXY_PORT")
+            // Local mixed inbounds are not guaranteed to be exposed by every
+            // Android libbox build. Xray owns a dedicated health HTTP inbound.
+            watchdogMixedProxyEnabled = false
             lastConfigFingerprint = configFingerprint(content)
             
             if (content.isBlank() || content == "{}") {
                 android.util.Log.e("BoxService", "Empty configuration detected")
-                stopAndAlert(Alert.EmptyConfiguration)
+                stopAndAlert(Alert.EmptyConfiguration, generation = generation)
                 return
             }
 
             val xrayConfig = XrayRuntimeConfig.from(content)
             if (xrayConfig.enabled) {
-                startXrayService(xrayConfig.configJson)
+                startXrayService(xrayConfig.configJson, generation)
                 return
             }
 
@@ -200,6 +237,9 @@ class BoxService(
             // }
 
             android.util.Log.e("BoxService", "Starting DefaultNetworkMonitor")
+            DefaultNetworkMonitor.setNetworkChangeObserver {
+                handleNetworkWakeEvent("default-network")
+            }
             DefaultNetworkMonitor.start()
             
             android.util.Log.e("BoxService", "Setting memory limit")
@@ -212,25 +252,20 @@ class BoxService(
                 android.util.Log.e("BoxService", "SingBox service started successfully")
             } catch (e: Exception) {
                 android.util.Log.e("BoxService", "Failed to start SingBox service: ${e.message}", e)
-                stopAndAlert(Alert.StartService, e.message)
+                stopAndAlert(Alert.StartService, e.message, generation)
                 return
             }
 
+            ensureCurrentSession(generation)
             android.util.Log.e("BoxService", "Posting status as Started")
-            status.postValue(Status.Started)
+            if (!sessionState.markConnected(generation, "sing-box-started")) {
+                throw CancellationException("Sing-box start completed for stale generation $generation")
+            }
+            publishSessionStatus()
             
             // Start traffic monitoring
             android.util.Log.e("BoxService", "Starting traffic monitor")
             startTrafficMonitor()
-            
-            // Broadcast status change
-            android.util.Log.e("BoxService", "Broadcasting status change to Started")
-            Application.application.sendBroadcast(
-                Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                    `package` = Application.application.packageName
-                    putExtra(Action.EXTRA_STATUS, Status.Started.ordinal)
-                }
-            )
             
             android.util.Log.e("BoxService", "Updating notification to Connected")
             withContext(Dispatchers.Main) {
@@ -243,23 +278,35 @@ class BoxService(
             startNativeWatchdog()
             
             android.util.Log.e("BoxService", "Service startup complete")
+        } catch (e: CancellationException) {
+            android.util.Log.w("BoxService", "Cancelled stale start generation $generation")
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("BoxService", "Uncaught exception in startService: ${e.message}", e)
-            stopAndAlert(Alert.StartService, e.message)
+            stopAndAlert(Alert.StartService, e.message, generation)
             return
         }
     }
 
-    private suspend fun startXrayService(configJson: String) {
+    private suspend fun startXrayService(configJson: String, generation: Long) {
         if (service !is VPNService) {
-            stopAndAlert(Alert.StartService, "Xray runtime requires Android VPN service")
+            stopAndAlert(
+                Alert.StartService,
+                "Xray runtime requires Android VPN service",
+                generation,
+            )
             return
         }
 
         try {
+            ensureCurrentSession(generation)
             android.util.Log.e("BoxService", "Starting Xray service...")
             lastProfileName = "Yurich Connect XHTTP"
-            watchdogMixedProxyEnabled = false
+            watchdogMixedProxyEnabled = configJson.contains("\"port\": $WATCHDOG_MIXED_PROXY_PORT")
+            DefaultNetworkMonitor.setNetworkChangeObserver {
+                handleNetworkWakeEvent("default-network")
+            }
+            DefaultNetworkMonitor.start()
             val runner = XrayRunner(service)
             xrayRunner = runner
             val response = withContext(Dispatchers.IO) {
@@ -267,48 +314,48 @@ class BoxService(
             }
             android.util.Log.e("BoxService", "Xray service started: $response")
 
-            status.postValue(Status.Started)
-            broadcastStatus(Status.Started)
+            ensureCurrentSession(generation)
+            if (!sessionState.markConnected(generation, "xray-started")) {
+                throw CancellationException("Xray start completed for stale generation $generation")
+            }
+            publishSessionStatus()
             withContext(Dispatchers.Main) {
                 notification.show(lastProfileName, "Подключено")
             }
             notification.start()
             refreshKeeperWakeLock("xray-service-start")
             startNativeWatchdog()
+        } catch (e: CancellationException) {
+            android.util.Log.w("BoxService", "Cancelled stale Xray start generation $generation")
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("BoxService", "Failed to start Xray service: ${e.message}", e)
             stopXrayRunner("startXrayService")
-            stopAndAlert(Alert.StartService, e.message)
+            stopAndAlert(Alert.StartService, e.message, generation)
         }
     }
 
     override fun serviceReload() {
-        stopNativeWatchdog()
-        notification.stop()
-        status.postValue(Status.Starting)
-            // Broadcast status change
-            Application.application.sendBroadcast(
-                Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                    `package` = Application.application.packageName
-                    putExtra(Action.EXTRA_STATUS, Status.Starting.ordinal)
-                }
-            )
-        stopXrayRunner("serviceReload")
-        runCatching {
-            commandServer?.closeService()
-        }.onFailure {
-            android.util.Log.e("BoxService", "service: error when closing sing-box on reload", it)
-        }
-        runCatching {
-            runBlocking {
-                DefaultNetworkMonitor.stop()
+        val reconnect = sessionState.requestReconnect("service-reload") ?: return
+        publishSessionStatus()
+        launchLifecycle(reconnect.generation) {
+            stopNativeWatchdog()
+            notification.stop()
+            stopXrayRunner("serviceReload")
+            runCatching {
+                commandServer?.closeService()
+            }.onFailure {
+                android.util.Log.e("BoxService", "service: error when closing sing-box on reload", it)
             }
-        }.onFailure {
-            android.util.Log.e("BoxService", "service: error when stopping network monitor on reload", it)
-        }
-        closeTunFileDescriptor()
-        runBlocking {
-            startService()
+            runCatching {
+                DefaultNetworkMonitor.stop()
+            }.onFailure {
+                android.util.Log.e("BoxService", "service: error when stopping network monitor on reload", it)
+            }
+            closeTunFileDescriptor()
+            delay(300L)
+            ensureCurrentSession(reconnect.generation)
+            startService(reconnect.generation)
         }
     }
 
@@ -363,7 +410,7 @@ class BoxService(
         val xrayActive = runCatching { xrayRunner?.isStarted() == true }
             .getOrDefault(false)
         return xrayActive || fileDescriptor != null ||
-            (status.value == Status.Started && commandServer != null)
+            (currentSessionStatus() == Status.Started && commandServer != null)
     }
 
     private fun shouldRecoverStaleLifecycleState(currentStatus: Status): Boolean {
@@ -394,7 +441,8 @@ class BoxService(
         commandServer = null
         closeTunFileDescriptor()
         notification.stop()
-        status.value = Status.Stopped
+        sessionState.forceStopped("stale-lifecycle-recovery", clearDesiredRunning = false)
+        publishSessionStatus()
         android.util.Log.w(
             "BoxService",
             "Stale lifecycle state reset without synchronous native stop"
@@ -435,63 +483,71 @@ class BoxService(
     }
 
     private fun stopService() {
-        if (status.value != Status.Started && status.value != Status.Starting) return
+        val currentStatus = currentSessionStatus()
+        if (currentStatus != Status.Started && currentStatus != Status.Starting) return
+        val stop = sessionState.requestStop("service-close")
+        publishSessionStatus()
+        lifecycleJob?.cancel()
         stopNativeWatchdog()
         releaseKeeperWakeLock()
         runCatching {
             SimpleConfigManager.setStartedByUser(false)
         }
         lastStopAttemptAt = System.currentTimeMillis()
-        status.value = Status.Stopping
-        
-
-        // Broadcast Stopping status
-        Application.application.sendBroadcast(
-            Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                `package` = Application.application.packageName
-                putExtra(Action.EXTRA_STATUS, Status.Stopping.ordinal)
-            }
-        )
-        
         if (receiverRegistered) {
             service.unregisterReceiver(receiver)
             receiverRegistered = false
         }
         notification.stop()
-        serviceScope.launch {
-            stopXrayRunner("stopService")
-            runCatching {
-                commandServer?.closeService()
-            }.onFailure {
-                android.util.Log.e("BoxService", "service: error when closing", it)
-            }
-            try {
-                DefaultNetworkMonitor.stop()
-            } catch (e: Exception) {
-                android.util.Log.e("BoxService", "service: error when stopping network monitor", e)
-            }
-            closeTunFileDescriptor()
-
-            commandServer?.apply {
-                close()
-            }
-            commandServer = null
-            // Broadcast status change
-            Application.application.sendBroadcast(
-                Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                    `package` = Application.application.packageName
-                    putExtra(Action.EXTRA_STATUS, Status.Stopped.ordinal)
+        lifecycleJob = serviceScope.launch {
+            lifecycleMutex.withLock {
+                ensureCurrentSession(stop.generation, requireDesiredRunning = false)
+                stopXrayRunner("stopService")
+                runCatching {
+                    commandServer?.closeService()
+                }.onFailure {
+                    android.util.Log.e("BoxService", "service: error when closing", it)
                 }
-            )
-            withContext(Dispatchers.Main) {
-                status.value = Status.Stopped
-                service.stopSelf()
+                try {
+                    DefaultNetworkMonitor.stop()
+                } catch (e: Exception) {
+                    android.util.Log.e("BoxService", "service: error when stopping network monitor", e)
+                }
+                closeTunFileDescriptor()
+
+                commandServer?.close()
+                commandServer = null
+                if (sessionState.markStopped(
+                        stop.generation,
+                        reason = "service-stopped",
+                        clearDesiredRunning = true,
+                    )
+                ) {
+                    publishSessionStatus()
+                }
+                withContext(Dispatchers.Main) {
+                    service.stopSelf()
+                }
             }
         }
     }
 
-    private suspend fun stopAndAlert(type: Alert, message: String? = null) {
+    private suspend fun stopAndAlert(
+        type: Alert,
+        message: String? = null,
+        generation: Long = sessionState.snapshot().generation,
+    ) {
         android.util.Log.e("BoxService", "stopAndAlert called: ${type.name}, message: $message")
+        if (!sessionState.markFailed(
+                generation,
+                reason = "${type.name}:${message.orEmpty()}",
+                keepDesiredRunning = false,
+            )
+        ) {
+            android.util.Log.w("BoxService", "Ignoring alert from stale generation $generation")
+            return
+        }
+        publishSessionStatus()
         stopNativeWatchdog()
         releaseKeeperWakeLock()
         runCatching {
@@ -535,18 +591,6 @@ class BoxService(
                 serviceCallback.onServiceAlert(type.ordinal, message)
             }
             
-            android.util.Log.e("BoxService", "Setting status to Stopped")
-            status.value = Status.Stopped
-            
-            // Broadcast Stopped status after alert
-            android.util.Log.e("BoxService", "Broadcasting Stopped status")
-            Application.application.sendBroadcast(
-                Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                    `package` = Application.application.packageName
-                    putExtra(Action.EXTRA_STATUS, Status.Stopped.ordinal)
-                }
-            )
-            
             // Stop the service itself
             android.util.Log.e("BoxService", "Stopping service")
             service.stopSelf()
@@ -558,17 +602,18 @@ class BoxService(
     @Suppress("SameReturnValue")
     internal fun onStartCommand(): Int {
         Application.initializeIfNeeded(service.applicationContext)
-        android.util.Log.e("BoxService", "onStartCommand called, current status: ${status.value}")
+        var currentStatus = currentSessionStatus()
+        android.util.Log.e("BoxService", "onStartCommand called, current status: $currentStatus")
         val keepRunning = runCatching { SimpleConfigManager.getStartedByUser() }.getOrDefault(false)
         val incomingConfig = runCatching { SimpleConfigManager.getConfig() }.getOrDefault("{}")
         val incomingFingerprint = runCatching {
             configFingerprint(incomingConfig)
         }.getOrDefault("")
 
-        if (status.value != Status.Stopped) {
-            val currentStatus = status.value ?: Status.Stopped
+        if (currentStatus != Status.Stopped) {
             if (shouldRecoverStaleLifecycleState(currentStatus)) {
                 recoverStaleLifecycleState(currentStatus)
+                currentStatus = currentSessionStatus()
             } else {
                 val hasConfigChange = lastConfigFingerprint != null &&
                     !incomingConfig.isBlank() &&
@@ -581,31 +626,13 @@ class BoxService(
                         "BoxService",
                         "Runtime config changed while service is ${currentStatus.name}; reloading"
                     )
-                    status.value = Status.Starting
-                    // Broadcast status change so Flutter updates to reconnect path immediately
-                    Application.application.sendBroadcast(
-                        Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                            `package` = Application.application.packageName
-                            putExtra(Action.EXTRA_STATUS, Status.Starting.ordinal)
-                        }
-                    )
                     ensureReceiversRegistered()
                     refreshRunningService("on-start-command-reload")
-                    serviceScope.launch {
-                        runCatching {
-                            serviceReload()
-                        }.onFailure {
-                            android.util.Log.e(
-                                "BoxService",
-                                "Failed to reload service on new config",
-                                it
-                            )
-                        }
-                    }
+                    serviceReload()
                 } else {
                     android.util.Log.e("BoxService", "Service already running, reusing config")
                     val notificationTitle = lastProfileName.ifBlank { "Yurich Connect" }
-                    val notificationText = if (status.value == Status.Started) {
+                    val notificationText = if (currentStatus == Status.Started) {
                         "Подключено"
                     } else {
                         "Подключение..."
@@ -622,24 +649,16 @@ class BoxService(
         // This must happen synchronously before any async work
         android.util.Log.e("BoxService", "Starting foreground notification immediately")
         notification.show("Yurich Connect", "Подключение...")
-        
+
         android.util.Log.e("BoxService", "Setting status to Starting")
+        val start = sessionState.requestStart("on-start-command")
         lastStartAttemptAt = System.currentTimeMillis()
-        status.value = Status.Starting
-        
-        // Broadcast status change
-        android.util.Log.e("BoxService", "Broadcasting Starting status")
-        Application.application.sendBroadcast(
-            Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                `package` = Application.application.packageName
-                putExtra(Action.EXTRA_STATUS, Status.Starting.ordinal)
-            }
-        )
+        publishSessionStatus()
 
         ensureReceiversRegistered()
 
         android.util.Log.e("BoxService", "Launching IO coroutine for service startup")
-        serviceScope.launch {
+        launchLifecycle(start.generation) {
             try {
                 val runtimeConfig = XrayRuntimeConfig.from(SimpleConfigManager.getConfig())
                 if (runtimeConfig.enabled) {
@@ -655,12 +674,13 @@ class BoxService(
                 }
             } catch (e: Exception) {
                 android.util.Log.e("BoxService", "Failed to start command server: ${e.message}", e)
-                stopAndAlert(Alert.StartCommandServer, e.message)
-                return@launch
+                stopAndAlert(Alert.StartCommandServer, e.message, start.generation)
+                return@launchLifecycle
             }
-            
+
+            ensureCurrentSession(start.generation)
             android.util.Log.e("BoxService", "Calling startService()")
-            startService()
+            startService(start.generation)
         }
         return if (keepRunning) Service.START_STICKY else Service.START_NOT_STICKY
     }
@@ -673,7 +693,6 @@ class BoxService(
         ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
             addAction(Action.SERVICE_CLOSE)
             addAction(Action.SERVICE_RESTART)
-            addAction(ConnectivityManager.CONNECTIVITY_ACTION)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -686,7 +705,7 @@ class BoxService(
     private fun refreshRunningService(reason: String) {
         refreshKeeperWakeLock(reason)
         commandServer?.wake()
-        if (status.value == Status.Started && watchdogJob?.isActive != true) {
+        if (currentSessionStatus() == Status.Started && watchdogJob?.isActive != true) {
             android.util.Log.w("BoxService", "Restarting missing watchdog after $reason")
             startNativeWatchdog()
         }
@@ -697,7 +716,7 @@ class BoxService(
     }
 
     internal fun onDestroy() {
-        val destroyStatus = status.value ?: Status.Stopped
+        val destroyStatus = currentSessionStatus()
         val shouldRestore = runCatching {
             destroyStatus == Status.Started &&
                 SimpleConfigManager.getStartedByUser() &&
@@ -721,19 +740,10 @@ class BoxService(
             commandServer?.close()
             commandServer = null
         }
-        runCatching {
-            runBlocking {
-                DefaultNetworkMonitor.stop()
-            }
-        }
+        DefaultNetworkMonitor.stopAsync()
         closeTunFileDescriptor()
-        status.postValue(Status.Stopped)
-        Application.application.sendBroadcast(
-            Intent(Action.BROADCAST_STATUS_CHANGED).apply {
-                `package` = Application.application.packageName
-                putExtra(Action.EXTRA_STATUS, Status.Stopped.ordinal)
-            }
-        )
+        sessionState.forceStopped("service-destroyed", clearDesiredRunning = !shouldRestore)
+        publishSessionStatus()
         binder.close()
         if (shouldRestore) {
             scheduleStickyRestart("service-destroyed")
@@ -785,7 +795,7 @@ class BoxService(
 
         watchdogJob = serviceScope.launch {
             delay(WATCHDOG_INITIAL_GRACE_MS)
-            while (isActive && status.value == Status.Started) {
+            while (isActive && currentSessionStatus() == Status.Started) {
                 refreshKeeperWakeLock("watchdog")
                 commandServer?.wake()
 
@@ -837,7 +847,7 @@ class BoxService(
     }
 
     private fun handleNetworkWakeEvent(reason: String) {
-        if (status.value != Status.Started || watchdogRestarting) {
+        if (currentSessionStatus() != Status.Started || watchdogRestarting) {
             return
         }
 
@@ -868,12 +878,12 @@ class BoxService(
             }
 
             delay(settleDelayFor(reason))
-            if (status.value != Status.Started || !hasDefaultNetwork()) {
+            if (currentSessionStatus() != Status.Started || !hasDefaultNetwork()) {
                 return@launch
             }
 
             repeat(NETWORK_WAKE_PROBE_ATTEMPTS) { attempt ->
-                if (status.value != Status.Started || !hasDefaultNetwork()) {
+                if (currentSessionStatus() != Status.Started || !hasDefaultNetwork()) {
                     return@launch
                 }
                 if (probeMixedProxy()) {
@@ -903,31 +913,42 @@ class BoxService(
             return
         }
 
+        val reconnect = sessionState.requestReconnect("watchdog:$reason") ?: run {
+            android.util.Log.w("BoxService", "Watchdog: restart rejected by session state")
+            return
+        }
         watchdogRestarting = true
         lastWatchdogRestartAt = now
+        publishSessionStatus()
         try {
-            android.util.Log.w("BoxService", "Watchdog: restarting sing-box after $reason")
-            refreshKeeperWakeLock("watchdog-restart")
-            status.postValue(Status.Starting)
-            broadcastStatus(Status.Starting)
-            withContext(Dispatchers.Main) {
-                notification.show(lastProfileName, "Восстановление соединения...")
-            }
+            lifecycleMutex.withLock {
+                ensureCurrentSession(reconnect.generation)
+                android.util.Log.w("BoxService", "Watchdog: restarting sing-box after $reason")
+                refreshKeeperWakeLock("watchdog-restart")
+                withContext(Dispatchers.Main) {
+                    notification.show(lastProfileName, "Восстановление соединения...")
+                }
 
-            runCatching {
-                commandServer?.closeService()
-            }.onFailure {
-                android.util.Log.e("BoxService", "Watchdog: closeService failed", it)
-            }
-            try {
-                DefaultNetworkMonitor.stop()
-            } catch (e: Exception) {
-                android.util.Log.e("BoxService", "Watchdog: network monitor stop failed", e)
-            }
-            closeTunFileDescriptor()
+                stopXrayRunner("watchdog-restart")
+                runCatching {
+                    commandServer?.closeService()
+                }.onFailure {
+                    android.util.Log.e("BoxService", "Watchdog: closeService failed", it)
+                }
+                try {
+                    DefaultNetworkMonitor.stop()
+                } catch (e: Exception) {
+                    android.util.Log.e("BoxService", "Watchdog: network monitor stop failed", e)
+                }
+                closeTunFileDescriptor()
 
-            delay(900L)
-            startService()
+                delay(900L)
+                ensureCurrentSession(reconnect.generation)
+                startService(reconnect.generation)
+            }
+        } catch (e: CancellationException) {
+            android.util.Log.w("BoxService", "Watchdog restart cancelled for stale generation")
+            throw e
         } finally {
             watchdogRestarting = false
         }
@@ -1016,7 +1037,6 @@ class BoxService(
 
     private fun settleDelayFor(reason: String): Long {
         return if (
-            reason.contains("CONNECTIVITY_ACTION") ||
             reason.contains("network", ignoreCase = true) ||
             reason.contains("idle", ignoreCase = true)
         ) {
