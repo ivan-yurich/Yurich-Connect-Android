@@ -50,7 +50,7 @@ jobs:
           flutter build apk --release --flavor github --no-pub
           flutter build appbundle --release --flavor play --no-pub
       - name: Upload unsigned verification artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unsigned-android-verification
           if-no-files-found: error
@@ -105,7 +105,7 @@ jobs:
           "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --verbose --print-certs build/app/outputs/flutter-apk/app-github-release.apk
           jarsigner -verify -verbose -certs build/app/outputs/bundle/playRelease/app-play-release.aab
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: signed-android-release
           if-no-files-found: error
