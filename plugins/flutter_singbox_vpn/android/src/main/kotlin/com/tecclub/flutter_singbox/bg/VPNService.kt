@@ -9,7 +9,9 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.tecclub.flutter_singbox.Application
+import com.tecclub.flutter_singbox.config.SimpleConfigManager
 import com.tecclub.flutter_singbox.constant.Alert
+import com.tecclub.flutter_singbox.constant.Action
 import io.nekohasekai.libbox.TunOptions
 import com.tecclub.flutter_singbox.ktx.toIpPrefix
 import com.tecclub.flutter_singbox.ktx.toList
@@ -34,6 +36,10 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
         
         // Extract config content if available
         if (intent != null && intent.action == BoxService.ACTION_START) {
+            if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
+                SimpleConfigManager.setStartedByUser(true)
+                SimpleConfigManager.setManualDisconnectRequested(false)
+            }
             val configContent = intent.getStringExtra(BoxService.EXTRA_CONFIG_CONTENT)
             android.util.Log.e("VPNService", "Config content received: ${configContent?.length ?: 0} bytes")
             
@@ -41,7 +47,7 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
                 // The app process already persisted it. Cache the exact intent payload
                 // here so BoxService never performs Keystore I/O on the service main thread.
                 android.util.Log.e("VPNService", "Caching received runtime config")
-                com.tecclub.flutter_singbox.config.SimpleConfigManager.cacheConfig(configContent)
+                SimpleConfigManager.cacheConfig(configContent)
             } else {
                 android.util.Log.e("VPNService", "WARNING: No config content received in intent")
             }

@@ -11,6 +11,10 @@ object Action {
     const val EXTRA_ALERT = "alert"
     const val EXTRA_ALERT_MESSAGE = "alert_message"
     const val EXTRA_STATUS = "status"
+    const val EXTRA_USER_INITIATED = "user_initiated"
+    const val EXTRA_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
+    const val EXTRA_SESSION_REASON = "session_reason"
+    const val EXTRA_DESIRED_RUNNING = "desired_running"
     const val EXTRA_TRAFFIC_UP = "traffic_up"
     const val EXTRA_TRAFFIC_DOWN = "traffic_down"
 }

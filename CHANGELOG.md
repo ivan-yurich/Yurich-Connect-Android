@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.109 - 2026-07-11
+
+- Synchronized explicit start, stop, and restart actions between the Android
+  VPN service and Flutter so automatic recovery cannot override a manual stop.
+- Preserved the active Android network listener during Wi-Fi and mobile network
+  changes, preventing delayed libbox interface updates from being cancelled.
+- Enabled the native mixed-proxy watchdog only when the configured sing-box
+  inbound actually exposes its health-check port.
+- Stopped applying TCP keepalive and fallback-only options to Hysteria and
+  Hysteria2 QUIC outbounds.
+- Added Flutter and Kotlin regression coverage and completed a nine-hour LTE
+  Hysteria2 soak with 266 successful checks, no disconnects, crashes, or ANRs.
+
 ## 1.0.108 - 2026-07-10
 
 - Added a generation-safe VPN session state machine so stale connect, stop,

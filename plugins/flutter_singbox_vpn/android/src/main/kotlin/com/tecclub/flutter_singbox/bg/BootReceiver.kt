@@ -6,6 +6,7 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.tecclub.flutter_singbox.Application
 import com.tecclub.flutter_singbox.config.SimpleConfigManager
+import com.tecclub.flutter_singbox.constant.Action
 import com.tecclub.flutter_singbox.database.Settings
 
 class BootReceiver : BroadcastReceiver() {
@@ -23,10 +24,14 @@ class BootReceiver : BroadcastReceiver() {
         }
         if (autoStart) {
             SimpleConfigManager.setStartedByUser(true)
+            SimpleConfigManager.setManualDisconnectRequested(false)
         }
 
         val serviceIntent = Intent(context, Settings.serviceClass()).apply {
             action = BoxService.ACTION_START
+            if (autoStart) {
+                putExtra(Action.EXTRA_USER_INITIATED, true)
+            }
         }
         ContextCompat.startForegroundService(context, serviceIntent)
     }

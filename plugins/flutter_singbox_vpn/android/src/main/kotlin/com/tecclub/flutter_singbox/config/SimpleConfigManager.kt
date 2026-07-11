@@ -10,6 +10,7 @@ object SimpleConfigManager {
     private const val KEY_CONFIG = "config_json"
     private const val KEY_AUTO_START = "auto_start"
     private const val KEY_STARTED_BY_USER = "started_by_user"
+    private const val KEY_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
     private const val KEY_NOTIFICATION_TITLE = "notification_title"
     private const val KEY_NOTIFICATION_DESCRIPTION = "notification_description"
     private const val DEFAULT_CONFIG = "{}"
@@ -221,6 +222,31 @@ object SimpleConfigManager {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get started-by-user setting with context", e)
             false
+        }
+    }
+
+    fun setManualDisconnectRequested(requested: Boolean) {
+        try {
+            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            if (!prefs.edit().putBoolean(KEY_MANUAL_DISCONNECT_REQUESTED, requested).commit()) {
+                Log.w(TAG, "Manual-disconnect commit returned false")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save manual-disconnect setting", e)
+        }
+    }
+
+    fun getManualDisconnectRequested(): Boolean? {
+        return try {
+            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            if (!prefs.contains(KEY_MANUAL_DISCONNECT_REQUESTED)) {
+                null
+            } else {
+                prefs.getBoolean(KEY_MANUAL_DISCONNECT_REQUESTED, false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get manual-disconnect setting", e)
+            null
         }
     }
 }

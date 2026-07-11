@@ -63,6 +63,11 @@ class AndroidVpnEngine implements VpnEngine {
   Future<String> getVPNStatus() => _singBox.getVPNStatus();
 
   @override
+  Future<bool?> getManualDisconnectRequested() {
+    return _singBox.getManualDisconnectRequested();
+  }
+
+  @override
   Future<Map<String, dynamic>> getNetworkSnapshot() {
     return _singBox.getNetworkSnapshot();
   }

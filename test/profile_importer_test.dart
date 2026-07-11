@@ -141,6 +141,13 @@ void main() {
     expect(proxy['down_mbps'], 200);
     expect(proxy['obfs'], {'type': 'salamander', 'password': 'obfs-secret'});
     expect(proxy['tls'], {'enabled': true, 'server_name': 'cdn.example.com'});
+    expect(proxy['connect_timeout'], '8s');
+    expect(proxy['domain_resolver'], 'local-dns');
+    expect(proxy['domain_strategy'], 'ipv4_only');
+    expect(proxy['tcp_keep_alive'], isNull);
+    expect(proxy['tcp_keep_alive_interval'], isNull);
+    expect(proxy['network_strategy'], isNull);
+    expect(proxy['fallback_delay'], isNull);
   });
 
   test('preserves complete Hysteria2 auth with an encoded colon', () async {

@@ -27,6 +27,13 @@ class MockFlutterSingboxPlatform
   Future<String> getVPNStatus() => Future.value('Stopped');
 
   @override
+  Future<bool?> getManualDisconnectRequested() => Future.value(true);
+
+  @override
+  Future<Map<String, dynamic>> getNetworkSnapshot() =>
+      Future.value({'connected': true, 'validated': true, 'transport': 'wifi'});
+
+  @override
   Stream<Map<String, dynamic>> get onStatusChanged =>
       Stream.value({'status': 'Stopped', 'statusCode': 0});
 
@@ -124,6 +131,13 @@ class MockFlutterSingboxPlatform
 
   @override
   Future<bool> requestNotificationPermission() => Future.value(true);
+
+  @override
+  Future<bool> showAppNotification({
+    required String title,
+    required String body,
+    int id = 7001,
+  }) => Future.value(true);
 }
 
 void main() {
@@ -158,6 +172,14 @@ void main() {
     FlutterSingboxPlatform.instance = fakePlatform;
 
     expect(await flutterSingboxPlugin.getConfig(), '{"test": "config"}');
+  });
+
+  test('getManualDisconnectRequested', () async {
+    FlutterSingbox flutterSingboxPlugin = FlutterSingbox();
+    MockFlutterSingboxPlatform fakePlatform = MockFlutterSingboxPlatform();
+    FlutterSingboxPlatform.instance = fakePlatform;
+
+    expect(await flutterSingboxPlugin.getManualDisconnectRequested(), true);
   });
 
   // Tests for per-app tunneling methods

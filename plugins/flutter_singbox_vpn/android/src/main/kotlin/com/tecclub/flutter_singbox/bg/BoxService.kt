@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.MutableLiveData
 import com.tecclub.flutter_singbox.Application
 import com.tecclub.flutter_singbox.config.SimpleConfigManager
+import com.tecclub.flutter_singbox.config.SingBoxRuntimeConfig
 import com.tecclub.flutter_singbox.constant.Action
 import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Status
@@ -115,10 +116,18 @@ class BoxService(
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Action.SERVICE_CLOSE -> {
+                    if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
+                        SimpleConfigManager.setStartedByUser(false)
+                        SimpleConfigManager.setManualDisconnectRequested(true)
+                    }
                     stopService()
                 }
 
                 Action.SERVICE_RESTART -> {
+                    if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
+                        SimpleConfigManager.setStartedByUser(true)
+                        SimpleConfigManager.setManualDisconnectRequested(false)
+                    }
                     serviceScope.launch {
                         if (currentSessionStatus() == Status.Started) {
                             restartFromWatchdog("notification-action")
@@ -213,9 +222,10 @@ class BoxService(
             android.util.Log.e("BoxService", "Loading configuration from SimpleConfigManager")
             val content = SimpleConfigManager.getConfig()
             android.util.Log.e("BoxService", "Config loaded, length: ${content.length}")
-            // Local mixed inbounds are not guaranteed to be exposed by every
-            // Android libbox build. Xray owns a dedicated health HTTP inbound.
-            watchdogMixedProxyEnabled = false
+            watchdogMixedProxyEnabled = SingBoxRuntimeConfig.exposesMixedProxy(
+                content,
+                WATCHDOG_MIXED_PROXY_PORT,
+            )
             lastConfigFingerprint = configFingerprint(content)
             
             if (content.isBlank() || content == "{}") {
@@ -773,10 +783,16 @@ class BoxService(
     }
 
     private fun broadcastStatus(nextStatus: Status) {
+        val snapshot = sessionState.snapshot()
         Application.application.sendBroadcast(
             Intent(Action.BROADCAST_STATUS_CHANGED).apply {
                 `package` = Application.application.packageName
                 putExtra(Action.EXTRA_STATUS, nextStatus.ordinal)
+                putExtra(Action.EXTRA_SESSION_REASON, snapshot.reason)
+                putExtra(Action.EXTRA_DESIRED_RUNNING, snapshot.desiredRunning)
+                SimpleConfigManager.getManualDisconnectRequested()?.let {
+                    putExtra(Action.EXTRA_MANUAL_DISCONNECT_REQUESTED, it)
+                }
             }
         )
     }
@@ -862,12 +878,10 @@ class BoxService(
             android.util.Log.d("BoxService", "Watchdog: network/wake event $reason")
             refreshKeeperWakeLock(reason)
             commandServer?.wake()
-            runCatching {
-                DefaultNetworkMonitor.stop()
-                DefaultNetworkMonitor.start()
-            }.onFailure {
-                android.util.Log.w("BoxService", "Watchdog: network monitor refresh failed", it)
-            }
+
+            // The monitor callback has already selected the new network and
+            // scheduled libbox's interface update. Restarting it here drops
+            // the InterfaceUpdateListener and cancels that pending update.
 
             if (watchdogJob?.isActive != true) {
                 startNativeWatchdog()

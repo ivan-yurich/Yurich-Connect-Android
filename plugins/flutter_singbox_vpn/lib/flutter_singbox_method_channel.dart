@@ -108,6 +108,11 @@ class MethodChannelFlutterSingbox extends FlutterSingboxPlatform {
   }
 
   @override
+  Future<bool?> getManualDisconnectRequested() {
+    return methodChannel.invokeMethod<bool>('getManualDisconnectRequested');
+  }
+
+  @override
   Future<Map<String, dynamic>> getNetworkSnapshot() async {
     final snapshot = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
       'getNetworkSnapshot',

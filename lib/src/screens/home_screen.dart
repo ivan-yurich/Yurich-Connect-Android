@@ -760,8 +760,16 @@ class _HomeScreenState extends State<HomeScreen>
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
     final dnsProtectionMode = await _store.loadDnsProtectionMode();
-    final manualDisconnectRequested = await _store
+    final storedManualDisconnectRequested = await _store
         .loadManualDisconnectRequested();
+    final nativeManualDisconnectRequested =
+        await _loadNativeManualDisconnectRequested();
+    final manualDisconnectRequested =
+        nativeManualDisconnectRequested ?? storedManualDisconnectRequested;
+    if (nativeManualDisconnectRequested != null &&
+        nativeManualDisconnectRequested != storedManualDisconnectRequested) {
+      await _store.saveManualDisconnectRequested(manualDisconnectRequested);
+    }
     if (!mounted) {
       return;
     }
@@ -849,6 +857,20 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<bool?> _loadNativeManualDisconnectRequested() async {
+    try {
+      return await _vpnEngine.getManualDisconnectRequested().timeout(
+        _nativeShortTimeout,
+      );
+    } on Object catch (error) {
+      _queueLog(
+        'Native manual-disconnect state unavailable: '
+        '${_redactSensitive('$error')}',
+      );
+      return null;
+    }
+  }
+
   Future<void> _initVpn() async {
     _statusSubscription = _vpnEngine.onStatusChanged.listen(
       (event) {
@@ -872,9 +894,39 @@ class _HomeScreenState extends State<HomeScreen>
             }
             _applyNetworkSnapshot(event, source: 'status-event');
             final now = DateTime.now();
+            final nativeManualState = event['manualDisconnectRequested'];
+            final nativeManualStop =
+                nativeManualState == true &&
+                (status == AurumVpnStatus.stopping ||
+                    status == AurumVpnStatus.stopped);
+            final nativeManualStart =
+                nativeManualState == false &&
+                (status == AurumVpnStatus.starting ||
+                    status == AurumVpnStatus.started);
+            if (nativeManualStop || nativeManualStart) {
+              unawaited(_store.saveManualDisconnectRequested(nativeManualStop));
+            }
             var recoverUnexpectedStop = false;
             setState(() {
               _status = status;
+              if (nativeManualStop) {
+                _manualDisconnectRequested = true;
+                _autoRecoveryArmed = false;
+                _lastError = null;
+                _lastRecoverySource = null;
+                if (status == AurumVpnStatus.stopped) {
+                  _connectedSince = null;
+                  _lastTrafficAt = null;
+                  _lastHealthyAt = null;
+                  _lastIdleHealthCheckAt = null;
+                  _lastNetworkEvent = 'manual-stop:native-action';
+                  _message = s.vpnStopped;
+                }
+              } else if (nativeManualStart) {
+                _manualDisconnectRequested = false;
+                _lastError = null;
+                _lastRecoverySource = null;
+              }
               if (status == AurumVpnStatus.started) {
                 _lastError = null;
                 if (!_manualDisconnectRequested) {
@@ -1006,6 +1058,22 @@ class _HomeScreenState extends State<HomeScreen>
     );
 
     try {
+      final nativeManualDisconnectRequested =
+          await _loadNativeManualDisconnectRequested();
+      if (nativeManualDisconnectRequested != null) {
+        await _store.saveManualDisconnectRequested(
+          nativeManualDisconnectRequested,
+        );
+        if (mounted) {
+          setState(() {
+            _manualDisconnectRequested = nativeManualDisconnectRequested;
+            if (nativeManualDisconnectRequested) {
+              _autoRecoveryArmed = false;
+              _lastError = null;
+            }
+          });
+        }
+      }
       await _bestEffortNative(
         'setNotificationTitle',
         _vpnEngine.setNotificationTitle(_appName),
