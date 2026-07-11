@@ -41,6 +41,11 @@ class FlutterSingbox {
     return FlutterSingboxPlatform.instance.getVPNStatus();
   }
 
+  /// Returns the last explicit user disconnect state recorded by Android.
+  Future<bool?> getManualDisconnectRequested() {
+    return FlutterSingboxPlatform.instance.getManualDisconnectRequested();
+  }
+
   /// Get current Android network snapshot.
   Future<Map<String, dynamic>> getNetworkSnapshot() {
     return FlutterSingboxPlatform.instance.getNetworkSnapshot();

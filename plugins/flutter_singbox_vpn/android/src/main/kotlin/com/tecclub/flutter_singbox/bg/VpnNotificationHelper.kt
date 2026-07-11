@@ -169,6 +169,7 @@ class VpnNotificationHelper(private val context: Context) {
     private fun startPendingIntent(): PendingIntent {
         val intent = Intent(context, Settings.serviceClass()).apply {
             action = BoxService.ACTION_START
+            putExtra(Action.EXTRA_USER_INITIATED, true)
         }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             PendingIntent.getForegroundService(context, 103, intent, pendingFlags())
@@ -178,7 +179,10 @@ class VpnNotificationHelper(private val context: Context) {
     }
 
     private fun broadcastPendingIntent(action: String, requestCode: Int): PendingIntent {
-        val intent = Intent(action).setPackage(context.packageName)
+        val intent = Intent(action).apply {
+            `package` = context.packageName
+            putExtra(Action.EXTRA_USER_INITIATED, true)
+        }
         return PendingIntent.getBroadcast(context, requestCode, intent, pendingFlags())
     }
 

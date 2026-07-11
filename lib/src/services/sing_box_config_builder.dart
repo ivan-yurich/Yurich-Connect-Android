@@ -240,19 +240,20 @@ class SingBoxConfigBuilder {
     required Map<String, dynamic> proxyOutbound,
   }) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
-    proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
-    proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
     proxyOutbound.putIfAbsent('domain_resolver', () => _localDnsTag);
     proxyOutbound.putIfAbsent('domain_strategy', () => 'ipv4_only');
+
+    final usesQuicTransport =
+        profile.kind == VpnProfileKind.hysteria2 ||
+        profile.kind == VpnProfileKind.hysteria;
+    if (usesQuicTransport) {
+      return;
+    }
+
+    proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
+    proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
     proxyOutbound.putIfAbsent('network_strategy', () => 'fallback');
-    proxyOutbound.putIfAbsent(
-      'fallback_delay',
-      () =>
-          profile.kind == VpnProfileKind.hysteria2 ||
-              profile.kind == VpnProfileKind.hysteria
-          ? '300ms'
-          : '200ms',
-    );
+    proxyOutbound.putIfAbsent('fallback_delay', () => '200ms');
   }
 
   void _normalizeOutbound(

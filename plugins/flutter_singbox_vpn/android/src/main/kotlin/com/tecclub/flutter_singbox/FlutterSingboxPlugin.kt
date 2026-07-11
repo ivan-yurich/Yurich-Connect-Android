@@ -266,6 +266,19 @@ class FlutterSingboxPlugin :
             if (intent?.action == Action.BROADCAST_STATUS_CHANGED) {
                 val statusOrdinal = intent.getIntExtra(Action.EXTRA_STATUS, Status.Stopped.ordinal)
                 val status = Status.values()[statusOrdinal]
+                val manualDisconnectRequested = if (
+                    intent.hasExtra(Action.EXTRA_MANUAL_DISCONNECT_REQUESTED)
+                ) {
+                    intent.getBooleanExtra(Action.EXTRA_MANUAL_DISCONNECT_REQUESTED, false)
+                } else {
+                    null
+                }
+                val sessionReason = intent.getStringExtra(Action.EXTRA_SESSION_REASON)
+                val desiredRunning = if (intent.hasExtra(Action.EXTRA_DESIRED_RUNNING)) {
+                    intent.getBooleanExtra(Action.EXTRA_DESIRED_RUNNING, false)
+                } else {
+                    null
+                }
                 
                 android.util.Log.e("FlutterSingboxPlugin", "Received broadcast status change: ${status.name}, isStarting=$isStarting, hasStartupError=$hasStartupError")
                 
@@ -329,7 +342,12 @@ class FlutterSingboxPlugin :
                 }
                 
                 // Send status update via the helper method
-                sendStatusUpdate(status)
+                sendStatusUpdate(
+                    status,
+                    manualDisconnectRequested = manualDisconnectRequested,
+                    sessionReason = sessionReason,
+                    desiredRunning = desiredRunning,
+                )
             }
         }
     }
@@ -637,13 +655,23 @@ class FlutterSingboxPlugin :
     }
     
     // Helper method to send status updates to Flutter
-    private fun sendStatusUpdate(status: Status) {
+    private fun sendStatusUpdate(
+        status: Status,
+        manualDisconnectRequested: Boolean? = null,
+        sessionReason: String? = null,
+        desiredRunning: Boolean? = null,
+    ) {
         android.util.Log.e("FlutterSingboxPlugin", "Sending status update to Flutter: ${status.name}")
         val statusMap = currentNetworkSnapshot().toMutableMap()
         statusMap.putAll(mapOf(
             "status" to status.name,
             "statusCode" to status.ordinal
         ))
+        (manualDisconnectRequested
+            ?: runCatching { SimpleConfigManager.getManualDisconnectRequested() }.getOrNull())
+            ?.let { statusMap["manualDisconnectRequested"] = it }
+        sessionReason?.let { statusMap["sessionReason"] = it }
+        desiredRunning?.let { statusMap["desiredRunning"] = it }
         
         val handler = Handler(Looper.getMainLooper())
         handler.post {
@@ -827,6 +855,9 @@ class FlutterSingboxPlugin :
             }
             "getVPNStatus" -> {
                 getVPNStatus(result)
+            }
+            "getManualDisconnectRequested" -> {
+                result.success(SimpleConfigManager.getManualDisconnectRequested())
             }
             "getNetworkSnapshot" -> {
                 result.success(currentNetworkSnapshot())
@@ -1151,8 +1182,9 @@ class FlutterSingboxPlugin :
             )
             vpnNotificationHelper.updateNotification(connectionUiState)
             android.util.Log.e("FlutterSingboxPlugin", "Set VPN status to Starting")
-            sendStatusUpdate(Status.Starting)
             SimpleConfigManager.setStartedByUser(true)
+            SimpleConfigManager.setManualDisconnectRequested(false)
+            sendStatusUpdate(Status.Starting)
             
             // Reset session traffic counters
             sessionStartUplinkTotal = 0
@@ -1239,6 +1271,7 @@ class FlutterSingboxPlugin :
             val intent = Intent(context, Settings.serviceClass()).apply {
                 action = BoxService.ACTION_START
                 putExtra(BoxService.EXTRA_CONFIG_CONTENT, config)
+                putExtra(Action.EXTRA_USER_INITIATED, true)
             }
             android.util.Log.e("FlutterSingboxPlugin", "Created intent with ACTION_START and config extra")
             
@@ -1291,6 +1324,7 @@ class FlutterSingboxPlugin :
             stopCleanupCompleted = false
             isStarting = false
             SimpleConfigManager.setStartedByUser(false)
+            SimpleConfigManager.setManualDisconnectRequested(true)
             stopCleanupJob?.cancel()
             stopCleanupJob = null
             
@@ -1305,11 +1339,10 @@ class FlutterSingboxPlugin :
             // The broadcast receiver will handle status updates, and we'll disconnect after
             // the service is confirmed stopped
             android.util.Log.e("FlutterSingboxPlugin", "Sending SERVICE_CLOSE broadcast")
-            context.sendBroadcast(
-                Intent(Action.SERVICE_CLOSE).setPackage(
-                    context.packageName
-                )
-            )
+            context.sendBroadcast(Intent(Action.SERVICE_CLOSE).apply {
+                `package` = context.packageName
+                putExtra(Action.EXTRA_USER_INITIATED, true)
+            })
 
             result.success(true)
             
@@ -1344,11 +1377,10 @@ class FlutterSingboxPlugin :
 
                     if (running) {
                         android.util.Log.e("FlutterSingboxPlugin", "Service still running after graceful stop, requesting stopService")
-                        context.sendBroadcast(
-                            Intent(Action.SERVICE_CLOSE).setPackage(
-                                context.packageName
-                            )
-                        )
+                        context.sendBroadcast(Intent(Action.SERVICE_CLOSE).apply {
+                            `package` = context.packageName
+                            putExtra(Action.EXTRA_USER_INITIATED, true)
+                        })
                         context.stopService(Intent(context, Settings.serviceClass()))
                         val forceDeadline = System.currentTimeMillis() + 4000
                         while (System.currentTimeMillis() < forceDeadline) {

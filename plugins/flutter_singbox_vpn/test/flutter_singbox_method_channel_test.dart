@@ -26,6 +26,8 @@ void main() {
               return true;
             case 'getVPNStatus':
               return 'Stopped';
+            case 'getManualDisconnectRequested':
+              return true;
             default:
               return null;
           }
@@ -51,5 +53,9 @@ void main() {
 
   test('getVPNStatus', () async {
     expect(await platform.getVPNStatus(), 'Stopped');
+  });
+
+  test('getManualDisconnectRequested', () async {
+    expect(await platform.getManualDisconnectRequested(), true);
   });
 }

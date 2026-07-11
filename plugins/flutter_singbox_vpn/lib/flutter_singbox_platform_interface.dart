@@ -52,6 +52,14 @@ abstract class FlutterSingboxPlatform extends PlatformInterface {
     throw UnimplementedError('getVPNStatus() has not been implemented.');
   }
 
+  /// Returns the last explicit user disconnect state, or null when no native
+  /// user action has been recorded yet.
+  Future<bool?> getManualDisconnectRequested() {
+    throw UnimplementedError(
+      'getManualDisconnectRequested() has not been implemented.',
+    );
+  }
+
   /// Get current Android network snapshot used by recovery logic.
   Future<Map<String, dynamic>> getNetworkSnapshot() {
     throw UnimplementedError('getNetworkSnapshot() has not been implemented.');
