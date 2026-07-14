@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.113 - 2026-07-14
+
+- Added an Xray UID traffic sampler so VLESS XHTTP sessions report live upload,
+  download, and session totals without depending on the sing-box status channel;
+  stopping the tunnel now clears stale speeds while preserving the final total.
+
 ## 1.0.112 - 2026-07-14
 
 - Restarted the isolated VPN process cleanly on every runtime-config switch,
