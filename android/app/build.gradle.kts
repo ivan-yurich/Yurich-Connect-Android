@@ -67,6 +67,10 @@ android {
             versionCode = flutter.versionCode + 10000
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"play\"")
         }
+        create("soak") {
+            dimension = "distribution"
+            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"soak\"")
+        }
     }
 
     signingConfigs {

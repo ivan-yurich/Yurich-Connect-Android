@@ -58,6 +58,14 @@ class VpnStatusResolverTest {
         )
     }
 
+    @Test
+    fun runningServicePreservesReadinessGate() {
+        assertEquals(
+            Status.Starting,
+            resolve(startedByUser = true, currentStatus = Status.Starting)
+        )
+    }
+
     private fun resolve(
         startedByUser: Boolean,
         isStarting: Boolean = false,

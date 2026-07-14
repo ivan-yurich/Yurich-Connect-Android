@@ -76,7 +76,7 @@ void main() {
     expect(stream['realitySettings']['serverName'], 'www.microsoft.com');
     expect(stream['realitySettings']['publicKey'], 'abc123');
     expect(stream['realitySettings']['shortId'], '01');
-    expect(stream['realitySettings']['fingerprint'], 'chrome');
+    expect(stream['realitySettings']['fingerprint'], 'firefox');
     expect(stream['xhttpSettings']['path'], '/xhttp');
     expect(stream['xhttpSettings']['host'], 'cdn.example.com');
     expect(stream['xhttpSettings'].containsKey('headers'), isFalse);
@@ -117,11 +117,26 @@ void main() {
     expect(stream['security'], 'reality');
     expect(stream['realitySettings']['serverName'], 'www.microsoft.com');
     expect(stream['realitySettings']['publicKey'], 'abc123');
+    expect(stream['realitySettings']['fingerprint'], 'chrome');
     final vnext = proxy['settings']['vnext'] as List;
     final users = vnext.first['users'] as List;
     expect(users.first['flow'], 'xtls-rprx-vision');
     expect(xray['routing']['final'], isNull);
     expect(xray['routing']['rules'].last['outboundTag'], 'proxy');
+  });
+
+  test('preserves an explicit non-Chrome XHTTP fingerprint', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=xhttp&sni=example.com&path=%2Fxhttp&mode=packet-up&fp=safari#XHTTP';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final wrapper =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final xray = wrapper['xray'] as Map<String, dynamic>;
+    final proxy = (xray['outbounds'] as List).first as Map<String, dynamic>;
+    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+
+    expect(stream['tlsSettings']['fingerprint'], 'safari');
   });
 
   test('builds smart-route rules when enabled for Xray', () async {

@@ -21,6 +21,7 @@ import '../services/profile_auto_selector.dart';
 import '../services/profile_country_resolver.dart';
 import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
+import '../services/runtime_config_matcher.dart';
 import '../services/profile_engine_selector.dart';
 import '../services/profile_store.dart';
 import '../services/sensitive_data_redactor.dart';
@@ -221,10 +222,13 @@ class _HomeScreenState extends State<HomeScreen>
   bool _statusWatchdogInFlight = false;
   bool _tunnelHealthCheckInFlight = false;
   bool _notificationSyncInFlight = false;
+  bool _notificationSyncPending = false;
   bool _autoRecoveryArmed = false;
   bool _manualDisconnectRequested = false;
   bool _pingAllInFlight = false;
   bool _countryResolveInFlight = false;
+  bool _runtimeReconcileInFlight = false;
+  bool _runtimeReconciled = false;
   bool _logsExpanded = false;
   String? _lastConfigSummary;
   String? _lastKeeperAction;
@@ -823,6 +827,7 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_pingProfiles(profiles));
     unawaited(_resolveProfileCountries(profiles));
     unawaited(_refreshNetworkSnapshot('load'));
+    unawaited(_reconcileRestoredVlessRuntime());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(_showSubscriptionRenewalReminder(profiles));
@@ -868,6 +873,79 @@ class _HomeScreenState extends State<HomeScreen>
         '${_redactSensitive('$error')}',
       );
       return null;
+    }
+  }
+
+  Future<void> _reconcileRestoredVlessRuntime() async {
+    if (_runtimeReconcileInFlight || _runtimeReconciled) {
+      return;
+    }
+    _runtimeReconcileInFlight = true;
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      if (!mounted || _manualDisconnectRequested || _stoppingByUser) {
+        return;
+      }
+
+      final profile = _explicitSelectedProfile;
+      if (profile == null ||
+          (profile.kind != VpnProfileKind.vlessReality &&
+              profile.kind != VpnProfileKind.vlessTls)) {
+        return;
+      }
+
+      var status = await _vpnEngine.getVPNStatus().timeout(
+        _nativeShortTimeout,
+        onTimeout: () => _status,
+      );
+      if (status == AurumVpnStatus.starting) {
+        status = await _waitForVpnStatus({
+          AurumVpnStatus.started,
+          AurumVpnStatus.stopped,
+        }, timeout: const Duration(seconds: 8));
+      }
+      if (!mounted ||
+          status != AurumVpnStatus.started ||
+          _manualDisconnectRequested ||
+          _stoppingByUser) {
+        return;
+      }
+
+      final smartRouteBypassPackages = await _smartRouteBypassPackages();
+      final expectedConfig = _buildRuntimeConfig(
+        profile,
+        plan: _connectionPlans(profile).first,
+        smartRouteBypassPackages: smartRouteBypassPackages,
+      );
+      final currentConfig = await _vpnEngine.getConfig().timeout(
+        _nativeConfigTimeout,
+      );
+      if (RuntimeConfigMatcher.equivalent(currentConfig, expectedConfig)) {
+        _recordStabilityEvent('runtime-config-reconcile:matched');
+        return;
+      }
+
+      _recordStabilityEvent('runtime-config-reconcile:mismatch');
+      _queueLog(
+        'Restored VPN runtime differs from the selected VLESS profile; '
+        'restarting with the selected profile.',
+      );
+      final operation = _sessionController.beginProfileSwitch();
+      await _runQueuedBusy(
+        operation,
+        () => _startVpnCore(profile, operation: operation, rapidRestart: true),
+        message: s.switchingProfile,
+      );
+    } on VpnSessionCancelled catch (error) {
+      _queueLog('Runtime config reconciliation superseded: $error');
+    } on Object catch (error, stackTrace) {
+      final errorText = _redactSensitive('$error');
+      _recordStabilityEvent('runtime-config-reconcile:error:$errorText');
+      _queueLog('Runtime config reconciliation failed: $errorText');
+      _queueLog(_redactSensitive(stackTrace.toString().split('\n').first));
+    } finally {
+      _runtimeReconcileInFlight = false;
+      _runtimeReconciled = true;
     }
   }
 
@@ -1164,6 +1242,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _syncConnectionNotification({bool force = false}) async {
     if (_notificationSyncInFlight) {
+      _notificationSyncPending = true;
       return;
     }
     final now = DateTime.now();
@@ -1183,6 +1262,11 @@ class _HomeScreenState extends State<HomeScreen>
       );
     } finally {
       _notificationSyncInFlight = false;
+      final shouldResync = _notificationSyncPending;
+      _notificationSyncPending = false;
+      if (shouldResync && mounted) {
+        unawaited(_syncConnectionNotification(force: true));
+      }
     }
   }
 
@@ -2065,7 +2149,7 @@ class _HomeScreenState extends State<HomeScreen>
         if (started) {
           final finalStatus = await _waitForVpnStatus({
             AurumVpnStatus.started,
-          }, timeout: const Duration(seconds: 14));
+          }, timeout: const Duration(seconds: 40));
           if (finalStatus == AurumVpnStatus.started) {
             _sessionController.ensureCurrent(operation);
             final requiresSuccessfulProbe =

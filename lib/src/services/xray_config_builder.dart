@@ -231,6 +231,10 @@ class XrayConfigBuilder {
     final xhttp = transportType == 'xhttp'
         ? _xhttpSettings(transport)
         : const <String, dynamic>{};
+    final fingerprint = _runtimeFingerprint(
+      profile: profile,
+      configured: _string(utls?['fingerprint']),
+    );
 
     final streamSettings = <String, dynamic>{
       'network': transportType == 'xhttp' ? 'xhttp' : 'tcp',
@@ -243,8 +247,7 @@ class XrayConfigBuilder {
             'publicKey': _string(reality['public_key']),
           if (_string(reality['short_id'])?.isNotEmpty == true)
             'shortId': _string(reality['short_id']),
-          if (_string(utls?['fingerprint'])?.isNotEmpty == true)
-            'fingerprint': _string(utls?['fingerprint']),
+          'fingerprint': ?fingerprint,
           'spiderX': '/',
         },
       } else ...{
@@ -252,8 +255,7 @@ class XrayConfigBuilder {
         'tlsSettings': {
           'serverName': _string(tls['server_name']) ?? server,
           if (tls['insecure'] == true) 'allowInsecure': true,
-          if (_string(utls?['fingerprint'])?.isNotEmpty == true)
-            'fingerprint': _string(utls?['fingerprint']),
+          'fingerprint': ?fingerprint,
           if (tls['alpn'] is List) 'alpn': tls['alpn'],
         },
       },
@@ -335,6 +337,19 @@ class XrayConfigBuilder {
     }
     const supportedModes = {'auto', 'packet-up', 'stream-up', 'stream-one'};
     return supportedModes.contains(normalized) ? normalized : value;
+  }
+
+  String? _runtimeFingerprint({
+    required VpnProfile profile,
+    required String? configured,
+  }) {
+    final normalized = configured?.trim().toLowerCase();
+    if (profile.kind == VpnProfileKind.vlessXhttp &&
+        (normalized == null || normalized.isEmpty || normalized == 'chrome')) {
+      // The Android Xray/uTLS Chrome ClientHello stalls on some mobile paths.
+      return 'firefox';
+    }
+    return normalized == null || normalized.isEmpty ? null : configured!.trim();
   }
 
   Map<String, dynamic>? _map(Object? value) =>

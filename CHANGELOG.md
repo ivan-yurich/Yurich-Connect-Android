@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.112 - 2026-07-14
+
+- Restarted the isolated VPN process cleanly on every runtime-config switch,
+  preventing stale TUN descriptors and native crashes between sing-box and Xray.
+- Fixed XHTTP startup with compact Xray configs and Android-compatible uTLS
+  fingerprint selection while preserving explicit non-Chrome fingerprints.
+- Kept the foreground notification synchronized with the verified native tunnel
+  state after watchdog recovery and coalesced rapid Flutter status updates.
+- Persisted watchdog restart cooldown across process recovery and added a short
+  startup grace so Hysteria2 can warm up without an unnecessary early restart.
+- Completed a 12-hour LTE soak across VLESS Reality, NaiveProxy, Hysteria2, and
+  XHTTP with 720 samples, no app crashes or ANRs, and no duplicate TUN interfaces.
+
+## 1.0.111 - 2026-07-12
+
+- Delayed native `Started` status until DNS and HTTPS succeed through the
+  selected tunnel on at least two independent external endpoints.
+- Marked an active session as reconnecting while Android changes the default
+  Wi-Fi or cellular network, even if the VPN NetworkAgent remains validated.
+- Added bounded readiness retries, controlled runtime restart, and background
+  retry after restart cooldown instead of reporting a false connection.
+- Made VPN session state the single owner of native status updates and added
+  TLS hostname verification to native health probes.
+
+## 1.0.110 - 2026-07-12
+
+- Isolated the encrypted VPN runtime configuration from cross-process service
+  flags so Android cannot restore an older profile after a process restart.
+- Added one-time migration for existing encrypted runtime configurations.
+- Reconciled a restored VLESS tunnel with the profile selected in Flutter and
+  restarted it once when the native runtime still contains another profile.
+- Added regression coverage for semantic runtime-config comparison.
+
 ## 1.0.109 - 2026-07-11
 
 - Synchronized explicit start, stop, and restart actions between the Android

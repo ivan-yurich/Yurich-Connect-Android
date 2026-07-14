@@ -56,6 +56,21 @@ class VpnSessionStateMachineTest {
     }
 
     @Test
+    fun `network readiness gate keeps the active generation`() {
+        val state = VpnSessionStateMachine()
+        val start = state.requestStart("connect")
+        assertTrue(state.markConnected(start.generation, "connected"))
+
+        assertTrue(state.markReconnecting(start.generation, "network-validation"))
+        assertEquals(VpnSessionPhase.Reconnecting, state.snapshot().phase)
+        assertEquals(start.generation, state.snapshot().generation)
+        assertTrue(state.snapshot().desiredRunning)
+
+        assertTrue(state.markConnected(start.generation, "network-validated"))
+        assertEquals(VpnSessionPhase.Connected, state.snapshot().phase)
+    }
+
+    @Test
     fun `failed startup can clear automatic restart intent`() {
         val state = VpnSessionStateMachine()
         val start = state.requestStart("connect")

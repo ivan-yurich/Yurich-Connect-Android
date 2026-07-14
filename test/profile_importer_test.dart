@@ -202,6 +202,9 @@ void main() {
     expect(profiles.first.outbound?['password'], 'pass');
     expect(proxy['type'], 'naive');
     expect(proxy['tls'], {'enabled': true, 'server_name': 'example.com'});
+    expect(config['experimental'], {
+      'cache_file': {'enabled': true, 'path': 'cache.db', 'store_fakeip': true},
+    });
     final dnsServers =
         (config['dns'] as Map<String, dynamic>)['servers'] as List;
     expect(dnsServers.first, {'type': 'local', 'tag': 'local-dns'});

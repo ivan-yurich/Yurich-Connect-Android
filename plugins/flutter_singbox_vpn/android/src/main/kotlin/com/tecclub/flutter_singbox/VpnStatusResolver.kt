@@ -15,6 +15,7 @@ internal object VpnStatusResolver {
         isShuttingDown -> Status.Stopping
         currentStatus == Status.Stopping -> Status.Stopping
         !startedByUser -> Status.Stopped
+        currentStatus == Status.Starting -> Status.Starting
         requiresActiveVpnNetwork && !hasActiveVpnNetwork -> Status.Starting
         else -> Status.Started
     }

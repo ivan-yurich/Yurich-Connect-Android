@@ -6,11 +6,13 @@ import com.tecclub.flutter_singbox.Application
 
 object SimpleConfigManager {
     private const val TAG = "SimpleConfigManager"
-    private const val PREF_NAME = "singbox_config"
+    private const val STATE_PREF_NAME = "singbox_config"
+    private const val CONFIG_PREF_NAME = "singbox_runtime_config"
     private const val KEY_CONFIG = "config_json"
     private const val KEY_AUTO_START = "auto_start"
     private const val KEY_STARTED_BY_USER = "started_by_user"
     private const val KEY_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
+    private const val KEY_LAST_WATCHDOG_RESTART_AT = "last_watchdog_restart_at"
     private const val KEY_NOTIFICATION_TITLE = "notification_title"
     private const val KEY_NOTIFICATION_DESCRIPTION = "notification_description"
     private const val DEFAULT_CONFIG = "{}"
@@ -44,7 +46,7 @@ object SimpleConfigManager {
         if (config.isBlank()) return false
 
         return try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(CONFIG_PREF_NAME, Context.MODE_PRIVATE)
             val encrypted = SecureConfigCipher.encrypt(config)
             if (!prefs.edit().putString(KEY_CONFIG, encrypted).commit()) {
                 Log.e(TAG, "Config commit returned false")
@@ -59,6 +61,7 @@ object SimpleConfigManager {
     }
     
     // Get current config JSON string
+    @Synchronized
     fun getConfig(): String {
         Log.e(TAG, "Getting config")
         
@@ -70,9 +73,8 @@ object SimpleConfigManager {
         
         // Otherwise load from preferences
         try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            val stored = prefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
-            val config = decodeStoredConfig(prefs, stored)
+            val context = Application.application
+            val config = loadPersistedConfig(context)
             cachedConfig = config
             
             Log.e(TAG, "Config loaded from preferences, length: ${config.length}")
@@ -91,14 +93,37 @@ object SimpleConfigManager {
 
     fun hasValidConfig(context: Context): Boolean {
         return try {
-            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            val stored = prefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
-            val config = decodeStoredConfig(prefs, stored)
+            val config = loadPersistedConfig(context)
             config.isNotEmpty() && config != DEFAULT_CONFIG
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check config with context", e)
             false
         }
+    }
+
+    private fun loadPersistedConfig(context: Context): String {
+        val configPrefs = context.getSharedPreferences(CONFIG_PREF_NAME, Context.MODE_PRIVATE)
+        val stored = configPrefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
+        if (stored.isNotEmpty() && stored != DEFAULT_CONFIG) {
+            return decodeStoredConfig(configPrefs, stored)
+        }
+
+        // Older releases kept runtime secrets and service flags in one preference
+        // file. A flag commit from the separate :vpn process could then restore an
+        // older config. Migrate once into a config-only file to make writes isolated.
+        val legacyPrefs = context.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
+        val legacyStored = legacyPrefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
+        if (legacyStored.isEmpty() || legacyStored == DEFAULT_CONFIG) {
+            return DEFAULT_CONFIG
+        }
+
+        val config = decodeStoredConfig(legacyPrefs, legacyStored)
+        val encrypted = SecureConfigCipher.encrypt(config)
+        check(configPrefs.edit().putString(KEY_CONFIG, encrypted).commit()) {
+            "Unable to migrate runtime config into isolated storage"
+        }
+        Log.i(TAG, "Migrated runtime config into isolated storage")
+        return config
     }
 
     private fun decodeStoredConfig(
@@ -123,7 +148,7 @@ object SimpleConfigManager {
     // Set auto-start setting
     fun setAutoStart(enabled: Boolean) {
         try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_AUTO_START, enabled).apply()
             Log.d(TAG, "Auto-start set to: $enabled")
         } catch (e: Exception) {
@@ -134,7 +159,7 @@ object SimpleConfigManager {
     // Get auto-start setting
     fun getAutoStart(): Boolean {
         return try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.getBoolean(KEY_AUTO_START, false)
         } catch (e: UninitializedPropertyAccessException) {
             Log.w(TAG, "Application not initialized, cannot get auto-start setting")
@@ -145,7 +170,7 @@ object SimpleConfigManager {
     // Set notification title
     fun setNotificationTitle(title: String) {
         try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.edit().putString(KEY_NOTIFICATION_TITLE, title).apply()
             Log.d(TAG, "Notification title set to: $title")
         } catch (e: Exception) {
@@ -156,7 +181,7 @@ object SimpleConfigManager {
     // Get notification title
     fun getNotificationTitle(): String {
         return try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.getString(KEY_NOTIFICATION_TITLE, DEFAULT_NOTIFICATION_TITLE) ?: DEFAULT_NOTIFICATION_TITLE
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get notification title", e)
@@ -167,7 +192,7 @@ object SimpleConfigManager {
     // Set notification description
     fun setNotificationDescription(description: String) {
         try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.edit().putString(KEY_NOTIFICATION_DESCRIPTION, description).apply()
             Log.d(TAG, "Notification description set to: $description")
         } catch (e: Exception) {
@@ -178,7 +203,7 @@ object SimpleConfigManager {
     // Get notification description
     fun getNotificationDescription(): String {
         return try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.getString(KEY_NOTIFICATION_DESCRIPTION, DEFAULT_NOTIFICATION_DESCRIPTION) ?: DEFAULT_NOTIFICATION_DESCRIPTION
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get notification description", e)
@@ -189,7 +214,7 @@ object SimpleConfigManager {
     // Get auto-start setting with context (for use before Application is initialized)
     fun getAutoStart(context: Context): Boolean {
         return try {
-            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.getBoolean(KEY_AUTO_START, false)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get auto-start setting", e)
@@ -200,7 +225,7 @@ object SimpleConfigManager {
     // Set started by user flag
     fun setStartedByUser(started: Boolean) {
         try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             if (!prefs.edit().putBoolean(KEY_STARTED_BY_USER, started).commit()) {
                 Log.w(TAG, "Started-by-user commit returned false")
             }
@@ -211,13 +236,13 @@ object SimpleConfigManager {
     
     // Get started by user flag
     fun getStartedByUser(): Boolean {
-        val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
         return prefs.getBoolean(KEY_STARTED_BY_USER, false)
     }
 
     fun getStartedByUser(context: Context): Boolean {
         return try {
-            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             prefs.getBoolean(KEY_STARTED_BY_USER, false)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get started-by-user setting with context", e)
@@ -227,7 +252,7 @@ object SimpleConfigManager {
 
     fun setManualDisconnectRequested(requested: Boolean) {
         try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             if (!prefs.edit().putBoolean(KEY_MANUAL_DISCONNECT_REQUESTED, requested).commit()) {
                 Log.w(TAG, "Manual-disconnect commit returned false")
             }
@@ -238,7 +263,7 @@ object SimpleConfigManager {
 
     fun getManualDisconnectRequested(): Boolean? {
         return try {
-            val prefs = Application.application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val prefs = Application.application.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE)
             if (!prefs.contains(KEY_MANUAL_DISCONNECT_REQUESTED)) {
                 null
             } else {
@@ -247,6 +272,32 @@ object SimpleConfigManager {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get manual-disconnect setting", e)
             null
+        }
+    }
+
+    fun setLastWatchdogRestartAt(timestampMs: Long): Boolean {
+        return try {
+            val prefs = Application.application.getSharedPreferences(
+                STATE_PREF_NAME,
+                Context.MODE_PRIVATE,
+            )
+            prefs.edit().putLong(KEY_LAST_WATCHDOG_RESTART_AT, timestampMs).commit()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to persist watchdog restart timestamp", e)
+            false
+        }
+    }
+
+    fun getLastWatchdogRestartAt(): Long {
+        return try {
+            val prefs = Application.application.getSharedPreferences(
+                STATE_PREF_NAME,
+                Context.MODE_PRIVATE,
+            )
+            prefs.getLong(KEY_LAST_WATCHDOG_RESTART_AT, 0L)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read watchdog restart timestamp", e)
+            0L
         }
     }
 }

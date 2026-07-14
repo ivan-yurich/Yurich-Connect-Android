@@ -37,6 +37,7 @@ migrate_working_dir/
 **/build/
 **/bin/
 **/obj/
+/plugins/**/pubspec.lock
 
 # Local release artifacts belong in GitHub Releases, not git history
 /release/
@@ -85,6 +86,8 @@ config.json
 profiles.json
 
 # Local diagnostics and one-off inspection scripts
+/.agents/
+/.codex/
 /.tmp_xray_jar_dump/
 /temp_fetch.js
 /temp_links_view.ps1

@@ -957,11 +957,20 @@ class FlutterSingboxPlugin :
 
     private fun updateConnectionNotification(state: Map<*, *>?, result: Result) {
         try {
-            connectionUiState = ConnectionUiState.fromMap(state)
-            if (
-                connectionUiState.status != ConnectionStatus.Disconnected ||
-                _vpnStatus.value != Status.Stopped
-            ) {
+            val nativeStatus = _vpnStatus.value
+            val requestedState = ConnectionUiState.fromMap(state)
+            val resolvedStatus = ConnectionNotificationStatusPolicy.resolve(
+                requestedStatus = requestedState.status,
+                nativeStatus = nativeStatus,
+            )
+            if (requestedState.status != resolvedStatus) {
+                android.util.Log.w(
+                    "FlutterSingboxPlugin",
+                    "Ignoring stale notification status ${requestedState.status}; native=$nativeStatus",
+                )
+            }
+            connectionUiState = requestedState.copy(status = resolvedStatus)
+            if (nativeStatus != Status.Stopped) {
                 vpnNotificationHelper.updateNotification(connectionUiState)
             }
             result.success(true)

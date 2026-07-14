@@ -216,6 +216,13 @@ internal class ConfigParserTest {
         assertEquals("local-dns", dns["final"]!!.jsonPrimitive.content)
         assertEquals(8192, dns["cache_capacity"]!!.jsonPrimitive.int)
         assertNotNull(dns["rules"]!!.jsonArray.first().jsonObject["domain"])
+
+        val cacheFile = json["experimental"]!!
+            .jsonObject["cache_file"]!!
+            .jsonObject
+        assertTrue(cacheFile["enabled"]!!.jsonPrimitive.boolean)
+        assertEquals("cache.db", cacheFile["path"]!!.jsonPrimitive.content)
+        assertTrue(cacheFile["store_fakeip"]!!.jsonPrimitive.boolean)
     }
 
     private fun parseJson(value: String) = Json.parseToJsonElement(value).jsonObject

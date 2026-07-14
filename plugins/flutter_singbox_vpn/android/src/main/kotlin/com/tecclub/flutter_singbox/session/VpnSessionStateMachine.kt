@@ -62,6 +62,17 @@ internal class VpnSessionStateMachine {
         true
     }
 
+    fun markReconnecting(generation: Long, reason: String): Boolean = synchronized(lock) {
+        if (!isCurrentLocked(generation, requireDesiredRunning = true) ||
+            phase == VpnSessionPhase.Stopping
+        ) {
+            return@synchronized false
+        }
+        phase = VpnSessionPhase.Reconnecting
+        this.reason = reason
+        true
+    }
+
     fun markStopped(
         generation: Long,
         reason: String,
