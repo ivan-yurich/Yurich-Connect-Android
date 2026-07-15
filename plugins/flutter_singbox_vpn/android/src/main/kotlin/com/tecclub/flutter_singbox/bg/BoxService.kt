@@ -68,6 +68,8 @@ class BoxService(
         private const val WATCHDOG_INTERVAL_MS = 60_000L
         private const val WATCHDOG_IDLE_INTERVAL_MS = 90_000L
         private const val WATCHDOG_RESTART_COOLDOWN_MS = 90_000L
+        private const val WATCHDOG_FLAP_WINDOW_MS = 5 * 60 * 1000L
+        private const val WATCHDOG_FLAP_RESTART_THRESHOLD = 4
         private const val READINESS_INITIAL_DELAY_MS = 1_500L
         private const val READINESS_RETRY_DELAY_MS = 3_000L
         private const val READINESS_BACKGROUND_RETRY_MS = 20_000L
@@ -118,6 +120,10 @@ class BoxService(
     @Volatile private var readinessJob: Job? = null
     private val readinessRevision = AtomicLong(0L)
     private var watchdogFailures = 0
+    private val watchdogFlapDetector = TunnelFlapDetector(
+        threshold = WATCHDOG_FLAP_RESTART_THRESHOLD,
+        windowMs = WATCHDOG_FLAP_WINDOW_MS,
+    )
     private var watchdogMixedProxyEnabled = false
     private var lastNetworkWakeEventAt = 0L
     private var lastStartAttemptAt = 0L
@@ -198,7 +204,15 @@ class BoxService(
         }
     }
 
-    private var lastProfileName = ""
+    @Volatile private var lastProfileName = ""
+
+    private fun currentProfileName(): String {
+        val persistedName = SimpleConfigManager.getActiveProfileName()
+        if (persistedName.isNotBlank()) {
+            lastProfileName = persistedName
+        }
+        return lastProfileName.ifBlank { "Yurich Connect" }
+    }
 
     private fun currentSessionStatus(): Status = when (sessionState.snapshot().phase) {
         VpnSessionPhase.Stopped,
@@ -281,7 +295,8 @@ class BoxService(
                 "Command server is unavailable after initialization"
             }
 
-            lastProfileName = "Yurich Connect"
+            lastProfileName = SimpleConfigManager.getActiveProfileName()
+                .ifBlank { "Yurich Connect" }
             // withContext(Dispatchers.Main) {
             //     android.util.Log.e("BoxService", "Updating notification with profile name")
             //     // notification.show(lastProfileName, "Starting...")
@@ -316,7 +331,7 @@ class BoxService(
             startTrafficMonitor()
 
             withContext(Dispatchers.Main) {
-                notification.show(lastProfileName, "Проверка соединения...")
+                notification.show(currentProfileName(), "Проверка соединения...")
             }
             refreshKeeperWakeLock("service-start")
             startReadinessValidation(
@@ -351,7 +366,8 @@ class BoxService(
             ensureCurrentSession(generation)
             activeRuntimeCore = VpnRuntimeCore.Xray
             android.util.Log.e("BoxService", "Starting Xray service...")
-            lastProfileName = "Yurich Connect XHTTP"
+            lastProfileName = SimpleConfigManager.getActiveProfileName()
+                .ifBlank { "Yurich Connect XHTTP" }
             watchdogMixedProxyEnabled = XrayRuntimeConfig.exposesHttpProxy(
                 configJson,
                 WATCHDOG_MIXED_PROXY_PORT,
@@ -369,7 +385,7 @@ class BoxService(
 
             ensureCurrentSession(generation)
             withContext(Dispatchers.Main) {
-                notification.show(lastProfileName, "Проверка соединения...")
+                notification.show(currentProfileName(), "Проверка соединения...")
             }
             refreshKeeperWakeLock("xray-service-start")
             startReadinessValidation(
@@ -685,7 +701,7 @@ class BoxService(
                     return Service.START_NOT_STICKY
                 } else {
                     android.util.Log.e("BoxService", "Service already running, reusing config")
-                    val notificationTitle = lastProfileName.ifBlank { "Yurich Connect" }
+                    val notificationTitle = currentProfileName()
                     val notificationText = if (currentStatus == Status.Started) {
                         "Подключено"
                     } else {
@@ -909,7 +925,7 @@ class BoxService(
             )
             publishSessionStatus()
             withContext(Dispatchers.Main) {
-                notification.show(lastProfileName, "Подключено")
+                notification.show(currentProfileName(), "Подключено")
             }
         }
         startNativeWatchdog()
@@ -949,7 +965,7 @@ class BoxService(
             try {
                 if (demoteUntilReady || snapshot.phase != VpnSessionPhase.Connected) {
                     withContext(Dispatchers.Main) {
-                        notification.show(lastProfileName, "Проверка соединения...")
+                        notification.show(currentProfileName(), "Проверка соединения...")
                     }
                 }
 
@@ -961,7 +977,8 @@ class BoxService(
 
                     val hasNetwork = hasDefaultNetwork()
                     sawDefaultNetwork = sawDefaultNetwork || hasNetwork
-                    val healthy = hasNetwork && probeMixedProxy()
+                    val probe = if (hasNetwork) probeMixedProxy() else null
+                    val healthy = probe?.healthy == true
                     if (healthy) {
                         markRuntimeReady(generation, reason)
                         return@launch
@@ -980,7 +997,7 @@ class BoxService(
                     return@launch
                 }
                 withContext(Dispatchers.Main) {
-                    notification.show(lastProfileName, "Восстановление соединения...")
+                    notification.show(currentProfileName(), "Восстановление соединения...")
                 }
 
                 val startupGraceElapsed =
@@ -1048,7 +1065,7 @@ class BoxService(
                     watchdogFailures = 0
                     android.util.Log.w("BoxService", "Watchdog: waiting for default network")
                     withContext(Dispatchers.Main) {
-                        notification.show(lastProfileName, "Ожидание сети...")
+                        notification.show(currentProfileName(), "Ожидание сети...")
                     }
                     delay(15_000L)
                     continue
@@ -1061,7 +1078,23 @@ class BoxService(
                     continue
                 }
 
-                val healthy = probeMixedProxy()
+                val probe = probeMixedProxy()
+                val repeatedDegradation = watchdogFlapDetector.record(
+                    nowMs = SystemClock.elapsedRealtime(),
+                    successfulEndpoints = probe.successfulEndpoints,
+                    totalEndpoints = probe.totalEndpoints,
+                )
+                if (repeatedDegradation) {
+                    android.util.Log.w(
+                        "BoxService",
+                        "Watchdog: repeated degraded quorum; restarting VPN runtime"
+                    )
+                    if (restartFromWatchdog("repeated-degraded-quorum")) {
+                        return@launch
+                    }
+                }
+
+                val healthy = probe.healthy
                 if (healthy) {
                     if (watchdogFailures > 0) {
                         android.util.Log.d("BoxService", "Watchdog: tunnel recovered")
@@ -1095,6 +1128,7 @@ class BoxService(
         readinessJob = null
         watchdogRestarting = false
         lastHealthyDefaultNetwork = null
+        watchdogFlapDetector.reset()
     }
 
     private fun handleNetworkWakeEvent(reason: String) {
@@ -1111,6 +1145,9 @@ class BoxService(
         val isDefaultNetworkEvent = reason.contains("default-network", ignoreCase = true)
         val networkChanged = isDefaultNetworkEvent &&
             currentDefaultNetwork != lastHealthyDefaultNetwork
+        if (networkChanged) {
+            watchdogFlapDetector.reset()
+        }
         val alreadyValidating = snapshot.phase == VpnSessionPhase.Reconnecting
         val now = System.currentTimeMillis()
         if (now - lastNetworkWakeEventAt < NETWORK_WAKE_DEBOUNCE_MS &&
@@ -1172,7 +1209,7 @@ class BoxService(
                 android.util.Log.w("BoxService", "Watchdog: restarting VPN runtime after $reason")
                 refreshKeeperWakeLock("watchdog-restart")
                 withContext(Dispatchers.Main) {
-                    notification.show(lastProfileName, "Восстановление соединения...")
+                    notification.show(currentProfileName(), "Восстановление соединения...")
                 }
                 recycleVpnService("watchdog:$reason", reconnect.generation)
             }
@@ -1185,7 +1222,18 @@ class BoxService(
         return true
     }
 
-    private suspend fun probeMixedProxy(): Boolean = coroutineScope {
+    private data class TunnelProbeResult(
+        val successfulEndpoints: Int,
+        val totalEndpoints: Int,
+    ) {
+        val healthy: Boolean
+            get() = TunnelReadinessPolicy.isHealthy(
+                successfulEndpoints = successfulEndpoints,
+                totalEndpoints = totalEndpoints,
+            )
+    }
+
+    private suspend fun probeMixedProxy(): TunnelProbeResult = coroutineScope {
         val targets = arrayOf(
             "www.cloudflare.com" to "/cdn-cgi/trace",
             "connectivitycheck.gstatic.com" to "/generate_204",
@@ -1197,15 +1245,15 @@ class BoxService(
             }
         }.awaitAll()
         val successfulEndpoints = results.count { it }
-        val healthy = TunnelReadinessPolicy.isHealthy(
+        val result = TunnelProbeResult(
             successfulEndpoints = successfulEndpoints,
             totalEndpoints = targets.size,
         )
         android.util.Log.d(
             "BoxService",
-            "External readiness quorum: $successfulEndpoints/${targets.size}, healthy=$healthy"
+            "External readiness quorum: $successfulEndpoints/${targets.size}, healthy=${result.healthy}"
         )
-        healthy
+        result
     }
 
     private fun probeMixedProxyEndpoint(host: String, path: String): Boolean {

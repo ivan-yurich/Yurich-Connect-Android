@@ -974,6 +974,9 @@ class FlutterSingboxPlugin :
                 )
             }
             connectionUiState = requestedState.copy(status = resolvedStatus)
+            requestedState.profileName
+                ?.takeIf { it.isNotBlank() }
+                ?.let(SimpleConfigManager::setActiveProfileName)
             if (nativeStatus != Status.Stopped) {
                 vpnNotificationHelper.updateNotification(connectionUiState)
             }

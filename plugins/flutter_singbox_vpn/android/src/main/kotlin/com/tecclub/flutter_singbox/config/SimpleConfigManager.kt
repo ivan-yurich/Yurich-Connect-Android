@@ -13,6 +13,7 @@ object SimpleConfigManager {
     private const val KEY_STARTED_BY_USER = "started_by_user"
     private const val KEY_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
     private const val KEY_LAST_WATCHDOG_RESTART_AT = "last_watchdog_restart_at"
+    private const val KEY_ACTIVE_PROFILE_NAME = "active_profile_name"
     private const val KEY_NOTIFICATION_TITLE = "notification_title"
     private const val KEY_NOTIFICATION_DESCRIPTION = "notification_description"
     private const val DEFAULT_CONFIG = "{}"
@@ -298,6 +299,36 @@ object SimpleConfigManager {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read watchdog restart timestamp", e)
             0L
+        }
+    }
+
+    fun setActiveProfileName(profileName: String): Boolean {
+        val normalized = profileName.trim().take(160)
+        if (normalized.isEmpty()) {
+            return false
+        }
+        return try {
+            val prefs = Application.application.getSharedPreferences(
+                STATE_PREF_NAME,
+                Context.MODE_PRIVATE,
+            )
+            prefs.edit().putString(KEY_ACTIVE_PROFILE_NAME, normalized).commit()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to persist active profile name", e)
+            false
+        }
+    }
+
+    fun getActiveProfileName(): String {
+        return try {
+            val prefs = Application.application.getSharedPreferences(
+                STATE_PREF_NAME,
+                Context.MODE_PRIVATE,
+            )
+            prefs.getString(KEY_ACTIVE_PROFILE_NAME, "")?.trim().orEmpty()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read active profile name", e)
+            ""
         }
     }
 }
