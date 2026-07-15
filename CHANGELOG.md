@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.114 - 2026-07-15
+
+- Expanded the Russian and English in-app FAQ with protocol guidance plus
+  practical Smart Route and Auto DNS setup, verification, and fallback steps.
+- Added a rolling native watchdog detector that restarts the VPN runtime after
+  four degraded endpoint quorums in five minutes while ignoring isolated
+  timeouts and resetting its history after a real Android network change.
+- Persisted the active profile label across native background recovery so the
+  foreground notification no longer falls back to an empty profile name.
+- Completed a 12-hour single-profile LTE baseline with 720/720 healthy samples,
+  no process restarts, crashes, ANRs, duplicate TUN interfaces, or memory leak;
+  extended observation then reproduced the long-session TLS degradation that
+  this release recovers from earlier.
+
 ## 1.0.113 - 2026-07-14
 
 - Added an Xray UID traffic sampler so VLESS XHTTP sessions report live upload,
