@@ -34,7 +34,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_singbox_vpn:
     path: plugins/flutter_singbox_vpn
-  mobile_scanner: ^7.2.0
+  mobile_scanner: ^7.3.0
   flutter_secure_storage: ^10.3.1
   shared_preferences: ^2.5.5
   qr_flutter: ^4.1.0
