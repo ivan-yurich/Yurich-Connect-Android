@@ -73,9 +73,9 @@ class _StatusPanel extends StatelessWidget {
           ? null
           : ProfileGeo.countryCodeToFlag(connectionState.countryCode),
     ].whereType<String>().where((value) => value.isNotEmpty).join(' ');
-    final ping = connectionState.pingMs == null
-        ? '—'
-        : '${connectionState.pingMs} ms';
+    final ping =
+        connectionState.latencyLabel ??
+        (connectionState.pingMs == null ? '—' : '${connectionState.pingMs} ms');
 
     return AnimatedBuilder(
       animation: pulse,
@@ -1546,7 +1546,7 @@ class _AppCenterPanel extends StatelessWidget {
     required this.onDonate,
     required this.onDeveloper,
     required this.currentVersion,
-    required this.externalUpdatesEnabled,
+    required this.distributionChannel,
     required this.availableVersion,
     required this.updateMessage,
     required this.updateBusy,
@@ -1567,7 +1567,7 @@ class _AppCenterPanel extends StatelessWidget {
   final VoidCallback onDonate;
   final VoidCallback onDeveloper;
   final String currentVersion;
-  final bool externalUpdatesEnabled;
+  final AppDistributionChannel distributionChannel;
   final String? availableVersion;
   final String? updateMessage;
   final bool updateBusy;
@@ -1612,7 +1612,7 @@ class _AppCenterPanel extends StatelessWidget {
             _UpdatePanel(
               strings: strings,
               currentVersion: currentVersion,
-              externalUpdatesEnabled: externalUpdatesEnabled,
+              distributionChannel: distributionChannel,
               availableVersion: availableVersion,
               message: updateMessage,
               busy: updateBusy,
@@ -1860,7 +1860,7 @@ class _UpdatePanel extends StatelessWidget {
   const _UpdatePanel({
     required this.strings,
     required this.currentVersion,
-    required this.externalUpdatesEnabled,
+    required this.distributionChannel,
     required this.availableVersion,
     required this.message,
     required this.busy,
@@ -1870,7 +1870,7 @@ class _UpdatePanel extends StatelessWidget {
 
   final _Strings strings;
   final String currentVersion;
-  final bool externalUpdatesEnabled;
+  final AppDistributionChannel distributionChannel;
   final String? availableVersion;
   final String? message;
   final bool busy;
@@ -1880,6 +1880,31 @@ class _UpdatePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasUpdate = availableVersion != null;
+    final description = switch (distributionChannel) {
+      AppDistributionChannel.github => strings.updateDescription,
+      AppDistributionChannel.play => strings.playUpdateDescription,
+      AppDistributionChannel.soak => strings.soakUpdateDescription,
+      AppDistributionChannel.unknown => strings.unknownUpdateDescription,
+    };
+    final channelLabel = switch (distributionChannel) {
+      AppDistributionChannel.github => strings.updateChannel,
+      AppDistributionChannel.play => strings.playUpdateChannel,
+      AppDistributionChannel.soak => strings.soakUpdateChannel,
+      AppDistributionChannel.unknown => strings.unknownUpdateChannel,
+    };
+    final actionLabel = switch (distributionChannel) {
+      AppDistributionChannel.github => strings.checkUpdates,
+      AppDistributionChannel.play => strings.openGooglePlay,
+      AppDistributionChannel.soak => strings.updatesDisabled,
+      AppDistributionChannel.unknown => strings.retry,
+    };
+    final actionIcon = switch (distributionChannel) {
+      AppDistributionChannel.github => Icons.download_for_offline_outlined,
+      AppDistributionChannel.play => Icons.open_in_new,
+      AppDistributionChannel.soak => Icons.science_outlined,
+      AppDistributionChannel.unknown => Icons.refresh,
+    };
+    final actionEnabled = distributionChannel != AppDistributionChannel.soak;
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       leading: Icon(
@@ -1941,9 +1966,7 @@ class _UpdatePanel extends StatelessWidget {
                   const SizedBox(height: 12),
                 ],
                 Text(
-                  externalUpdatesEnabled
-                      ? strings.updateDescription
-                      : strings.playUpdateDescription,
+                  description,
                   style: const TextStyle(color: _mutedGold, height: 1.35),
                 ),
                 const SizedBox(height: 8),
@@ -1957,9 +1980,7 @@ class _UpdatePanel extends StatelessWidget {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        externalUpdatesEnabled
-                            ? strings.updateChannel
-                            : strings.playUpdateChannel,
+                        channelLabel,
                         style: const TextStyle(color: _goldSoft, height: 1.25),
                       ),
                     ),
@@ -1971,19 +1992,15 @@ class _UpdatePanel extends StatelessWidget {
                 ],
                 const SizedBox(height: 12),
                 FilledButton.icon(
-                  onPressed: busy ? null : onCheck,
+                  onPressed: busy || !actionEnabled ? null : onCheck,
                   icon: busy
                       ? const SizedBox(
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.download_for_offline_outlined),
-                  label: Text(
-                    externalUpdatesEnabled
-                        ? strings.checkUpdates
-                        : strings.openGooglePlay,
-                  ),
+                      : Icon(actionIcon),
+                  label: Text(actionLabel),
                 ),
               ],
             ),

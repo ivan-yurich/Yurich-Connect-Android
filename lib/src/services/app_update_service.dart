@@ -25,6 +25,24 @@ const _updateRetryDelays = [
 ];
 const _apkZipMagic = [0x50, 0x4B];
 
+enum AppDistributionChannel {
+  github,
+  play,
+  soak,
+  unknown;
+
+  static AppDistributionChannel fromWireValue(String? value) {
+    return switch (value?.trim().toLowerCase()) {
+      'github' => AppDistributionChannel.github,
+      'play' => AppDistributionChannel.play,
+      'soak' => AppDistributionChannel.soak,
+      _ => AppDistributionChannel.unknown,
+    };
+  }
+
+  bool get externalUpdatesEnabled => this == AppDistributionChannel.github;
+}
+
 class AppUpdateInfo {
   const AppUpdateInfo({
     required this.version,
@@ -126,16 +144,16 @@ class AppUpdateService {
     return value?.whereType<String>().toList(growable: false) ?? const [];
   }
 
-  Future<String> distributionChannel() async {
+  Future<AppDistributionChannel> distributionChannel() async {
     if (!Platform.isAndroid) {
-      return 'play';
+      return AppDistributionChannel.unknown;
     }
-    return await _channel.invokeMethod<String>('getDistributionChannel') ??
-        'play';
+    final value = await _channel.invokeMethod<String>('getDistributionChannel');
+    return AppDistributionChannel.fromWireValue(value);
   }
 
   Future<bool> externalUpdatesEnabled() async =>
-      await distributionChannel() == 'github';
+      (await distributionChannel()).externalUpdatesEnabled;
 
   Future<AppUpdateInfo?> findLatest({
     required String currentVersion,

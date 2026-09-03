@@ -282,6 +282,46 @@ class FlutterSingboxPlugin :
                 }
                 
                 android.util.Log.e("FlutterSingboxPlugin", "Received broadcast status change: ${status.name}, isStarting=$isStarting, hasStartupError=$hasStartupError")
+
+                val guardedStatus = VpnStatusResolver.resolveServiceBroadcastStatus(
+                    broadcastStatus = status,
+                    isShuttingDown = isShuttingDown,
+                    isStarting = isStarting,
+                    startedByUser = runCatching {
+                        SimpleConfigManager.getStartedByUser()
+                    }.getOrDefault(false),
+                )
+                if (guardedStatus != status) {
+                    if (guardedStatus == Status.Stopping) {
+                        // libbox can publish Stopped before Android has destroyed
+                        // the VpnService and released its TUN. Release every client
+                        // binding so stopSelf() can finish; the cleanup job owns the
+                        // final service check and user-visible Stopped state.
+                        android.util.Log.i(
+                            "FlutterSingboxPlugin",
+                            "Deferring Stopped broadcast until VPN service exit",
+                        )
+                        statusClient.disconnect()
+                        logClient.disconnect()
+                        connection.disconnect()
+                    } else {
+                        // A clean Xray/sing-box process switch emits Stopped from
+                        // the old process after the new startup intent is active.
+                        android.util.Log.i(
+                            "FlutterSingboxPlugin",
+                            "Ignoring stale Stopped broadcast during startup",
+                        )
+                    }
+                    _vpnStatus.value = guardedStatus
+                    statusInitialized = true
+                    sendStatusUpdate(
+                        guardedStatus,
+                        manualDisconnectRequested = manualDisconnectRequested,
+                        sessionReason = sessionReason,
+                        desiredRunning = desiredRunning,
+                    )
+                    return
+                }
                 
                 // Skip if we're shutting down and receive Started status
                 if (isShuttingDown && status == Status.Started) {
@@ -296,6 +336,15 @@ class FlutterSingboxPlugin :
                     hasStartupError = true
                     isStarting = false
                     // Don't return - let the status update flow through
+                }
+
+                // Readiness can be confirmed before the delayed service bind
+                // finishes. Treat the service's Started broadcast as the
+                // authoritative end of startup so a concurrent status poll
+                // cannot regress the tunnel back to Starting indefinitely.
+                if (status == Status.Started) {
+                    isStarting = false
+                    hasStartupError = false
                 }
                 
                 // Update the status
@@ -734,7 +783,8 @@ class FlutterSingboxPlugin :
             connectivity.allNetworks.any { network ->
                 val capabilities = connectivity.getNetworkCapabilities(network) ?: return@any false
                 capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             }
         } catch (e: Exception) {
             android.util.Log.w("FlutterSingboxPlugin", "VPN network snapshot failed", e)

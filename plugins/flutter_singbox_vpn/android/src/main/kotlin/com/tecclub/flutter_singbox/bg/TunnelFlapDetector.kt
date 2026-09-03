@@ -20,7 +20,12 @@ internal class TunnelFlapDetector(
         totalEndpoints: Int,
     ): Boolean {
         prune(nowMs)
-        if (totalEndpoints <= 0 || successfulEndpoints >= totalEndpoints) {
+        if (
+            totalEndpoints <= 0 ||
+            successfulEndpoints < 0 ||
+            successfulEndpoints > totalEndpoints ||
+            TunnelReadinessPolicy.isHealthy(successfulEndpoints, totalEndpoints)
+        ) {
             return false
         }
 

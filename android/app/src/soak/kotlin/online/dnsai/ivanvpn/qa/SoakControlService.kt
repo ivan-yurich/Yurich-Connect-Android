@@ -13,7 +13,7 @@ class SoakControlService : Service() {
             requireNotNull(intent) { "Missing QA control intent" }
             SoakControlCommandHandler.handle(applicationContext, intent)
         } catch (error: Throwable) {
-            Log.e(TAG, "QA command failed: ${error.message}", error)
+            Log.e(TAG, "QA command failed type=${error.javaClass.simpleName}")
         } finally {
             stopSelf(startId)
         }

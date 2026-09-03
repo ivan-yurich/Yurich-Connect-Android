@@ -22,7 +22,7 @@ class VpnProcessRestartReceiver : BroadcastReceiver() {
         thread(name = "yurich-vpn-core-switch") {
             try {
                 Thread.sleep(RESTART_DELAY_MS)
-                Application.initializeIfNeeded(appContext)
+                Application.initializeBaseIfNeeded(appContext)
                 val shouldRestart = SimpleConfigManager.getStartedByUser(appContext) &&
                     SimpleConfigManager.hasValidConfig(appContext)
                 if (!shouldRestart) {

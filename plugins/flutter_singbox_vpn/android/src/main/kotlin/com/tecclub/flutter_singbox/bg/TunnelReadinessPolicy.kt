@@ -10,11 +10,17 @@ internal object TunnelReadinessPolicy {
         return successfulEndpoints >= REQUIRED_ENDPOINT_SUCCESSES
     }
 
-    fun canRestart(nowMs: Long, lastRestartAtMs: Long, cooldownMs: Long): Boolean {
+    fun canRestart(
+        nowMs: Long,
+        lastRestartAtMs: Long,
+        cooldownMs: Long,
+        allowCooldownBypass: Boolean = false,
+    ): Boolean {
         if (cooldownMs < 0L) {
             return false
         }
-        return lastRestartAtMs == 0L ||
+        return allowCooldownBypass ||
+            lastRestartAtMs == 0L ||
             nowMs < lastRestartAtMs ||
             nowMs - lastRestartAtMs >= cooldownMs
     }

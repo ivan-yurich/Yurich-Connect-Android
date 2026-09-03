@@ -64,6 +64,18 @@ void main() {
   });
 
   group('ConnectionUiState', () {
+    test('preserves a protocol-specific latency label', () {
+      final state = ConnectionUiState.connected(
+        uploadSpeed: '0 B/s',
+        downloadSpeed: '0 B/s',
+        totalTraffic: '0 B',
+        latencyLabel: 'DNS 24 ms',
+      );
+
+      expect(state.latencyLabel, 'DNS 24 ms');
+      expect(state.toJson()['latencyLabel'], 'DNS 24 ms');
+    });
+
     test('serializes idle, degraded, network changing and failed states', () {
       expect(
         ConnectionUiState.idle(

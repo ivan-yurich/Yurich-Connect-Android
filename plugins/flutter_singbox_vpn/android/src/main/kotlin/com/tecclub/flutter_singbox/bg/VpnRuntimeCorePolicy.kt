@@ -14,4 +14,8 @@ internal object VpnRuntimeCorePolicy {
         return if (isXray) VpnRuntimeCore.Xray else VpnRuntimeCore.SingBox
     }
 
+    fun requiresCleanProcess(
+        previous: VpnRuntimeCore?,
+        incoming: VpnRuntimeCore,
+    ): Boolean = previous != null && previous != incoming
 }

@@ -29,6 +29,8 @@ final class VpnSessionController {
   int _pendingOperations = 0;
   bool _desiredRunning = false;
   bool _disposed = false;
+  Completer<void>? _supersededSignal;
+  int? _supersededSignalGeneration;
 
   int get generation => _generation;
   int get pendingOperations => _pendingOperations;
@@ -64,6 +66,27 @@ final class VpnSessionController {
     }
   }
 
+  /// Completes with [future] unless a newer session operation supersedes it.
+  ///
+  /// This is intended for cancellable waits and read-only polling. Native
+  /// start/stop mutations must still be awaited so commands cannot overlap.
+  Future<T> cancelWhenSuperseded<T>(
+    VpnSessionOperation operation,
+    Future<T> future,
+  ) {
+    ensureCurrent(operation);
+    final signal = _supersededSignal;
+    if (signal == null || _supersededSignalGeneration != operation.generation) {
+      return Future<T>.error(VpnSessionCancelled(operation.generation));
+    }
+    return Future.any<T>(<Future<T>>[
+      future,
+      signal.future.then<T>((_) {
+        throw VpnSessionCancelled(operation.generation);
+      }),
+    ]);
+  }
+
   Future<T> enqueue<T>(
     VpnSessionOperation operation,
     Future<T> Function() action,
@@ -92,6 +115,7 @@ final class VpnSessionController {
     _disposed = true;
     _generation += 1;
     _desiredRunning = false;
+    _completeSupersededSignal();
   }
 
   VpnSessionOperation _begin(
@@ -101,8 +125,20 @@ final class VpnSessionController {
     if (_disposed) {
       throw StateError('VPN session controller is disposed.');
     }
+    _completeSupersededSignal();
     _generation += 1;
     _desiredRunning = desiredRunning;
+    _supersededSignal = Completer<void>();
+    _supersededSignalGeneration = _generation;
     return VpnSessionOperation(generation: _generation, command: command);
+  }
+
+  void _completeSupersededSignal() {
+    final signal = _supersededSignal;
+    if (signal != null && !signal.isCompleted) {
+      signal.complete();
+    }
+    _supersededSignal = null;
+    _supersededSignalGeneration = null;
   }
 }

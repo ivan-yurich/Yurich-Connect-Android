@@ -25,7 +25,7 @@ class SoakControlReceiver : BroadcastReceiver() {
             try {
                 SoakControlCommandHandler.handle(appContext, intent)
             } catch (error: Throwable) {
-                Log.e(TAG, "QA command failed: ${error.message}", error)
+                Log.e(TAG, "QA command failed type=${error.javaClass.simpleName}")
             } finally {
                 pendingResult.finish()
             }
@@ -39,10 +39,15 @@ class SoakControlReceiver : BroadcastReceiver() {
 
 internal object SoakControlCommandHandler {
     fun handle(context: Context, intent: Intent) {
-        Application.initializeIfNeeded(context)
+        Application.initializeBaseIfNeeded(context)
         when (intent.getStringExtra(EXTRA_COMMAND)?.trim()?.lowercase()) {
             COMMAND_ACTIVATE -> activate(context, intent)
             COMMAND_STOP -> {
+                // Keep QA-initiated stops semantically identical to a user stop.
+                // Otherwise Flutter treats the Stopped broadcast as a crash and
+                // arms automatic recovery during long-running soak tests.
+                SimpleConfigManager.setStartedByUser(false)
+                SimpleConfigManager.setManualDisconnectRequested(true)
                 BoxService.stop()
                 Log.i(TAG, "QA stop requested")
             }
@@ -92,7 +97,11 @@ internal object SoakControlCommandHandler {
             putExtra(BoxService.EXTRA_CONFIG_CONTENT, config)
         }
         ContextCompat.startForegroundService(context, serviceIntent)
-        Log.i(TAG, "QA activate requested label=$label configLength=${config.length}")
+        Log.i(
+            TAG,
+            "QA activate requested labelPresent=${label.isNotEmpty()} " +
+                "configLength=${config.length}",
+        )
     }
 
     private fun decodeConfig(encoded: String): String {

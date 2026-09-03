@@ -38,6 +38,18 @@ class TunnelReadinessPolicyTest {
     }
 
     @Test
+    fun `new physical network may bypass cooldown once`() {
+        assertTrue(
+            TunnelReadinessPolicy.canRestart(
+                nowMs = 15_000L,
+                lastRestartAtMs = 10_000L,
+                cooldownMs = 90_000L,
+                allowCooldownBypass = true,
+            )
+        )
+    }
+
+    @Test
     fun `first restart is allowed`() {
         assertTrue(
             TunnelReadinessPolicy.canRestart(
@@ -65,6 +77,17 @@ class TunnelReadinessPolicyTest {
             TunnelReadinessPolicy.canRestartAfterStartupGrace(
                 nowMs = 40_000L,
                 startAttemptAtMs = 10_000L,
+                graceMs = 30_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `cleared startup marker allows recovery after confirmed readiness`() {
+        assertTrue(
+            TunnelReadinessPolicy.canRestartAfterStartupGrace(
+                nowMs = 20_000L,
+                startAttemptAtMs = 0L,
                 graceMs = 30_000L,
             )
         )

@@ -42,6 +42,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -70,7 +71,10 @@ class BoxService(
         private const val WATCHDOG_RESTART_COOLDOWN_MS = 90_000L
         private const val WATCHDOG_FLAP_WINDOW_MS = 5 * 60 * 1000L
         private const val WATCHDOG_FLAP_RESTART_THRESHOLD = 4
-        private const val READINESS_INITIAL_DELAY_MS = 1_500L
+        // Both embedded runtimes expose the mixed proxy in well under 500 ms on
+        // supported devices. Keep a small settle window, then rely on the real
+        // 2-of-3 external quorum instead of an unconditional startup sleep.
+        private const val READINESS_INITIAL_DELAY_MS = 750L
         private const val READINESS_RETRY_DELAY_MS = 3_000L
         private const val READINESS_BACKGROUND_RETRY_MS = 20_000L
         private const val READINESS_PROBE_ATTEMPTS = 2
@@ -78,14 +82,19 @@ class BoxService(
         private const val HEALTH_CONNECT_TIMEOUT_MS = 2_000
         private const val HEALTH_PROXY_RESPONSE_TIMEOUT_MS = 3_000
         private const val HEALTH_TLS_TIMEOUT_MS = 4_000
-        private const val KEEPER_WAKE_LOCK_MS = 10 * 60 * 1000L
+        // Keep the CPU awake only while starting/recovering a tunnel. A healthy
+        // foreground VPN must be allowed to enter Doze instead of extending this
+        // lock from every periodic health probe.
+        private const val KEEPER_WAKE_LOCK_MS = 60_000L
         private const val STICKY_RESTART_DELAY_MS = 2_500L
+        private const val NETWORK_RESET_DELAY_MS = 250L
         private const val NETWORK_SETTLE_DELAY_MS = 6_000L
         private const val WAKE_SETTLE_DELAY_MS = 3_000L
         private const val NETWORK_WAKE_DEBOUNCE_MS = 5_000L
         private const val NETWORK_WAKE_GRACE_MS = 45_000L
         private const val LIFECYCLE_RECOVERY_TIMEOUT_MS = 30_000L
         private const val CORE_PROCESS_EXIT_DELAY_MS = 600L
+        @Volatile private var processRuntimeCore: VpnRuntimeCore? = null
 
         fun start() {
             val intent = Intent(Application.application, Settings.serviceClass()).apply {
@@ -117,6 +126,7 @@ class BoxService(
     private val lifecycleMutex = Mutex()
     private var lifecycleJob: Job? = null
     private var watchdogJob: Job? = null
+    private var networkResetJob: Job? = null
     @Volatile private var readinessJob: Job? = null
     private val readinessRevision = AtomicLong(0L)
     private var watchdogFailures = 0
@@ -124,6 +134,7 @@ class BoxService(
         threshold = WATCHDOG_FLAP_RESTART_THRESHOLD,
         windowMs = WATCHDOG_FLAP_WINDOW_MS,
     )
+    private val networkResetTracker = NetworkResetTracker<Network>()
     private var watchdogMixedProxyEnabled = false
     private var lastNetworkWakeEventAt = 0L
     private var lastStartAttemptAt = 0L
@@ -167,7 +178,6 @@ class BoxService(
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         serviceUpdateIdleMode()
                     }
-                    refreshKeeperWakeLock("idle-mode")
                     handleNetworkWakeEvent("idle-mode")
                 }
 
@@ -288,8 +298,10 @@ class BoxService(
                 return
             }
             activeRuntimeCore = VpnRuntimeCore.SingBox
+            processRuntimeCore = VpnRuntimeCore.SingBox
 
             Application.ensureLibboxInitialized(service.applicationContext)
+            verifyNativeRuntimeIsolation(VpnRuntimeCore.SingBox)
             startCommandServer()
             val activeCommandServer = checkNotNull(commandServer) {
                 "Command server is unavailable after initialization"
@@ -365,6 +377,7 @@ class BoxService(
         try {
             ensureCurrentSession(generation)
             activeRuntimeCore = VpnRuntimeCore.Xray
+            processRuntimeCore = VpnRuntimeCore.Xray
             android.util.Log.e("BoxService", "Starting Xray service...")
             lastProfileName = SimpleConfigManager.getActiveProfileName()
                 .ifBlank { "Yurich Connect XHTTP" }
@@ -381,6 +394,7 @@ class BoxService(
             val response = withContext(Dispatchers.IO) {
                 runner.start(configJson)
             }
+            verifyNativeRuntimeIsolation(VpnRuntimeCore.Xray)
             android.util.Log.e("BoxService", "Xray service started: $response")
 
             ensureCurrentSession(generation)
@@ -412,11 +426,67 @@ class BoxService(
         }
     }
 
-    private suspend fun recycleVpnService(reason: String, generation: Long) {
+    private suspend fun recycleVpnService(
+        reason: String,
+        generation: Long,
+        incomingRuntimeCore: VpnRuntimeCore? = null,
+    ) {
         ensureCurrentSession(generation)
-        withContext(Dispatchers.Main) {
-            restartInCleanProcess(reason)
+        val targetRuntimeCore = incomingRuntimeCore ?: VpnRuntimeCorePolicy.classify(
+            runCatching { SimpleConfigManager.getConfig() }.getOrDefault("{}"),
+        )
+        val previousRuntimeCore = processRuntimeCore ?: activeRuntimeCore
+        val watchdogRecovery = reason.startsWith("watchdog:")
+        if (
+            watchdogRecovery ||
+            VpnRuntimeCorePolicy.requiresCleanProcess(previousRuntimeCore, targetRuntimeCore)
+        ) {
+            // A watchdog can be recovering a blocked Go/JNI runtime. Graceful
+            // in-process teardown is not cancellable once JNI blocks and would
+            // hold lifecycleMutex forever, so use the isolated-process escape
+            // hatch for confirmed health recovery. Routine same-core config
+            // switches still recycle in-process without an exit_self event.
+            withContext(Dispatchers.Main) {
+                restartInCleanProcess(
+                    "$reason:${previousRuntimeCore?.name}->${targetRuntimeCore.name}",
+                )
+            }
+            return
         }
+
+        restartRuntimeInProcess(reason, generation, targetRuntimeCore)
+    }
+
+    private suspend fun restartRuntimeInProcess(
+        reason: String,
+        generation: Long,
+        targetRuntimeCore: VpnRuntimeCore,
+    ) {
+        ensureCurrentSession(generation)
+        android.util.Log.w(
+            "BoxService",
+            "Recycling ${targetRuntimeCore.name} runtime in the current VPN process after $reason",
+        )
+        stopNativeWatchdog(clearRestarting = false)
+        refreshKeeperWakeLock("runtime-recycle")
+        withContext(Dispatchers.Main) {
+            notification.show(currentProfileName(), "Восстановление соединения...")
+        }
+
+        stopXrayRunner("runtime recycle after $reason")
+        closeCommandServer("runtime recycle after $reason")
+        try {
+            DefaultNetworkMonitor.stop()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.e("BoxService", "$reason: network monitor stop failed", e)
+        }
+        closeTunFileDescriptor()
+        activeRuntimeCore = null
+
+        ensureCurrentSession(generation)
+        startService(generation)
     }
 
     override fun serviceStop() {
@@ -671,7 +741,7 @@ class BoxService(
 
     @Suppress("SameReturnValue")
     internal fun onStartCommand(): Int {
-        Application.initializeIfNeeded(service.applicationContext)
+        Application.initializeBaseIfNeeded(service.applicationContext)
         var currentStatus = currentSessionStatus()
         android.util.Log.e("BoxService", "onStartCommand called, current status: $currentStatus")
         val keepRunning = runCatching { SimpleConfigManager.getStartedByUser() }.getOrDefault(false)
@@ -680,6 +750,19 @@ class BoxService(
             configFingerprint(incomingConfig)
         }.getOrDefault("")
         val incomingRuntimeCore = VpnRuntimeCorePolicy.classify(incomingConfig)
+
+        if (
+            currentStatus == Status.Stopped &&
+            VpnRuntimeCorePolicy.requiresCleanProcess(
+                previous = processRuntimeCore,
+                incoming = incomingRuntimeCore,
+            )
+        ) {
+            restartInCleanProcess(
+                "stopped-runtime-switch:${processRuntimeCore?.name}->${incomingRuntimeCore.name}",
+            )
+            return Service.START_NOT_STICKY
+        }
 
         if (currentStatus != Status.Stopped) {
             if (shouldRecoverStaleLifecycleState(currentStatus)) {
@@ -693,12 +776,21 @@ class BoxService(
                     incomingFingerprint != (lastConfigFingerprint ?: "")
 
                 if (hasConfigChange) {
-                    sessionState.requestReconnect("runtime-config-switch")
+                    val reconnect = sessionState.requestReconnect("runtime-config-switch")
+                        ?: return if (keepRunning) {
+                            Service.START_STICKY
+                        } else {
+                            Service.START_NOT_STICKY
+                        }
                     publishSessionStatus()
-                    restartInCleanProcess(
-                        "runtime-config-switch:${activeRuntimeCore?.name}->${incomingRuntimeCore.name}"
-                    )
-                    return Service.START_NOT_STICKY
+                    launchLifecycle(reconnect.generation) {
+                        recycleVpnService(
+                            reason = "runtime-config-switch",
+                            generation = reconnect.generation,
+                            incomingRuntimeCore = incomingRuntimeCore,
+                        )
+                    }
+                    return if (keepRunning) Service.START_STICKY else Service.START_NOT_STICKY
                 } else {
                     android.util.Log.e("BoxService", "Service already running, reusing config")
                     val notificationTitle = currentProfileName()
@@ -743,8 +835,14 @@ class BoxService(
                         "Xray config detected, skipping sing-box command server"
                     )
                 } else {
+                    // Record the process owner before the first native library
+                    // load. If initialization fails halfway through, a later
+                    // Xray start must still force a clean VPN process instead
+                    // of loading both Go runtimes into the same process.
+                    processRuntimeCore = VpnRuntimeCore.SingBox
                     android.util.Log.e("BoxService", "Ensuring libbox initialization")
                     Application.ensureLibboxInitialized(service.applicationContext)
+                    verifyNativeRuntimeIsolation(VpnRuntimeCore.SingBox)
                     android.util.Log.e("BoxService", "Starting command server")
                     startCommandServer()
                 }
@@ -917,6 +1015,8 @@ class BoxService(
         }
 
         lastHealthyDefaultNetwork = DefaultNetworkMonitor.defaultNetwork
+        networkResetTracker.markCurrent(lastHealthyDefaultNetwork)
+        lastStartAttemptAtElapsed = 0L
         watchdogFailures = 0
         if (!wasConnected) {
             android.util.Log.i(
@@ -928,6 +1028,7 @@ class BoxService(
                 notification.show(currentProfileName(), "Подключено")
             }
         }
+        releaseKeeperWakeLock()
         startNativeWatchdog()
         return true
     }
@@ -1058,7 +1159,6 @@ class BoxService(
         watchdogJob = serviceScope.launch {
             delay(WATCHDOG_INITIAL_GRACE_MS)
             while (isActive && currentSessionStatus() == Status.Started) {
-                refreshKeeperWakeLock("watchdog")
                 commandServer?.wake()
 
                 if (!hasDefaultNetwork()) {
@@ -1121,13 +1221,18 @@ class BoxService(
         }
     }
 
-    private fun stopNativeWatchdog() {
+    private fun stopNativeWatchdog(clearRestarting: Boolean = true) {
         cancelPeriodicWatchdog()
+        networkResetJob?.cancel()
+        networkResetJob = null
         readinessRevision.incrementAndGet()
         readinessJob?.cancel()
         readinessJob = null
-        watchdogRestarting = false
+        if (clearRestarting) {
+            watchdogRestarting = false
+        }
         lastHealthyDefaultNetwork = null
+        networkResetTracker.clear()
         watchdogFlapDetector.reset()
     }
 
@@ -1142,6 +1247,9 @@ class BoxService(
         }
 
         val currentDefaultNetwork = DefaultNetworkMonitor.defaultNetwork
+        val shouldResetRuntimeNetwork = networkResetTracker.onNetworkEvent(
+            currentDefaultNetwork,
+        )
         val isDefaultNetworkEvent = reason.contains("default-network", ignoreCase = true)
         val networkChanged = isDefaultNetworkEvent &&
             currentDefaultNetwork != lastHealthyDefaultNetwork
@@ -1164,6 +1272,12 @@ class BoxService(
             "Watchdog: network/wake event $reason, changed=$networkChanged"
         )
         refreshKeeperWakeLock(reason)
+        if (shouldResetRuntimeNetwork) {
+            scheduleRuntimeNetworkReset(
+                network = checkNotNull(currentDefaultNetwork),
+                generation = snapshot.generation,
+            )
+        }
         commandServer?.wake()
 
         // A changed Android default network invalidates the previous outbound
@@ -1176,15 +1290,53 @@ class BoxService(
         )
     }
 
+    private fun scheduleRuntimeNetworkReset(network: Network, generation: Long) {
+        val expectedCommandServer = commandServer ?: return
+        networkResetJob?.cancel()
+        networkResetJob = serviceScope.launch {
+            delay(NETWORK_RESET_DELAY_MS)
+            if (!sessionState.isCurrent(generation) ||
+                DefaultNetworkMonitor.defaultNetwork != network ||
+                commandServer !== expectedCommandServer
+            ) {
+                return@launch
+            }
+
+            runCatching {
+                expectedCommandServer.resetNetwork()
+            }.onSuccess {
+                android.util.Log.i(
+                    "BoxService",
+                    "Reset sing-box connections after Android default-network change",
+                )
+            }.onFailure {
+                android.util.Log.e(
+                    "BoxService",
+                    "Unable to reset sing-box after Android network change",
+                    it,
+                )
+            }
+            runCatching { expectedCommandServer.wake() }
+                .onFailure {
+                    android.util.Log.w("BoxService", "Unable to wake sing-box after reset", it)
+                }
+        }
+    }
+
     private suspend fun restartFromWatchdog(reason: String): Boolean {
         val now = SystemClock.elapsedRealtime()
         val lastRestartAt = SimpleConfigManager.getLastWatchdogRestartAt()
+        val networkRecoveryAllowance =
+            reason.contains("default-network", ignoreCase = true) &&
+                networkResetTracker.hasRecoveryAllowance()
+        val restartAllowed = TunnelReadinessPolicy.canRestart(
+            nowMs = now,
+            lastRestartAtMs = lastRestartAt,
+            cooldownMs = WATCHDOG_RESTART_COOLDOWN_MS,
+            allowCooldownBypass = networkRecoveryAllowance,
+        )
         if (watchdogRestarting ||
-            !TunnelReadinessPolicy.canRestart(
-                nowMs = now,
-                lastRestartAtMs = lastRestartAt,
-                cooldownMs = WATCHDOG_RESTART_COOLDOWN_MS,
-            )
+            !restartAllowed
         ) {
             android.util.Log.w("BoxService", "Watchdog: restart skipped by cooldown")
             return false
@@ -1202,8 +1354,17 @@ class BoxService(
             android.util.Log.w("BoxService", "Watchdog: restart rejected by session state")
             return false
         }
+        if (networkRecoveryAllowance) {
+            networkResetTracker.consumeRecoveryAllowance()
+        }
         publishSessionStatus()
         try {
+            // A periodic watchdog recovery runs inside watchdogJob itself. Detach
+            // that caller before recycleVpnService stops the old watchdog so the
+            // in-process restart is not cancelled halfway through teardown.
+            if (watchdogJob === currentCoroutineContext()[Job]) {
+                watchdogJob = null
+            }
             lifecycleMutex.withLock {
                 ensureCurrentSession(reconnect.generation)
                 android.util.Log.w("BoxService", "Watchdog: restarting VPN runtime after $reason")
@@ -1325,6 +1486,23 @@ class BoxService(
             }
         }
         return false
+    }
+
+    private fun verifyNativeRuntimeIsolation(expected: VpnRuntimeCore) {
+        val snapshot = NativeRuntimeIsolation.requireIsolated(expected)
+        if (snapshot == null) {
+            android.util.Log.w(
+                "RuntimeIsolation",
+                "RUNTIME_ISOLATION core=${expected.name} maps=unavailable",
+            )
+            return
+        }
+        android.util.Log.i(
+            "RuntimeIsolation",
+            "RUNTIME_ISOLATION core=${expected.name} " +
+                "libbox=${snapshot.libboxLoaded} " +
+                "libgojni=${snapshot.libgojniLoaded} safe=true",
+        )
     }
 
     private fun watchdogDelayMs(): Long {

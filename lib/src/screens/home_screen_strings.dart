@@ -535,6 +535,62 @@ class _Strings {
     _ => 'Открыть Google Play',
   };
 
+  String get playUpdatesOnly => switch (this) {
+    _Strings.en => 'Play builds are updated through Google Play.',
+    _ => 'Обновления Play-сборки устанавливаются через Google Play.',
+  };
+
+  String get soakUpdateDescription => switch (this) {
+    _Strings.en =>
+      'This internal build is intended for long-running QA. Automatic app updates are disabled to keep test results reproducible.',
+    _ =>
+      'Эта внутренняя сборка предназначена для длительных QA-тестов. Автообновления отключены, чтобы результаты теста оставались воспроизводимыми.',
+  };
+
+  String get soakUpdateChannel => switch (this) {
+    _Strings.en => 'Update channel: soak test',
+    _ => 'Канал обновлений: тестовый soak',
+  };
+
+  String get soakUpdatesDisabled => switch (this) {
+    _Strings.en => 'Updates are disabled in the soak test build.',
+    _ => 'В тестовой soak-сборке обновления отключены.',
+  };
+
+  String get unknownUpdateDescription => switch (this) {
+    _Strings.en =>
+      'The app could not determine its update channel. Retry after the app finishes starting.',
+    _ =>
+      'Приложение не смогло определить канал обновлений. Повтори проверку после завершения запуска.',
+  };
+
+  String get unknownUpdateChannel => switch (this) {
+    _Strings.en => 'Update channel: detecting...',
+    _ => 'Канал обновлений: определяется...',
+  };
+
+  String get updateChannelUnavailable => switch (this) {
+    _Strings.en => 'The update channel is temporarily unavailable.',
+    _ => 'Канал обновлений временно недоступен.',
+  };
+
+  String get updateCheckTimedOut => switch (this) {
+    _Strings.en =>
+      'The update server did not respond within 60 seconds. Check the network and retry.',
+    _ =>
+      'Сервер обновлений не ответил за 60 секунд. Проверь сеть и повтори попытку.',
+  };
+
+  String get updatesDisabled => switch (this) {
+    _Strings.en => 'Updates disabled',
+    _ => 'Обновления отключены',
+  };
+
+  String get retry => switch (this) {
+    _Strings.en => 'Retry',
+    _ => 'Повторить',
+  };
+
   String updateAvailable(String version) => switch (this) {
     _Strings.en => 'New version available: $version',
     _ => 'Доступна новая версия: $version',

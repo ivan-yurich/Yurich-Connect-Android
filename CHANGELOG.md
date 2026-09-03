@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.117 - 2026-09-03
+
+- Released native client bindings after runtime cleanup and waited for the
+  Android VPN service to exit before accepting its final `Stopped` state,
+  preventing overlapping profile starts and duplicate TUN interfaces.
+- Ignored the old core's stale `Stopped` broadcast while a user-requested
+  cross-core startup is active, avoiding a false disconnect during switching.
+- Reset the active sing-box network once after a real Android underlay change,
+  ended startup grace after confirmed readiness, and allowed one controlled
+  watchdog cooldown bypass for the newly available network.
+- Checked latency for every imported profile in bounded batches instead of only
+  the first twelve, and displayed DNS lookup latency for UDP-based Turbo
+  profiles without presenting it as a QUIC round-trip time.
+
+## 1.0.116 - 2026-08-11
+
+- Fixed the native watchdog so a healthy two-of-three endpoint quorum no longer
+  accumulates false degradation and triggers periodic VPN process exits.
+- Recycled routine same-core profile changes in-process while retaining a clean
+  isolated-process fallback for real core switches and confirmed watchdog hangs.
+- Bounded rapid reconnect phases, cancelled superseded waits, required confirmed
+  native shutdown before restart, and reused the last working Naive mode first.
+- Probed Xray startup endpoints concurrently so one slow provider cannot reject
+  an otherwise healthy tunnel or hide working traffic counters.
+- Hardened the 24/48-hour soak observer with active-only wakelock accounting,
+  counter/cadence coverage gates, verified network attribution, and background
+  profile control that avoids waking the app UI for every test transition.
+
+## 1.0.115 - 2026-07-15
+
+- Distinguished GitHub, Google Play, soak-test, and temporarily unknown update
+  channels so internal or still-loading builds no longer claim to use Play.
+- Raised the Android build number for a signed, data-preserving migration from
+  an accidentally installed Play-flavor APK back to the GitHub update channel.
+- Bounded manual update checks to 60 seconds so an unavailable GitHub endpoint
+  cannot leave the Updates panel blocked indefinitely.
+
 ## 1.0.114 - 2026-07-15
 
 - Expanded the Russian and English in-app FAQ with protocol guidance plus
