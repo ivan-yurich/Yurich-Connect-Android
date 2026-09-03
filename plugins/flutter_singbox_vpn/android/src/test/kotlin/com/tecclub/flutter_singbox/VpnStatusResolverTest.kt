@@ -6,6 +6,54 @@ import kotlin.test.assertEquals
 
 class VpnStatusResolverTest {
     @Test
+    fun shutdownDefersStoppedBroadcastUntilServiceExit() {
+        assertEquals(
+            Status.Stopping,
+            VpnStatusResolver.resolveServiceBroadcastStatus(
+                broadcastStatus = Status.Stopped,
+                isShuttingDown = true
+            )
+        )
+    }
+
+    @Test
+    fun stoppedBroadcastPassesThroughOutsideShutdown() {
+        assertEquals(
+            Status.Stopped,
+            VpnStatusResolver.resolveServiceBroadcastStatus(
+                broadcastStatus = Status.Stopped,
+                isShuttingDown = false
+            )
+        )
+    }
+
+    @Test
+    fun startupIgnoresStaleStoppedBroadcastWhileUserIntentRemains() {
+        assertEquals(
+            Status.Starting,
+            VpnStatusResolver.resolveServiceBroadcastStatus(
+                broadcastStatus = Status.Stopped,
+                isShuttingDown = false,
+                isStarting = true,
+                startedByUser = true
+            )
+        )
+    }
+
+    @Test
+    fun startupAcceptsStoppedBroadcastAfterIntentWasCleared() {
+        assertEquals(
+            Status.Stopped,
+            VpnStatusResolver.resolveServiceBroadcastStatus(
+                broadcastStatus = Status.Stopped,
+                isShuttingDown = false,
+                isStarting = true,
+                startedByUser = false
+            )
+        )
+    }
+
+    @Test
     fun staleServiceWithoutUserStartIsStopped() {
         assertEquals(
             Status.Stopped,
@@ -55,6 +103,27 @@ class VpnStatusResolverTest {
         assertEquals(
             Status.Started,
             resolve(startedByUser = true, currentStatus = Status.Started)
+        )
+    }
+
+    @Test
+    fun runningServicePreservesReadinessGate() {
+        assertEquals(
+            Status.Starting,
+            resolve(startedByUser = true, currentStatus = Status.Starting)
+        )
+    }
+
+    @Test
+    fun validatedXrayNetworkRecoversAStaleStartingState() {
+        assertEquals(
+            Status.Started,
+            resolve(
+                startedByUser = true,
+                currentStatus = Status.Starting,
+                requiresActiveVpnNetwork = true,
+                hasActiveVpnNetwork = true
+            )
         )
     }
 

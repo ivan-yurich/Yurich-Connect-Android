@@ -10,7 +10,7 @@ class ProxyService : Service(), PlatformInterfaceWrapper {
     private val service = BoxService(this, this)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Application.initializeIfNeeded(applicationContext)
+        Application.initializeBaseIfNeeded(applicationContext)
         return service.onStartCommand()
     }
 

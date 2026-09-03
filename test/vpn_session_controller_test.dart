@@ -112,4 +112,33 @@ void main() {
     expect(controller.isCurrent(connect), isFalse);
     expect(() => controller.beginConnect(), throwsStateError);
   });
+
+  test('superseding an operation cancels its active wait', () async {
+    final controller = VpnSessionController();
+    final first = controller.beginProfileSwitch();
+    final neverCompletes = Completer<void>();
+
+    final waiting = controller.cancelWhenSuperseded(
+      first,
+      neverCompletes.future,
+    );
+    final latest = controller.beginProfileSwitch();
+
+    await expectLater(waiting, throwsA(isA<VpnSessionCancelled>()));
+    expect(controller.isCurrent(latest), isTrue);
+  });
+
+  test('disposing the controller cancels an active wait', () async {
+    final controller = VpnSessionController();
+    final connect = controller.beginConnect();
+    final neverCompletes = Completer<void>();
+
+    final waiting = controller.cancelWhenSuperseded(
+      connect,
+      neverCompletes.future,
+    );
+    controller.dispose();
+
+    await expectLater(waiting, throwsA(isA<VpnSessionCancelled>()));
+  });
 }

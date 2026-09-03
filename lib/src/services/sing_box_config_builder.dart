@@ -54,6 +54,13 @@ class SingBoxConfigBuilder {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
+      'experimental': {
+        'cache_file': {
+          'enabled': true,
+          'path': 'cache.db',
+          'store_fakeip': true,
+        },
+      },
       'dns': _dnsConfig(profile, useRemoteDns: useRemoteDns),
       'inbounds': [
         _tunInbound(

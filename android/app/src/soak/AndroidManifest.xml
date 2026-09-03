@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".qa.SoakControlActivity"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:permission="android.permission.DUMP"
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <service
+            android:name=".qa.SoakControlService"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:stopWithTask="false" />
+
+        <receiver
+            android:name=".qa.SoakControlReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="online.dnsai.ivanvpn.action.SOAK_CONTROL" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

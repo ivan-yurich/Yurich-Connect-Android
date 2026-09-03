@@ -3,12 +3,9 @@ package com.tecclub.flutter_singbox.bg
 import android.app.Service
 import android.content.pm.ServiceInfo
 import android.os.Build
-import com.tecclub.flutter_singbox.constant.Status
-import androidx.lifecycle.MutableLiveData
 import com.tecclub.flutter_singbox.model.ConnectionUiState
 
 class ServiceNotification(
-    private val statusLiveData: MutableLiveData<Status>,
     private val service: Service
 ) {
     companion object {
@@ -58,15 +55,7 @@ class ServiceNotification(
         helper.updateNotification(state)
     }
     
-    fun start() {
-        // This method is called when the service is successfully started
-        statusLiveData.postValue(Status.Started)
-    }
-    
     fun stop() {
-        // This method is called when the service is stopping
-        statusLiveData.postValue(Status.Stopped)
-        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             service.stopForeground(Service.STOP_FOREGROUND_REMOVE)
         } else {

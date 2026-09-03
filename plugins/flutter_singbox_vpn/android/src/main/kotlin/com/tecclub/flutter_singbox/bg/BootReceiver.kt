@@ -15,7 +15,7 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
-        Application.initializeIfNeeded(context.applicationContext)
+        Application.initializeBaseIfNeeded(context.applicationContext)
 
         val autoStart = SimpleConfigManager.getAutoStart(context)
         val shouldRestore = autoStart || SimpleConfigManager.getStartedByUser(context)

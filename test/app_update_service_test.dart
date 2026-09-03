@@ -5,6 +5,36 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aurum_vpn/src/services/app_update_service.dart';
 
 void main() {
+  test('parses every supported app distribution channel', () {
+    expect(
+      AppDistributionChannel.fromWireValue('github'),
+      AppDistributionChannel.github,
+    );
+    expect(
+      AppDistributionChannel.fromWireValue(' PLAY '),
+      AppDistributionChannel.play,
+    );
+    expect(
+      AppDistributionChannel.fromWireValue('soak'),
+      AppDistributionChannel.soak,
+    );
+    expect(
+      AppDistributionChannel.fromWireValue('unexpected'),
+      AppDistributionChannel.unknown,
+    );
+    expect(
+      AppDistributionChannel.fromWireValue(null),
+      AppDistributionChannel.unknown,
+    );
+  });
+
+  test('enables external APK updates only for the GitHub channel', () {
+    expect(AppDistributionChannel.github.externalUpdatesEnabled, isTrue);
+    expect(AppDistributionChannel.play.externalUpdatesEnabled, isFalse);
+    expect(AppDistributionChannel.soak.externalUpdatesEnabled, isFalse);
+    expect(AppDistributionChannel.unknown.externalUpdatesEnabled, isFalse);
+  });
+
   test(
     'continues to next release endpoint when first release is stale',
     () async {

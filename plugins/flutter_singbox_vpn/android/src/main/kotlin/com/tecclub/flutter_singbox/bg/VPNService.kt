@@ -18,12 +18,15 @@ import com.tecclub.flutter_singbox.ktx.toList
 import com.tecclub.flutter_singbox.database.Settings
 import io.nekohasekai.libbox.Libbox
 import java.io.FileDescriptor
+import java.util.concurrent.atomic.AtomicInteger
 
 class VPNService : VpnService(), PlatformInterfaceWrapper {
 
     companion object {
         private const val TAG = "VPNService"
+        private const val PROTECT_LOG_LIMIT = 3
         private val XRAY_TUN_DNS_SERVERS = listOf("1.1.1.1", "8.8.8.8")
+        private val protectCallCount = AtomicInteger(0)
     }
 
     private val service = BoxService(this, this)
@@ -31,7 +34,7 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     var systemProxyEnabled = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Application.initializeIfNeeded(applicationContext)
+        Application.initializeBaseIfNeeded(applicationContext)
         android.util.Log.e("VPNService", "onStartCommand called with intent: ${intent?.action}")
         
         // Extract config content if available
@@ -80,13 +83,25 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     }
 
     override fun autoDetectInterfaceControl(fd: Int) {
-        android.util.Log.d("VPNService", "autoDetectInterfaceControl called with fd=$fd")
         val result = protect(fd)
-        android.util.Log.d("VPNService", "protect($fd) returned $result")
+        val call = protectCallCount.incrementAndGet()
+        if (call <= PROTECT_LOG_LIMIT || !result) {
+            val message = "sing-box protect call=$call fd=$fd protected=$result"
+            if (result) {
+                Log.d(TAG, message)
+            } else {
+                Log.w(TAG, message)
+            }
+        }
     }
 
     override fun openTun(options: TunOptions): Int {
         if (prepare(this) != null) error("android: missing vpn permission")
+
+        // A reload can reach openTun before the previous native service has released
+        // its descriptor. Keep only one Android VPN interface across profile switches.
+        service.fileDescriptor?.close()
+        service.fileDescriptor = null
 
         val builder = Builder()
             .setSession("sing-box")

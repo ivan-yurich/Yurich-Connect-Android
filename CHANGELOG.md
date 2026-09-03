@@ -1,5 +1,95 @@
 # Changelog
 
+## 1.0.117 - 2026-09-03
+
+- Released native client bindings after runtime cleanup and waited for the
+  Android VPN service to exit before accepting its final `Stopped` state,
+  preventing overlapping profile starts and duplicate TUN interfaces.
+- Ignored the old core's stale `Stopped` broadcast while a user-requested
+  cross-core startup is active, avoiding a false disconnect during switching.
+- Reset the active sing-box network once after a real Android underlay change,
+  ended startup grace after confirmed readiness, and allowed one controlled
+  watchdog cooldown bypass for the newly available network.
+- Checked latency for every imported profile in bounded batches instead of only
+  the first twelve, and displayed DNS lookup latency for UDP-based Turbo
+  profiles without presenting it as a QUIC round-trip time.
+
+## 1.0.116 - 2026-08-11
+
+- Fixed the native watchdog so a healthy two-of-three endpoint quorum no longer
+  accumulates false degradation and triggers periodic VPN process exits.
+- Recycled routine same-core profile changes in-process while retaining a clean
+  isolated-process fallback for real core switches and confirmed watchdog hangs.
+- Bounded rapid reconnect phases, cancelled superseded waits, required confirmed
+  native shutdown before restart, and reused the last working Naive mode first.
+- Probed Xray startup endpoints concurrently so one slow provider cannot reject
+  an otherwise healthy tunnel or hide working traffic counters.
+- Hardened the 24/48-hour soak observer with active-only wakelock accounting,
+  counter/cadence coverage gates, verified network attribution, and background
+  profile control that avoids waking the app UI for every test transition.
+
+## 1.0.115 - 2026-07-15
+
+- Distinguished GitHub, Google Play, soak-test, and temporarily unknown update
+  channels so internal or still-loading builds no longer claim to use Play.
+- Raised the Android build number for a signed, data-preserving migration from
+  an accidentally installed Play-flavor APK back to the GitHub update channel.
+- Bounded manual update checks to 60 seconds so an unavailable GitHub endpoint
+  cannot leave the Updates panel blocked indefinitely.
+
+## 1.0.114 - 2026-07-15
+
+- Expanded the Russian and English in-app FAQ with protocol guidance plus
+  practical Smart Route and Auto DNS setup, verification, and fallback steps.
+- Added a rolling native watchdog detector that restarts the VPN runtime after
+  four degraded endpoint quorums in five minutes while ignoring isolated
+  timeouts and resetting its history after a real Android network change.
+- Persisted the active profile label across native background recovery so the
+  foreground notification no longer falls back to an empty profile name.
+- Completed a 12-hour single-profile LTE baseline with 720/720 healthy samples,
+  no process restarts, crashes, ANRs, duplicate TUN interfaces, or memory leak;
+  extended observation then reproduced the long-session TLS degradation that
+  this release recovers from earlier.
+
+## 1.0.113 - 2026-07-14
+
+- Added an Xray UID traffic sampler so VLESS XHTTP sessions report live upload,
+  download, and session totals without depending on the sing-box status channel;
+  stopping the tunnel now clears stale speeds while preserving the final total.
+
+## 1.0.112 - 2026-07-14
+
+- Restarted the isolated VPN process cleanly on every runtime-config switch,
+  preventing stale TUN descriptors and native crashes between sing-box and Xray.
+- Fixed XHTTP startup with compact Xray configs and Android-compatible uTLS
+  fingerprint selection while preserving explicit non-Chrome fingerprints.
+- Kept the foreground notification synchronized with the verified native tunnel
+  state after watchdog recovery and coalesced rapid Flutter status updates.
+- Persisted watchdog restart cooldown across process recovery and added a short
+  startup grace so Hysteria2 can warm up without an unnecessary early restart.
+- Completed a 12-hour LTE soak across VLESS Reality, NaiveProxy, Hysteria2, and
+  XHTTP with 720 samples, no app crashes or ANRs, and no duplicate TUN interfaces.
+
+## 1.0.111 - 2026-07-12
+
+- Delayed native `Started` status until DNS and HTTPS succeed through the
+  selected tunnel on at least two independent external endpoints.
+- Marked an active session as reconnecting while Android changes the default
+  Wi-Fi or cellular network, even if the VPN NetworkAgent remains validated.
+- Added bounded readiness retries, controlled runtime restart, and background
+  retry after restart cooldown instead of reporting a false connection.
+- Made VPN session state the single owner of native status updates and added
+  TLS hostname verification to native health probes.
+
+## 1.0.110 - 2026-07-12
+
+- Isolated the encrypted VPN runtime configuration from cross-process service
+  flags so Android cannot restore an older profile after a process restart.
+- Added one-time migration for existing encrypted runtime configurations.
+- Reconciled a restored VLESS tunnel with the profile selected in Flutter and
+  restarted it once when the native runtime still contains another profile.
+- Added regression coverage for semantic runtime-config comparison.
+
 ## 1.0.109 - 2026-07-11
 
 - Synchronized explicit start, stop, and restart actions between the Android

@@ -62,6 +62,10 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".bg.VpnProcessRestartReceiver"
+            android:exported="false" />
         
         <provider
             android:name="androidx.core.content.FileProvider"

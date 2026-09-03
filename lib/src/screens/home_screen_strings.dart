@@ -484,9 +484,9 @@ class _Strings {
     if (kind == VpnProfileKind.vlessXhttp) {
       return switch (this) {
         _Strings.en =>
-          'VLESS XHTTP is imported and shown, but connection requires Xray/libXray. This APK currently runs VPN through sing-box.',
+          'The bundled Xray core could not start this VLESS XHTTP profile. Check type, mode, path, TLS/Reality parameters, and Xray logs.',
         _ =>
-          'VLESS XHTTP импортируется и показывается, но для подключения нужен Xray/libXray. Этот APK сейчас запускает VPN через sing-box.',
+          'Встроенное Xray-ядро не смогло запустить этот VLESS XHTTP профиль. Проверь type, mode, path, параметры TLS/Reality и логи Xray.',
       };
     }
     return switch (this) {
@@ -533,6 +533,62 @@ class _Strings {
   String get openGooglePlay => switch (this) {
     _Strings.en => 'Open Google Play',
     _ => 'Открыть Google Play',
+  };
+
+  String get playUpdatesOnly => switch (this) {
+    _Strings.en => 'Play builds are updated through Google Play.',
+    _ => 'Обновления Play-сборки устанавливаются через Google Play.',
+  };
+
+  String get soakUpdateDescription => switch (this) {
+    _Strings.en =>
+      'This internal build is intended for long-running QA. Automatic app updates are disabled to keep test results reproducible.',
+    _ =>
+      'Эта внутренняя сборка предназначена для длительных QA-тестов. Автообновления отключены, чтобы результаты теста оставались воспроизводимыми.',
+  };
+
+  String get soakUpdateChannel => switch (this) {
+    _Strings.en => 'Update channel: soak test',
+    _ => 'Канал обновлений: тестовый soak',
+  };
+
+  String get soakUpdatesDisabled => switch (this) {
+    _Strings.en => 'Updates are disabled in the soak test build.',
+    _ => 'В тестовой soak-сборке обновления отключены.',
+  };
+
+  String get unknownUpdateDescription => switch (this) {
+    _Strings.en =>
+      'The app could not determine its update channel. Retry after the app finishes starting.',
+    _ =>
+      'Приложение не смогло определить канал обновлений. Повтори проверку после завершения запуска.',
+  };
+
+  String get unknownUpdateChannel => switch (this) {
+    _Strings.en => 'Update channel: detecting...',
+    _ => 'Канал обновлений: определяется...',
+  };
+
+  String get updateChannelUnavailable => switch (this) {
+    _Strings.en => 'The update channel is temporarily unavailable.',
+    _ => 'Канал обновлений временно недоступен.',
+  };
+
+  String get updateCheckTimedOut => switch (this) {
+    _Strings.en =>
+      'The update server did not respond within 60 seconds. Check the network and retry.',
+    _ =>
+      'Сервер обновлений не ответил за 60 секунд. Проверь сеть и повтори попытку.',
+  };
+
+  String get updatesDisabled => switch (this) {
+    _Strings.en => 'Updates disabled',
+    _ => 'Обновления отключены',
+  };
+
+  String get retry => switch (this) {
+    _Strings.en => 'Retry',
+    _ => 'Повторить',
   };
 
   String updateAvailable(String version) => switch (this) {
@@ -620,7 +676,7 @@ class _Strings {
     addProfileHint: 'Добавь подписку Remnawave, QR или отдельный ключ',
     nothingToImport: 'Нечего импортировать.',
     supportedProtocolsOnly:
-        'В этой сборке запускаются VLESS Reality, VLESS TLS, NaiveProxy и Hysteria/Hysteria2. VLESS XHTTP импортируется и показывается, но подключение требует Xray/libXray.',
+        'В этой сборке запускаются Reality, HTTPS/NaiveProxy, Turbo/Hysteria2 и XHTTP через встроенные sing-box и Xray.',
     switchingProfile: 'Переключаю профиль...',
     importFirst: 'Сначала импортируй профиль.',
     autoConnectNoStableProfile:
@@ -737,9 +793,94 @@ class _Strings {
             'Нажми + в разделе профилей. Можно вставить ссылку вручную, из буфера или отсканировать QR.',
       ),
       _FaqItem(
-        question: 'Какие протоколы поддерживаются?',
+        question: 'Наши протоколы',
         answer:
-            'В Android-клиенте запускаются стабильные направления: VLESS Reality, VLESS TLS, NaiveProxy и Hysteria/Hysteria2. XHTTP импортируется и виден в VLESS-разделе, но для подключения нужен Xray/libXray. mKCP и raw sing-box JSON остаются скрыты.',
+            'Название в приложении -> технология -> транспорт\n\n'
+            'HTTPS -> NaiveProxy -> TCP/443\n'
+            'Turbo -> Hysteria2 -> UDP/443, QUIC\n'
+            'Reality -> VLESS Reality Vision -> TCP/443\n'
+            'XHTTP -> VLESS XHTTP -> TLS или Reality + HTTP/2/443',
+      ),
+      _FaqItem(
+        question: 'HTTPS — NaiveProxy',
+        answer:
+            'Работает как обычное защищённое HTTPS-соединение через Caddy.\n\n'
+            '• Ссылка: naive+https://\n'
+            '• Хорошая совместимость с Wi-Fi и мобильными операторами.\n'
+            '• Трафик похож на обычный веб-браузер.\n'
+            '• Надёжный запасной вариант, если Reality не работает.\n'
+            '• В приложении находится в разделе HTTPS.',
+      ),
+      _FaqItem(
+        question: 'Turbo — Hysteria2',
+        answer:
+            'Использует QUIC поверх UDP и хорошо переносит потерю пакетов.\n\n'
+            '• Ссылка: hy2://\n'
+            '• Обычно быстрее на мобильной сети.\n'
+            '• Хорошо подходит для видео, загрузок и нестабильного LTE.\n'
+            '• Может не работать в сетях, где оператор блокирует UDP.\n'
+            '• В приложении находится в разделе Turbo.',
+      ),
+      _FaqItem(
+        question: 'Reality — VLESS Reality',
+        answer:
+            'Основной лёгкий протокол Xray. Имитирует настоящее TLS-соединение без отдельного сертификата Reality.\n\n'
+            '• Ссылка: vless://\n'
+            '• Параметры: security=reality, type=tcp, flow=xtls-rprx-vision.\n'
+            '• Работает через TCP/443.\n'
+            '• HAProxy по SNI направляет соединение в Xray.\n'
+            '• Хороший баланс скорости, стабильности и маскировки.\n'
+            '• В приложении находится в разделе Reality.',
+      ),
+      _FaqItem(
+        question: 'XHTTP — VLESS XHTTP',
+        answer:
+            'VLESS передаётся внутри трафика, похожего на обычные HTTP-запросы.\n\n'
+            '• Ссылка: vless://\n'
+            '• Транспорт: type=xhttp, обычно mode=packet-up.\n'
+            '• Путь профиля обычно /xhttp.\n'
+            '• Защита задаётся профилем: security=tls или security=reality.\n'
+            '• Работает через порт 443; для TLS-профилей используется HTTP/2.\n'
+            '• Запускается встроенным современным Xray-ядром.\n'
+            '• Сейчас XHTTP доступен на Finland и отдельной локации Poland 2.',
+      ),
+      _FaqItem(
+        question: 'Какой протокол выбирать?',
+        answer:
+            '• Основной вариант: Reality.\n'
+            '• Нестабильная мобильная сеть: Turbo.\n'
+            '• Максимальная совместимость: HTTPS.\n'
+            '• Дополнительный современный вариант: XHTTP.\n\n'
+            'Если сеть блокирует UDP, вместо Turbo выбери Reality или HTTPS. HAProxy, Caddy, DNS, WARP и Smart Route — не клиентские протоколы: они отвечают за распределение соединений, маскировку, DNS и маршрутизацию.',
+      ),
+      _FaqItem(
+        question: 'Как работает Smart Route?',
+        answer:
+            'Smart Route разделяет трафик: известные российские сервисы и приложения идут напрямую, а зарубежные и неизвестные направления — через VPN. Банки, Госуслуги, Яндекс, VK и маркетплейсы могут работать напрямую; ChatGPT, Google, YouTube, Telegram и другие глобальные сервисы принудительно остаются в VPN. Браузеры также оставлены в VPN, чтобы случайно не раскрыть внешний IP.',
+      ),
+      _FaqItem(
+        question: 'Как включить и проверить Smart Route?',
+        answer:
+            '1. Открой блок «Профиль и сеть».\n'
+            '2. Включи Smart Route. При активном VPN приложение выполнит короткое переподключение.\n'
+            '3. Проверь российский сервис в его приложении и отдельно открой зарубежный сервис. Проверка IP в браузере всегда должна показывать VPN, потому что браузеры не выводятся напрямую.\n'
+            '4. Если нужный сервис маршрутизируется неверно, временно выключи Smart Route и отправь отчёт разработчику.\n\n'
+            'Выключенный Smart Route направляет весь обычный трафик через VPN.',
+      ),
+      _FaqItem(
+        question: 'Как работает Auto DNS?',
+        answer:
+            'Auto DNS перехватывает DNS-запросы внутри TUN и защищает их от подмены оператором. Для Reality, Turbo и XHTTP используются защищённые резолверы Cloudflare и Google через туннель. HTTPS/NaiveProxy сохраняет локальный bootstrap DNS ради совместимости и стабильного поиска адреса сервера — это осознанный компромисс режима HTTPS.',
+      ),
+      _FaqItem(
+        question: 'Как включить и проверить Auto DNS?',
+        answer:
+            '1. Открой блок «Профиль и сеть».\n'
+            '2. Включи Auto DNS. При активном VPN приложение выполнит короткое переподключение.\n'
+            '3. На LTE и публичном Wi-Fi рекомендуется держать Auto DNS включённым.\n'
+            '4. Если Wi-Fi требует входа через captive portal, временно выключи VPN или Auto DNS, авторизуйся в сети и включи защиту снова.\n'
+            '5. Для проверки открой DNS leak test после подключения: для Reality, Turbo и XHTTP нормальны резолверы Cloudflare или Google.\n\n'
+            'Auto DNS не меняет страну VPN и не заменяет Smart Route.',
       ),
       _FaqItem(
         question: 'Что делать, если после смены профиля пропал интернет?',
@@ -771,7 +912,7 @@ class _Strings {
     addProfileHint: 'Add a Remnawave subscription, QR code, or single key',
     nothingToImport: 'Nothing to import.',
     supportedProtocolsOnly:
-        'This build runs VLESS Reality, VLESS TLS, NaiveProxy, and Hysteria/Hysteria2. VLESS XHTTP is imported and shown, but connection requires Xray/libXray.',
+        'This build runs Reality, HTTPS/NaiveProxy, Turbo/Hysteria2, and XHTTP through the bundled sing-box and Xray cores.',
     switchingProfile: 'Switching profile...',
     importFirst: 'Import a profile first.',
     autoConnectNoStableProfile:
@@ -887,9 +1028,94 @@ class _Strings {
             'Use the add button in Profiles. You can paste manually, import from clipboard, or scan a QR code.',
       ),
       _FaqItem(
-        question: 'Which protocols are supported?',
+        question: 'Our protocols',
         answer:
-            'The Android client runs stable profiles: VLESS Reality, VLESS TLS, NaiveProxy, and Hysteria/Hysteria2. XHTTP is now imported and visible in the VLESS tab, but connection requires Xray/libXray. mKCP and raw sing-box JSON remain hidden. PingTunnel (Experimental) is shown for tracking and is not started in this build.',
+            'App name -> technology -> transport\n\n'
+            'HTTPS -> NaiveProxy -> TCP/443\n'
+            'Turbo -> Hysteria2 -> UDP/443, QUIC\n'
+            'Reality -> VLESS Reality Vision -> TCP/443\n'
+            'XHTTP -> VLESS XHTTP -> TLS or Reality + HTTP/2/443',
+      ),
+      _FaqItem(
+        question: 'HTTPS — NaiveProxy',
+        answer:
+            'Works like a regular secure HTTPS connection through Caddy.\n\n'
+            '• Link: naive+https://\n'
+            '• Strong compatibility with Wi-Fi and mobile operators.\n'
+            '• Traffic resembles a normal web browser.\n'
+            '• A reliable fallback when Reality does not work.\n'
+            '• Shown in the HTTPS section of the app.',
+      ),
+      _FaqItem(
+        question: 'Turbo — Hysteria2',
+        answer:
+            'Uses QUIC over UDP and handles packet loss well.\n\n'
+            '• Link: hy2://\n'
+            '• Usually faster on mobile networks.\n'
+            '• Well suited to video, downloads, and unstable LTE.\n'
+            '• May fail on networks where the operator blocks UDP.\n'
+            '• Shown in the Turbo section of the app.',
+      ),
+      _FaqItem(
+        question: 'Reality — VLESS Reality',
+        answer:
+            'The main lightweight Xray protocol. It imitates a real TLS connection without a separate Reality certificate.\n\n'
+            '• Link: vless://\n'
+            '• Parameters: security=reality, type=tcp, flow=xtls-rprx-vision.\n'
+            '• Runs over TCP/443.\n'
+            '• HAProxy routes the connection to Xray by SNI.\n'
+            '• A strong balance of speed, stability, and camouflage.\n'
+            '• Shown in the Reality section of the app.',
+      ),
+      _FaqItem(
+        question: 'XHTTP — VLESS XHTTP',
+        answer:
+            'Carries VLESS inside traffic that resembles normal HTTP requests.\n\n'
+            '• Link: vless://\n'
+            '• Transport: type=xhttp, usually mode=packet-up.\n'
+            '• The profile path is usually /xhttp.\n'
+            '• Security is profile-specific: security=tls or security=reality.\n'
+            '• Uses port 443; TLS profiles use HTTP/2.\n'
+            '• Runs on the bundled modern Xray core.\n'
+            '• XHTTP is currently available on Finland and the separate Poland 2 location.',
+      ),
+      _FaqItem(
+        question: 'Which protocol should I choose?',
+        answer:
+            '• Primary option: Reality.\n'
+            '• Unstable mobile network: Turbo.\n'
+            '• Maximum compatibility: HTTPS.\n'
+            '• Additional modern option: XHTTP.\n\n'
+            'If a network blocks UDP, choose Reality or HTTPS instead of Turbo. HAProxy, Caddy, DNS, WARP, and Smart Route are not client protocols; they provide connection distribution, camouflage, DNS, and routing.',
+      ),
+      _FaqItem(
+        question: 'How does Smart Route work?',
+        answer:
+            'Smart Route splits traffic: known Russian services and apps connect directly, while international and unknown destinations use the VPN. Banks, Gosuslugi, Yandex, VK, and marketplaces may go direct; ChatGPT, Google, YouTube, Telegram, and other global services are forced through the VPN. Browsers also stay on the VPN to avoid exposing the external IP by accident.',
+      ),
+      _FaqItem(
+        question: 'How do I enable and verify Smart Route?',
+        answer:
+            '1. Open the “Profile and network” section.\n'
+            '2. Enable Smart Route. An active VPN performs a short reconnect.\n'
+            '3. Test a Russian service in its own app, then test an international service separately. Browser IP checks should always show the VPN because browsers are never routed directly.\n'
+            '4. If a service takes the wrong route, temporarily disable Smart Route and send a developer report.\n\n'
+            'With Smart Route disabled, all regular traffic goes through the VPN.',
+      ),
+      _FaqItem(
+        question: 'How does Auto DNS work?',
+        answer:
+            'Auto DNS captures DNS requests inside the TUN and protects them from operator manipulation. Reality, Turbo, and XHTTP use protected Cloudflare and Google resolvers through the tunnel. HTTPS/NaiveProxy keeps local bootstrap DNS for compatibility and reliable server lookup; this is an intentional tradeoff of HTTPS mode.',
+      ),
+      _FaqItem(
+        question: 'How do I enable and verify Auto DNS?',
+        answer:
+            '1. Open the “Profile and network” section.\n'
+            '2. Enable Auto DNS. An active VPN performs a short reconnect.\n'
+            '3. Keep Auto DNS enabled on LTE and public Wi-Fi.\n'
+            '4. If Wi-Fi requires a captive portal, temporarily disable the VPN or Auto DNS, sign in, then enable protection again.\n'
+            '5. Run a DNS leak test after connecting. Cloudflare or Google resolvers are expected for Reality, Turbo, and XHTTP.\n\n'
+            'Auto DNS does not change the VPN country and does not replace Smart Route.',
       ),
       _FaqItem(
         question: 'What if internet stops after switching profiles?',

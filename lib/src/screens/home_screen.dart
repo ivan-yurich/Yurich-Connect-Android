@@ -15,20 +15,26 @@ import '../models/profile_network_stability.dart';
 import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
+import '../services/first_successful_future.dart';
+import '../services/fixed_size_batches.dart';
 import '../services/installed_apps_service.dart';
 import '../services/power_manager_service.dart';
+import '../services/preferred_first.dart';
 import '../services/profile_auto_selector.dart';
 import '../services/profile_country_resolver.dart';
 import '../services/profile_geo_service.dart';
 import '../services/profile_importer.dart';
+import '../services/runtime_config_matcher.dart';
 import '../services/profile_engine_selector.dart';
 import '../services/profile_store.dart';
 import '../services/sensitive_data_redactor.dart';
+import '../services/soak_counter_publish_cadence.dart';
 import '../services/protocol_display_mapper.dart';
 import '../services/sing_box_log_filter.dart';
 import '../services/smart_route_rules.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
+import '../services/vpn_reconnect_policy.dart';
 import '../services/vpn_session_controller.dart';
 import '../services/subscription_profile_reconciler.dart';
 import '../services/xray_config_builder.dart';
@@ -57,7 +63,6 @@ const _supportEmail = 'ai@ivan-it.net';
 const _appVersionFallback = '1.0.108';
 const _nativeShortTimeout = Duration(seconds: 3);
 const _nativeConfigTimeout = Duration(seconds: 10);
-const _nativeStartTimeout = Duration(seconds: 8);
 const _subscriptionReminderWindow = Duration(days: 5);
 const _tunnelHealthProbeInterval = Duration(seconds: 105);
 const _trafficUiFlushInterval = Duration(seconds: 1);
@@ -80,6 +85,8 @@ const _tunnelHealthFailureThreshold = 4;
 const _maxStoredLogs = 180;
 const _maxPendingLogs = 240;
 const _vpnDisclosureVersion = 1;
+const _manualUpdateCheckTimeout = Duration(seconds: 60);
+const _soakBridgeChannel = MethodChannel('online.dnsai.ivanvpn/soak');
 const _privacyPolicyUrl =
     'https://github.com/ivan-yurich/Yurich-Connect-Android/blob/main/PRIVACY.md';
 const _playStoreUrl =
@@ -170,6 +177,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _geoService = ProfileGeoService();
   final _installedAppsService = InstalledAppsService();
   final _sessionController = VpnSessionController();
+  final _soakCounterPublishCadence = SoakCounterPublishCadence();
   final _manualController = TextEditingController();
 
   StreamSubscription<Map<String, dynamic>>? _statusSubscription;
@@ -192,11 +200,13 @@ class _HomeScreenState extends State<HomeScreen>
   Map<String, dynamic>? _latestTrafficEvent;
 
   List<VpnProfile> _profiles = const [];
+  List<VpnProfile> _storedProfiles = const [];
   final _profilePingMs = <String, int>{};
   final _profilePingText = <String, String>{};
   final _profilePingBusy = <String, bool>{};
   final _profilePingError = <String, String>{};
   final _profilePingCheckedAt = <String, DateTime>{};
+  final _lastSuccessfulPlanByProfileId = <String, String>{};
   Map<String, ProfileStabilityStats> _profileStabilityStats = const {};
   Map<String, Map<String, ProfileNetworkStabilityStats>>
   _profileNetworkStabilityStats = const {};
@@ -212,7 +222,7 @@ class _HomeScreenState extends State<HomeScreen>
   String _message = 'Готов к импорту подписки';
   String _appVersion = _appVersionFallback;
   String _appBuildNumber = '';
-  bool _externalUpdatesEnabled = false;
+  AppDistributionChannel _distributionChannel = AppDistributionChannel.unknown;
   String? _lastError;
   bool _busy = false;
   bool _updateBusy = false;
@@ -221,10 +231,16 @@ class _HomeScreenState extends State<HomeScreen>
   bool _statusWatchdogInFlight = false;
   bool _tunnelHealthCheckInFlight = false;
   bool _notificationSyncInFlight = false;
+  bool _notificationSyncPending = false;
   bool _autoRecoveryArmed = false;
   bool _manualDisconnectRequested = false;
   bool _pingAllInFlight = false;
   bool _countryResolveInFlight = false;
+  bool _runtimeReconcileInFlight = false;
+  bool _runtimeReconciled = false;
+  bool _soakProfilesLoaded = false;
+  bool _soakVpnInitialized = false;
+  bool _soakReadyAnnounced = false;
   bool _logsExpanded = false;
   String? _lastConfigSummary;
   String? _lastKeeperAction;
@@ -244,6 +260,10 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _lastNetworkStatsTrafficSavedAt;
   int _tunnelHealthFailures = 0;
   int _lastSessionTrafficBytes = 0;
+  int _nativeSessionTotalBytes = 0;
+  int _nativeUplinkSpeedBytes = 0;
+  int _nativeDownlinkSpeedBytes = 0;
+  int _soakSessionGeneration = 0;
   int _lastNetworkStatsTrafficBytes = 0;
   int _networkGenerationId = 0;
   int _idleHealthChecks = 0;
@@ -566,6 +586,7 @@ class _HomeScreenState extends State<HomeScreen>
       countryName: _profileCountryName(profile),
       countryCode: _profileCountryCode(profile),
       pingMs: profile == null ? null : _profilePingMs[profile.id],
+      latencyLabel: profile == null ? null : _profilePingText[profile.id],
       uploadSpeed: _uplink,
       downloadSpeed: _downlink,
       totalTraffic: _sessionTotal,
@@ -612,6 +633,7 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
+    _soakBridgeChannel.setMethodCallHandler(_handleSoakBridgeCall);
     WidgetsBinding.instance.addObserver(this);
     _glowController = AnimationController(
       vsync: this,
@@ -661,6 +683,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void dispose() {
+    _soakBridgeChannel.setMethodCallHandler(null);
     WidgetsBinding.instance.removeObserver(this);
     _statusSubscription?.cancel();
     _trafficSubscription?.cancel();
@@ -747,15 +770,12 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _load() async {
     final appInfo = await _loadAppInfo();
-    final externalUpdatesEnabled = await _loadExternalUpdatesEnabled();
+    final distributionChannel = await _loadDistributionChannel();
     final storedProfiles = await _store.loadProfiles();
     final profiles = _clientSupportedProfiles(storedProfiles);
     final loadedStabilityStats = await _store.loadProfileStabilityStats();
     final loadedNetworkStabilityStats = await _store
         .loadProfileNetworkStabilityStats();
-    if (profiles.length != storedProfiles.length) {
-      await _store.saveProfiles(profiles);
-    }
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
@@ -808,8 +828,9 @@ class _HomeScreenState extends State<HomeScreen>
       _language = language;
       _appVersion = appInfo.version;
       _appBuildNumber = appInfo.buildNumber;
-      _externalUpdatesEnabled = externalUpdatesEnabled;
+      _distributionChannel = distributionChannel;
       _profiles = profiles;
+      _storedProfiles = storedProfiles;
       _profileStabilityStats = stabilityStats;
       _profileNetworkStabilityStats = networkStabilityStats;
       _selectedProfileId = resolvedSelectedId;
@@ -820,15 +841,24 @@ class _HomeScreenState extends State<HomeScreen>
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
     });
+    _soakProfilesLoaded = true;
+    unawaited(_announceSoakBridgeReady());
     unawaited(_pingProfiles(profiles));
     unawaited(_resolveProfileCountries(profiles));
     unawaited(_refreshNetworkSnapshot('load'));
+    unawaited(_reconcileRestoredVlessRuntime());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(_showSubscriptionRenewalReminder(profiles));
         unawaited(_checkLatestUpdateNotice());
       }
     });
+  }
+
+  Future<void> _persistProfiles(List<VpnProfile> profiles) async {
+    final snapshot = List<VpnProfile>.unmodifiable(profiles);
+    await _store.saveProfiles(snapshot);
+    _storedProfiles = snapshot;
   }
 
   Future<({String version, String buildNumber})> _loadAppInfo() async {
@@ -845,15 +875,15 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<bool> _loadExternalUpdatesEnabled() async {
+  Future<AppDistributionChannel> _loadDistributionChannel() async {
     try {
-      return await _updateService.externalUpdatesEnabled();
+      return await _updateService.distributionChannel();
     } on Object catch (error) {
       _queueLog(
         'Update distribution channel unavailable: '
         '${_redactSensitive('$error')}',
       );
-      return false;
+      return AppDistributionChannel.unknown;
     }
   }
 
@@ -868,6 +898,79 @@ class _HomeScreenState extends State<HomeScreen>
         '${_redactSensitive('$error')}',
       );
       return null;
+    }
+  }
+
+  Future<void> _reconcileRestoredVlessRuntime() async {
+    if (_runtimeReconcileInFlight || _runtimeReconciled) {
+      return;
+    }
+    _runtimeReconcileInFlight = true;
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      if (!mounted || _manualDisconnectRequested || _stoppingByUser) {
+        return;
+      }
+
+      final profile = _explicitSelectedProfile;
+      if (profile == null ||
+          (profile.kind != VpnProfileKind.vlessReality &&
+              profile.kind != VpnProfileKind.vlessTls)) {
+        return;
+      }
+
+      var status = await _vpnEngine.getVPNStatus().timeout(
+        _nativeShortTimeout,
+        onTimeout: () => _status,
+      );
+      if (status == AurumVpnStatus.starting) {
+        status = await _waitForVpnStatus({
+          AurumVpnStatus.started,
+          AurumVpnStatus.stopped,
+        }, timeout: const Duration(seconds: 8));
+      }
+      if (!mounted ||
+          status != AurumVpnStatus.started ||
+          _manualDisconnectRequested ||
+          _stoppingByUser) {
+        return;
+      }
+
+      final smartRouteBypassPackages = await _smartRouteBypassPackages();
+      final expectedConfig = _buildRuntimeConfig(
+        profile,
+        plan: _connectionPlans(profile).first,
+        smartRouteBypassPackages: smartRouteBypassPackages,
+      );
+      final currentConfig = await _vpnEngine.getConfig().timeout(
+        _nativeConfigTimeout,
+      );
+      if (RuntimeConfigMatcher.equivalent(currentConfig, expectedConfig)) {
+        _recordStabilityEvent('runtime-config-reconcile:matched');
+        return;
+      }
+
+      _recordStabilityEvent('runtime-config-reconcile:mismatch');
+      _queueLog(
+        'Restored VPN runtime differs from the selected VLESS profile; '
+        'restarting with the selected profile.',
+      );
+      final operation = _sessionController.beginProfileSwitch();
+      await _runQueuedBusy(
+        operation,
+        () => _startVpnCore(profile, operation: operation, rapidRestart: true),
+        message: s.switchingProfile,
+      );
+    } on VpnSessionCancelled catch (error) {
+      _queueLog('Runtime config reconciliation superseded: $error');
+    } on Object catch (error, stackTrace) {
+      final errorText = _redactSensitive('$error');
+      _recordStabilityEvent('runtime-config-reconcile:error:$errorText');
+      _queueLog('Runtime config reconciliation failed: $errorText');
+      _queueLog(_redactSensitive(stackTrace.toString().split('\n').first));
+    } finally {
+      _runtimeReconcileInFlight = false;
+      _runtimeReconciled = true;
     }
   }
 
@@ -1020,6 +1123,9 @@ class _HomeScreenState extends State<HomeScreen>
                 _uplink = nextUplink;
                 _downlink = nextDownlink;
                 _sessionTotal = nextSessionTotal;
+                _nativeUplinkSpeedBytes = uplinkSpeed;
+                _nativeDownlinkSpeedBytes = downlinkSpeed;
+                _nativeSessionTotalBytes = sessionTotal;
                 if (sessionTotal >= _lastSessionTrafficBytes) {
                   _lastSessionTrafficBytes = sessionTotal;
                 }
@@ -1044,6 +1150,7 @@ class _HomeScreenState extends State<HomeScreen>
               if (displayChanged) {
                 unawaited(_syncConnectionNotification());
               }
+              _publishSoakCounterIfDue(now);
             } on Object catch (error, stackTrace) {
               _handleEngineStreamError('traffic-flush', error, stackTrace);
             }
@@ -1130,6 +1237,282 @@ class _HomeScreenState extends State<HomeScreen>
     } on Object {
       // In widget tests and desktop preview the native Android plugin is absent.
     }
+    _soakVpnInitialized = true;
+    unawaited(_announceSoakBridgeReady());
+  }
+
+  Future<void> _announceSoakBridgeReady() async {
+    if (_soakReadyAnnounced ||
+        !_soakProfilesLoaded ||
+        !_soakVpnInitialized ||
+        _distributionChannel != AppDistributionChannel.soak) {
+      return;
+    }
+    try {
+      await _soakBridgeChannel
+          .invokeMethod<void>('ready')
+          .timeout(_nativeShortTimeout);
+      _soakReadyAnnounced = true;
+    } on Object {
+      // The bridge exists only in the soak Android flavor.
+    }
+  }
+
+  Future<String> _handleSoakBridgeCall(MethodCall call) async {
+    if (call.method != 'execute' ||
+        _distributionChannel != AppDistributionChannel.soak) {
+      return jsonEncode(const {'ok': false, 'error': 'bridge_unavailable'});
+    }
+
+    final rawArguments = call.arguments;
+    final arguments = rawArguments is Map
+        ? rawArguments.map((key, value) => MapEntry('$key', value))
+        : const <String, dynamic>{};
+    final requestId = _sanitizeSoakRequestId(arguments['requestId']);
+    final command = '${arguments['command'] ?? ''}'.trim().toLowerCase();
+
+    try {
+      switch (command) {
+        case 'inventory':
+          return jsonEncode({
+            'ok': true,
+            'requestId': requestId,
+            'count': _storedProfiles.length,
+            'profiles': [
+              for (var index = 0; index < _storedProfiles.length; index += 1)
+                _soakProfileDescriptor(index, _storedProfiles[index]),
+            ],
+          });
+        case 'status':
+          return jsonEncode({
+            'ok': true,
+            'requestId': requestId,
+            ..._soakStatusPayload(),
+          });
+        case 'activate':
+          return await _executeSoakActivate(
+            requestId,
+            '${arguments['profileToken'] ?? ''}',
+          );
+        case 'reconnect':
+          return await _executeSoakReconnect(requestId);
+        case 'stop':
+          return await _executeSoakStop(requestId);
+        default:
+          return jsonEncode({
+            'ok': false,
+            'requestId': requestId,
+            'error': 'unsupported_command',
+          });
+      }
+    } on Object {
+      return jsonEncode({
+        'ok': false,
+        'requestId': requestId,
+        'error': 'internal_error',
+      });
+    }
+  }
+
+  Future<String> _executeSoakActivate(String requestId, String rawToken) async {
+    final target = _soakProfileForToken(rawToken);
+    if (target == null) {
+      return jsonEncode({
+        'ok': false,
+        'requestId': requestId,
+        'error': 'invalid_profile_token',
+      });
+    }
+    final profile = target.profile;
+    if (_profileConnectBlockReason(profile) != null) {
+      return jsonEncode({
+        'ok': false,
+        'requestId': requestId,
+        'profileToken': target.token,
+        'error': 'unsupported_profile',
+      });
+    }
+    if (_busy || _connectionQueueActive) {
+      return jsonEncode({
+        'ok': false,
+        'requestId': requestId,
+        'profileToken': target.token,
+        'error': 'busy',
+      });
+    }
+
+    await _store.saveVpnDisclosureVersion(_vpnDisclosureVersion);
+    // A failed connection intentionally leaves desiredRunning=true so the
+    // regular recovery policy can observe the user's intent. The soak bridge
+    // must still start the next profile when the native runtime is actually
+    // stopped; otherwise one offline profile poisons the rest of the matrix.
+    if (_connected) {
+      await _selectProfile(profile);
+    } else {
+      await _selectProfile(profile);
+      await _connect();
+    }
+    final status = await _refreshVpnStatus();
+    final connected =
+        status == AurumVpnStatus.started && _selectedProfileId == profile.id;
+    return jsonEncode({
+      'ok': connected,
+      'requestId': requestId,
+      'profileToken': target.token,
+      if (!connected) 'error': 'connection_failed',
+      ..._soakStatusPayload(),
+    });
+  }
+
+  Future<String> _executeSoakReconnect(String requestId) async {
+    final profile = _explicitSelectedProfile;
+    if (profile == null || _profileConnectBlockReason(profile) != null) {
+      return jsonEncode({
+        'ok': false,
+        'requestId': requestId,
+        'error': 'no_runnable_profile',
+      });
+    }
+    if (_busy || _connectionQueueActive) {
+      return jsonEncode({'ok': false, 'requestId': requestId, 'error': 'busy'});
+    }
+
+    final operation = _sessionController.beginProfileSwitch();
+    await _runQueuedBusy(
+      operation,
+      () => _startVpnCore(profile, operation: operation, rapidRestart: true),
+      message: s.switchingProfile,
+    );
+    final status = await _refreshVpnStatus();
+    final connected = status == AurumVpnStatus.started;
+    return jsonEncode({
+      'ok': connected,
+      'requestId': requestId,
+      if (!connected) 'error': 'reconnect_failed',
+      ..._soakStatusPayload(),
+    });
+  }
+
+  Future<String> _executeSoakStop(String requestId) async {
+    if (_busy || _connectionQueueActive) {
+      return jsonEncode({'ok': false, 'requestId': requestId, 'error': 'busy'});
+    }
+    await _disconnect();
+    final status = await _refreshVpnStatus();
+    final stopped = status == AurumVpnStatus.stopped;
+    return jsonEncode({
+      'ok': stopped,
+      'requestId': requestId,
+      if (!stopped) 'error': 'stop_failed',
+      ..._soakStatusPayload(),
+    });
+  }
+
+  Map<String, dynamic> _soakProfileDescriptor(int index, VpnProfile profile) {
+    final selection = ProfileEngineSelector.select(profile);
+    return {
+      'profileToken': _soakTokenForIndex(index),
+      'kind': profile.kind.name,
+      'engine': selection.engine.name,
+      'runnable': _profileConnectBlockReason(profile) == null,
+      'latency': _profilePingLabel(profile),
+      'latencyChecked': _profilePingCheckedAt.containsKey(profile.id),
+    };
+  }
+
+  Map<String, dynamic> _soakStatusPayload() {
+    final selectedIndex = _storedProfiles.indexWhere(
+      (profile) => profile.id == _selectedProfileId,
+    );
+    final selectedProfile = selectedIndex >= 0
+        ? _storedProfiles[selectedIndex]
+        : null;
+    final selection = selectedProfile == null
+        ? null
+        : ProfileEngineSelector.select(selectedProfile);
+    return {
+      'vpnStatus': _status,
+      'connectionState': _effectiveConnectionStatus.name,
+      'busy': _busy,
+      'queueActive': _connectionQueueActive,
+      'selectedProfileToken': selectedIndex < 0
+          ? null
+          : _soakTokenForIndex(selectedIndex),
+      'kind': selectedProfile?.kind.name,
+      'engine': selection?.engine.name,
+      'networkType': _networkType,
+      'trafficBytes': _lastSessionTrafficBytes,
+      'nativeSessionTotalBytes': _nativeSessionTotalBytes,
+      'nativeUplinkSpeedBytes': _nativeUplinkSpeedBytes,
+      'nativeDownlinkSpeedBytes': _nativeDownlinkSpeedBytes,
+      'sessionGeneration': _soakSessionGeneration,
+      'uplink': _uplink,
+      'downlink': _downlink,
+      'sessionTotal': _sessionTotal,
+    };
+  }
+
+  void _publishSoakCounterIfDue(DateTime now) {
+    if (_distributionChannel != AppDistributionChannel.soak ||
+        _status != AurumVpnStatus.started) {
+      return;
+    }
+    final selectedIndex = _storedProfiles.indexWhere(
+      (profile) => profile.id == _selectedProfileId,
+    );
+    if (selectedIndex < 0) {
+      return;
+    }
+    final attempt = _soakCounterPublishCadence.tryBegin(now);
+    if (attempt == null) {
+      return;
+    }
+    unawaited(_sendSoakCounter(_soakTokenForIndex(selectedIndex), attempt));
+  }
+
+  Future<void> _sendSoakCounter(String profileToken, int attempt) async {
+    var succeeded = false;
+    try {
+      await _soakBridgeChannel
+          .invokeMethod<void>('counter', {
+            'profileToken': profileToken,
+            'trafficBytes': _lastSessionTrafficBytes,
+            'nativeSessionTotalBytes': _nativeSessionTotalBytes,
+            'sessionGeneration': _soakSessionGeneration,
+          })
+          .timeout(_nativeShortTimeout);
+      succeeded = true;
+    } on Object {
+      // Passive soak telemetry must never affect the production data path.
+    } finally {
+      _soakCounterPublishCadence.complete(
+        attempt: attempt,
+        succeeded: succeeded,
+        at: DateTime.now(),
+      );
+    }
+  }
+
+  ({String token, VpnProfile profile})? _soakProfileForToken(String rawToken) {
+    final token = rawToken.trim().toLowerCase();
+    final match = RegExp(r'^p(\d{4})$').firstMatch(token);
+    final ordinal = match == null ? null : int.tryParse(match.group(1)!);
+    final index = ordinal == null ? -1 : ordinal - 1;
+    if (index < 0 || index >= _storedProfiles.length) {
+      return null;
+    }
+    return (token: _soakTokenForIndex(index), profile: _storedProfiles[index]);
+  }
+
+  String _soakTokenForIndex(int index) =>
+      'p${(index + 1).toString().padLeft(4, '0')}';
+
+  String _sanitizeSoakRequestId(Object? value) {
+    final normalized = '$value'.trim();
+    if (RegExp(r'^[a-zA-Z0-9._-]{1,64}$').hasMatch(normalized)) {
+      return normalized;
+    }
+    return 'invalid';
   }
 
   void _handleEngineStreamError(
@@ -1164,6 +1547,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _syncConnectionNotification({bool force = false}) async {
     if (_notificationSyncInFlight) {
+      _notificationSyncPending = true;
       return;
     }
     final now = DateTime.now();
@@ -1183,6 +1567,11 @@ class _HomeScreenState extends State<HomeScreen>
       );
     } finally {
       _notificationSyncInFlight = false;
+      final shouldResync = _notificationSyncPending;
+      _notificationSyncPending = false;
+      if (shouldResync && mounted) {
+        unawaited(_syncConnectionNotification(force: true));
+      }
     }
   }
 
@@ -1365,7 +1754,7 @@ class _HomeScreenState extends State<HomeScreen>
                 )
                 .profiles;
 
-      await _store.saveProfiles(merged);
+      await _persistProfiles(merged);
       await _store.saveSelectedProfileId(importedWithCachedData.first.id);
       _manualController.clear();
 
@@ -1512,7 +1901,7 @@ class _HomeScreenState extends State<HomeScreen>
       final merged = reconciliation.profiles;
       final selectedId = reconciliation.selectedProfileId;
 
-      await _store.saveProfiles(merged);
+      await _persistProfiles(merged);
       await _store.saveSelectedProfileId(selectedId);
       if (!mounted) {
         return;
@@ -1695,6 +2084,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final operation = _sessionController.beginProfileSwitch();
+    final crossEngineRestart =
+        current != null &&
+        ProfileEngineSelector.select(current).engine !=
+            ProfileEngineSelector.select(profile).engine;
     if (mounted) {
       setState(() {
         _selectedProfileId = profile.id;
@@ -1702,7 +2095,12 @@ class _HomeScreenState extends State<HomeScreen>
       });
     }
     await _runQueuedBusy(operation, () async {
-      await _startVpnCore(profile, operation: operation, rapidRestart: true);
+      await _startVpnCore(
+        profile,
+        operation: operation,
+        rapidRestart: true,
+        crossEngineRestart: crossEngineRestart,
+      );
     }, message: s.switchingProfile);
   }
 
@@ -1963,24 +2361,42 @@ class _HomeScreenState extends State<HomeScreen>
     VpnProfile profile, {
     required VpnSessionOperation operation,
     bool rapidRestart = false,
+    bool crossEngineRestart = false,
   }) async {
     _sessionController.ensureCurrent(operation);
     final blockReason = _profileConnectBlockReason(profile);
     if (blockReason != null) {
       throw _ProfileConnectionBlocked(blockReason);
     }
+    final engineSelection = ProfileEngineSelector.select(profile);
+    final reconnectPolicy = VpnReconnectPolicy.resolve(
+      kind: profile.kind,
+      engine: engineSelection.engine,
+      rapidRestart: rapidRestart,
+      crossEngineRestart: crossEngineRestart,
+    );
 
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
-    final status = await _refreshVpnStatus();
+    final status = await _refreshVpnStatus(
+      operation: operation,
+      allowCachedOnError: false,
+    );
     if (status != AurumVpnStatus.stopped) {
-      await _stopVpnCore(updateMessage: false, operation: operation);
+      final stopped = await _stopVpnCore(
+        updateMessage: false,
+        operation: operation,
+        stopCallTimeout: reconnectPolicy.stopCallTimeout,
+        stopStatusTimeout: reconnectPolicy.stopStatusTimeout,
+      );
+      if (!stopped) {
+        throw TimeoutException(
+          s.vpnStopTimeout(_status),
+          reconnectPolicy.stopStatusTimeout,
+        );
+      }
     }
 
-    await Future<void>.delayed(
-      rapidRestart
-          ? const Duration(milliseconds: 320)
-          : const Duration(seconds: 1),
-    );
+    await _delayForOperation(reconnectPolicy.startSettleDelay, operation);
     _sessionController.ensureCurrent(operation);
 
     _pendingLogs.clear();
@@ -1993,6 +2409,11 @@ class _HomeScreenState extends State<HomeScreen>
     _lastRecoverySource = null;
     _lastNetworkEvent = 'manual-start';
     _lastSessionTrafficBytes = 0;
+    _nativeSessionTotalBytes = 0;
+    _nativeUplinkSpeedBytes = 0;
+    _nativeDownlinkSpeedBytes = 0;
+    _soakSessionGeneration += 1;
+    _soakCounterPublishCadence.reset();
     _lastNetworkStatsTrafficBytes = 0;
     _lastNetworkStatsTrafficSavedAt = null;
     _idleHealthChecks = 0;
@@ -2000,15 +2421,24 @@ class _HomeScreenState extends State<HomeScreen>
     _tunnelHealthFailures = 0;
     await _bestEffortNative('clearLogs', _vpnEngine.clearLogs());
 
-    await _bestEffortNative(
-      'requestNotificationPermission',
-      _vpnEngine.requestNotificationPermission(),
-    );
+    if (!reconnectPolicy.isRapid) {
+      await _bestEffortNative(
+        'requestNotificationPermission',
+        _vpnEngine.requestNotificationPermission(),
+      );
+    }
+    _sessionController.ensureCurrent(operation);
 
     Object? lastStartError;
     var connected = false;
-    final plans = _connectionPlans(profile);
+    String? successfulPlanLabel;
+    final plans = preferredFirst(
+      _connectionPlans(profile),
+      preferredKey: _lastSuccessfulPlanByProfileId[profile.id],
+      keyOf: (plan) => plan.label,
+    ).take(reconnectPolicy.maxPlans).toList(growable: false);
     final smartRouteBypassPackages = await _smartRouteBypassPackages();
+    _sessionController.ensureCurrent(operation);
 
     for (
       var planIndex = 0;
@@ -2016,6 +2446,7 @@ class _HomeScreenState extends State<HomeScreen>
       planIndex += 1
     ) {
       _sessionController.ensureCurrent(operation);
+      final attemptClock = Stopwatch()..start();
       final plan = plans[planIndex];
       final config = _buildRuntimeConfig(
         profile,
@@ -2029,13 +2460,21 @@ class _HomeScreenState extends State<HomeScreen>
       final saved = await _nativeCall(
         'saveConfig',
         _vpnEngine.saveConfig(config),
-        timeout: _nativeConfigTimeout,
+        timeout: _reconnectPhaseTimeout(
+          reconnectPolicy,
+          attemptClock,
+          reconnectPolicy.configTimeout,
+        ),
       );
       if (!saved) {
         throw StateError(s.configSaveFailed);
       }
 
-      for (var attempt = 1; attempt <= 2 && !connected; attempt += 1) {
+      for (
+        var attempt = 1;
+        attempt <= reconnectPolicy.maxAttemptsPerPlan && !connected;
+        attempt += 1
+      ) {
         _sessionController.ensureCurrent(operation);
         if (mounted) {
           setState(() {
@@ -2056,36 +2495,50 @@ class _HomeScreenState extends State<HomeScreen>
           started = await _nativeCall(
             'startVPN',
             _vpnEngine.startVPN(),
-            timeout: _nativeStartTimeout,
+            timeout: _reconnectPhaseTimeout(
+              reconnectPolicy,
+              attemptClock,
+              reconnectPolicy.startCallTimeout,
+            ),
           );
+          _sessionController.ensureCurrent(operation);
+        } on VpnSessionCancelled {
+          rethrow;
         } on Object catch (error) {
           started = false;
           lastStartError = _redactSensitive('$error');
         }
         if (started) {
-          final finalStatus = await _waitForVpnStatus({
-            AurumVpnStatus.started,
-          }, timeout: const Duration(seconds: 14));
+          final finalStatus = await _waitForVpnStatus(
+            {AurumVpnStatus.started},
+            timeout: reconnectPolicy.statusTimeout,
+            operation: operation,
+          );
           if (finalStatus == AurumVpnStatus.started) {
             _sessionController.ensureCurrent(operation);
             final requiresSuccessfulProbe =
                 ProfileEngineSelector.requiresSuccessfulStartupProbe(profile);
             if (!requiresSuccessfulProbe) {
               connected = true;
+              successfulPlanLabel = plan.label;
               break;
             }
 
-            final probePassed = await _probeLocalMixedProxy(attempts: 1)
-                .timeout(
-                  const Duration(seconds: 12),
-                  onTimeout: () {
-                    _queueLog('Startup proxy probe timed out.');
-                    return false;
-                  },
-                );
+            final probeTimeout = reconnectPolicy.startupProbeTimeout;
+            final probePassed = await _sessionController.cancelWhenSuperseded(
+              operation,
+              _probeLocalMixedProxy(attempts: 1).timeout(
+                probeTimeout,
+                onTimeout: () {
+                  _queueLog('Startup proxy probe timed out.');
+                  return false;
+                },
+              ),
+            );
             _sessionController.ensureCurrent(operation);
             if (probePassed) {
               connected = true;
+              successfulPlanLabel = plan.label;
               break;
             } else {
               lastStartError = s.vpnStartFailed;
@@ -2106,29 +2559,50 @@ class _HomeScreenState extends State<HomeScreen>
             'VPN start retry [$attempt/${plan.label}]: '
             '${_redactSensitive('$lastStartError')}',
           );
-          await _stopVpnCore(updateMessage: false, operation: operation);
-          await Future<void>.delayed(const Duration(milliseconds: 1200));
-          await _bestEffortNative(
-            'saveConfig retry',
-            _vpnEngine.saveConfig(config),
-            timeout: _nativeConfigTimeout,
+          final stopped = await _stopVpnCore(
+            updateMessage: false,
+            operation: operation,
+            stopCallTimeout: reconnectPolicy.stopCallTimeout,
+            stopStatusTimeout: reconnectPolicy.stopStatusTimeout,
           );
+          if (!stopped) {
+            throw TimeoutException(
+              s.vpnStopTimeout(_status),
+              reconnectPolicy.stopStatusTimeout,
+            );
+          }
+          if (attempt < reconnectPolicy.maxAttemptsPerPlan) {
+            await _delayForOperation(reconnectPolicy.retryDelay, operation);
+            await _bestEffortNative(
+              'saveConfig retry',
+              _vpnEngine.saveConfig(config),
+              timeout: _nativeConfigTimeout,
+            );
+          }
           _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 14));
         }
       }
 
       if (!connected && planIndex < plans.length - 1) {
         _queueLog('Naive mode fallback: ${plan.label} did not pass probe.');
-        await Future<void>.delayed(const Duration(milliseconds: 800));
+        await _delayForOperation(reconnectPolicy.fallbackDelay, operation);
       }
     }
 
     if (!connected) {
       throw StateError('${lastStartError ?? s.vpnStartFailed}');
     }
+    if (successfulPlanLabel != null) {
+      _lastSuccessfulPlanByProfileId[profile.id] = successfulPlanLabel;
+    }
 
     _sessionController.ensureCurrent(operation);
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+    await _delayForOperation(
+      rapidRestart
+          ? const Duration(milliseconds: 100)
+          : const Duration(milliseconds: 250),
+      operation,
+    );
     _sessionController.ensureCurrent(operation);
     await _store.saveSelectedProfileId(profile.id);
     if (mounted) {
@@ -2182,11 +2656,9 @@ class _HomeScreenState extends State<HomeScreen>
     setState(() {
       _manualDisconnectRequested = true;
     });
-    await _runQueuedBusy(
-      operation,
-      () => _stopVpnCore(operation: operation),
-      message: s.disconnectingVpn,
-    );
+    await _runQueuedBusy(operation, () async {
+      await _stopVpnCore(operation: operation);
+    }, message: s.disconnectingVpn);
   }
 
   Future<void> _enforceManualDisconnect(String source) async {
@@ -2214,9 +2686,11 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _stopVpnCore({
+  Future<bool> _stopVpnCore({
     bool updateMessage = true,
     VpnSessionOperation? operation,
+    Duration stopCallTimeout = const Duration(seconds: 5),
+    Duration stopStatusTimeout = const Duration(seconds: 20),
   }) async {
     if (operation != null) {
       _sessionController.ensureCurrent(operation);
@@ -2227,13 +2701,17 @@ class _HomeScreenState extends State<HomeScreen>
       setState(() => _lastError = null);
     }
     try {
-      final status = await _refreshVpnStatus();
+      final status = await _refreshVpnStatus(
+        operation: operation,
+        allowCachedOnError: false,
+      );
       if (operation != null) {
         _sessionController.ensureCurrent(operation);
       }
+      var nativeStopped = status == AurumVpnStatus.stopped;
       if (status != AurumVpnStatus.stopped) {
         await _vpnEngine.stopVPN().timeout(
-          const Duration(seconds: 5),
+          stopCallTimeout,
           onTimeout: () {
             _queueLog('Native call timeout [stopVPN]');
             return true;
@@ -2242,16 +2720,29 @@ class _HomeScreenState extends State<HomeScreen>
         if (operation != null) {
           _sessionController.ensureCurrent(operation);
         }
-        final stoppedStatus = await _waitForVpnStatus({
-          AurumVpnStatus.stopped,
-        }, timeout: const Duration(seconds: 7));
-        if (stoppedStatus != AurumVpnStatus.stopped) {
+        final stoppedStatus = await _waitForVpnStatus(
+          {AurumVpnStatus.stopped},
+          timeout: stopStatusTimeout,
+          operation: operation,
+        );
+        nativeStopped = stoppedStatus == AurumVpnStatus.stopped;
+        if (!nativeStopped) {
           _queueLog('VPN stop cleanup is still finishing: $stoppedStatus');
+          if (mounted && updateMessage) {
+            final error = s.vpnStopTimeout(stoppedStatus);
+            setState(() {
+              _lastError = error;
+              _message = error;
+            });
+          }
+          return false;
         }
-        await Future<void>.delayed(const Duration(milliseconds: 500));
+        // Stopped is emitted only after the native runtime has released the
+        // active tunnel. A short guard is enough before saving the next config.
+        await Future<void>.delayed(const Duration(milliseconds: 150));
       }
 
-      if (mounted) {
+      if (nativeStopped && mounted) {
         _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
         setState(() {
           _status = AurumVpnStatus.stopped;
@@ -2277,32 +2768,51 @@ class _HomeScreenState extends State<HomeScreen>
         });
         unawaited(_syncConnectionNotification());
       }
+      return nativeStopped;
     } finally {
       _stoppingByUser = false;
     }
   }
 
-  Future<String> _refreshVpnStatus() async {
+  Future<String> _refreshVpnStatus({
+    VpnSessionOperation? operation,
+    bool allowCachedOnError = true,
+  }) async {
+    if (operation != null) {
+      _sessionController.ensureCurrent(operation);
+    }
     try {
-      final status = await _nativeCall(
+      final statusFuture = _nativeCall(
         'getVPNStatus',
         _vpnEngine.getVPNStatus(),
         timeout: _nativeShortTimeout,
       );
+      final status = operation == null
+          ? await statusFuture
+          : await _sessionController.cancelWhenSuperseded(
+              operation,
+              statusFuture,
+            );
+      if (operation != null) {
+        _sessionController.ensureCurrent(operation);
+      }
       if (_stoppingByUser && status == AurumVpnStatus.started) {
         _queueLog(
           'Native getVPNStatus=Started ignored during stop transition.',
         );
-        return _status == AurumVpnStatus.stopped
-            ? AurumVpnStatus.stopped
-            : AurumVpnStatus.stopping;
+        if (mounted && _status != AurumVpnStatus.stopping) {
+          setState(() => _status = AurumVpnStatus.stopping);
+        }
+        return AurumVpnStatus.stopping;
       }
       if (mounted && _status != status) {
         setState(() => _status = status);
       }
       return status;
+    } on VpnSessionCancelled {
+      rethrow;
     } on Object {
-      return _status;
+      return allowCachedOnError ? _status : AurumVpnStatus.stopping;
     }
   }
 
@@ -2324,17 +2834,60 @@ class _HomeScreenState extends State<HomeScreen>
   Future<String> _waitForVpnStatus(
     Set<String> expected, {
     required Duration timeout,
+    VpnSessionOperation? operation,
   }) async {
+    if (operation != null) {
+      _sessionController.ensureCurrent(operation);
+    }
     final deadline = DateTime.now().add(timeout);
     var latest = _status;
     while (DateTime.now().isBefore(deadline)) {
-      latest = await _refreshVpnStatus();
+      latest = await _refreshVpnStatus(
+        operation: operation,
+        allowCachedOnError: operation == null,
+      );
       if (expected.contains(latest)) {
         return latest;
       }
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      if (operation == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      } else {
+        await _delayForOperation(const Duration(milliseconds: 300), operation);
+      }
     }
     return latest;
+  }
+
+  Future<void> _delayForOperation(
+    Duration duration,
+    VpnSessionOperation operation,
+  ) {
+    _sessionController.ensureCurrent(operation);
+    if (duration <= Duration.zero) {
+      return Future<void>.value();
+    }
+    return _sessionController.cancelWhenSuperseded(
+      operation,
+      Future<void>.delayed(duration),
+    );
+  }
+
+  Duration _reconnectPhaseTimeout(
+    VpnReconnectPolicy policy,
+    Stopwatch attemptClock,
+    Duration preferred,
+  ) {
+    final timeout = policy.timeoutWithinAttemptBudget(
+      preferred,
+      elapsed: attemptClock.elapsed,
+    );
+    if (timeout <= Duration.zero) {
+      throw TimeoutException(
+        'VPN reconnect attempt budget expired.',
+        policy.attemptBudget,
+      );
+    }
+    return timeout;
   }
 
   Future<void> _refreshStatusWatchdog() async {
@@ -2653,45 +3206,14 @@ class _HomeScreenState extends State<HomeScreen>
     ];
 
     for (var attempt = 1; attempt <= attempts; attempt += 1) {
-      for (final endpoint in endpoints) {
-        final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 5)
-          ..badCertificateCallback = endpoint.allowCertificateMismatch
-              ? (_, host, _) => host == endpoint.uri.host
-              : null
-          ..findProxy = (_) =>
-              'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
-        try {
-          final request = await client
-              .getUrl(endpoint.uri)
-              .timeout(const Duration(seconds: 5));
-          request.headers.set(
-            HttpHeaders.userAgentHeader,
-            'YurichConnect/$_appVersion',
-          );
-          request.followRedirects = false;
-          final response = await request.close().timeout(
-            const Duration(seconds: 7),
-          );
-          await response.drain<void>().timeout(
-            const Duration(seconds: 3),
-            onTimeout: () {},
-          );
-          if (response.statusCode >= 200 && response.statusCode < 400) {
-            return true;
-          }
-          if (logFailures) {
-            _queueLog(
-              'VPN health probe HTTP ${response.statusCode}: ${endpoint.uri}',
-            );
-          }
-        } on Object catch (error) {
-          if (logFailures) {
-            _queueLog('VPN health probe failed: ${_redactSensitive('$error')}');
-          }
-        } finally {
-          client.close(force: true);
-        }
+      final healthy = await firstSuccessfulFuture(
+        endpoints.map(
+          (endpoint) =>
+              _probeLocalMixedProxyEndpoint(endpoint, logFailures: logFailures),
+        ),
+      );
+      if (healthy) {
+        return true;
       }
 
       if (attempt < attempts) {
@@ -2702,11 +3224,71 @@ class _HomeScreenState extends State<HomeScreen>
     return false;
   }
 
+  Future<bool> _probeLocalMixedProxyEndpoint(
+    ({Uri uri, bool allowCertificateMismatch}) endpoint, {
+    required bool logFailures,
+  }) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 5)
+      ..badCertificateCallback = endpoint.allowCertificateMismatch
+          ? (_, host, _) => host == endpoint.uri.host
+          : null
+      ..findProxy = (_) =>
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+    try {
+      final request = await client
+          .getUrl(endpoint.uri)
+          .timeout(const Duration(seconds: 5));
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'YurichConnect/$_appVersion',
+      );
+      request.followRedirects = false;
+      final response = await request.close().timeout(
+        const Duration(seconds: 7),
+      );
+      await response.drain<void>().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {},
+      );
+      if (response.statusCode >= 200 && response.statusCode < 400) {
+        return true;
+      }
+      if (logFailures) {
+        _queueLog(
+          'VPN health probe HTTP ${response.statusCode}: ${endpoint.uri}',
+        );
+      }
+    } on Object catch (error) {
+      if (logFailures) {
+        _queueLog('VPN health probe failed: ${_redactSensitive('$error')}');
+      }
+    } finally {
+      client.close(force: true);
+    }
+    return false;
+  }
+
   Future<void> _pingProfiles(
     List<VpnProfile> profiles, {
     bool force = false,
   }) async {
     if (_pingAllInFlight || profiles.isEmpty) {
+      return;
+    }
+    if (_connected && !force) {
+      final selectedProfile = _explicitSelectedProfile;
+      if (selectedProfile == null ||
+          !profiles.any((profile) => profile.id == selectedProfile.id)) {
+        return;
+      }
+
+      _pingAllInFlight = true;
+      try {
+        await _pingProfile(selectedProfile, force: true);
+      } finally {
+        _pingAllInFlight = false;
+      }
       return;
     }
 
@@ -2722,11 +3304,13 @@ class _HomeScreenState extends State<HomeScreen>
 
     _pingAllInFlight = true;
     try {
-      for (final profile in orderedProfiles.take(12)) {
+      for (final batch in fixedSizeBatches(orderedProfiles, size: 4)) {
         if (!mounted) {
           return;
         }
-        await _pingProfile(profile, force: force);
+        await Future.wait(
+          batch.map((profile) => _pingProfile(profile, force: force)),
+        );
         await Future<void>.delayed(const Duration(milliseconds: 120));
       }
     } finally {
@@ -2741,6 +3325,15 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     if (_profilePingBusy[profile.id] == true) {
+      return;
+    }
+    if (_connected && !force) {
+      if (mounted) {
+        setState(() {
+          _profilePingBusy.remove(profile.id);
+          _profilePingError.remove(profile.id);
+        });
+      }
       return;
     }
     final checkedAt = _profilePingCheckedAt[profile.id];
@@ -2784,11 +3377,31 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
 
-      socket = await Socket.connect(
-        server,
-        port,
-        timeout: const Duration(seconds: 4),
-      );
+      Object? connectError;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        stopwatch
+          ..reset()
+          ..start();
+        try {
+          socket = await Socket.connect(
+            server,
+            port,
+            timeout: const Duration(seconds: 4),
+          );
+          connectError = null;
+          break;
+        } on Object catch (error) {
+          connectError = error;
+          socket?.destroy();
+          socket = null;
+          if (attempt == 0) {
+            await Future<void>.delayed(const Duration(milliseconds: 300));
+          }
+        }
+      }
+      if (socket == null) {
+        throw connectError ?? const SocketException('TCP probe failed');
+      }
       stopwatch.stop();
       if (!mounted) {
         return;
@@ -2923,11 +3536,13 @@ class _HomeScreenState extends State<HomeScreen>
       countryCode: geo.countryCode,
       countryName: geo.countryName,
     );
-    await _store.saveProfiles(next);
+    await _persistProfiles(next);
     if (!mounted) {
       return;
     }
-    setState(() => _profiles = next);
+    setState(() {
+      _profiles = next;
+    });
     if (profileId == _selectedProfileId) {
       unawaited(_syncConnectionNotification());
     }
@@ -3104,7 +3719,7 @@ class _HomeScreenState extends State<HomeScreen>
           : _selectedProfileId;
 
       await _store.rememberDeletedSubscriptionProfile(profile);
-      await _store.saveProfiles(next);
+      await _persistProfiles(next);
       await _store.saveSelectedProfileId(nextSelectedId);
       if (!mounted) {
         return;
@@ -3113,6 +3728,7 @@ class _HomeScreenState extends State<HomeScreen>
         _profiles = next;
         _selectedProfileId = nextSelectedId;
         _profilePingMs.remove(profile.id);
+        _lastSuccessfulPlanByProfileId.remove(profile.id);
         _profilePingBusy.remove(profile.id);
         _profilePingError.remove(profile.id);
         if (next.isEmpty ||
@@ -3277,14 +3893,27 @@ class _HomeScreenState extends State<HomeScreen>
     if (_updateBusy) {
       return;
     }
-    if (!await _updateService.externalUpdatesEnabled()) {
-      _showSnack(
-        _language == _AppLanguage.ru
-            ? 'Обновления Play-сборки устанавливаются через Google Play.'
-            : 'Play builds are updated through Google Play.',
-      );
-      await _openUrl(_playStoreUrl);
+
+    final distributionChannel = await _loadDistributionChannel();
+    if (!mounted) {
       return;
+    }
+    if (_distributionChannel != distributionChannel) {
+      setState(() => _distributionChannel = distributionChannel);
+    }
+    switch (distributionChannel) {
+      case AppDistributionChannel.github:
+        break;
+      case AppDistributionChannel.play:
+        _showSnack(s.playUpdatesOnly);
+        await _openUrl(_playStoreUrl);
+        return;
+      case AppDistributionChannel.soak:
+        _showSnack(s.soakUpdatesDisabled);
+        return;
+      case AppDistributionChannel.unknown:
+        _showSnack(s.updateChannelUnavailable);
+        return;
     }
 
     setState(() {
@@ -3294,11 +3923,13 @@ class _HomeScreenState extends State<HomeScreen>
     });
 
     try {
-      final abis = await _updateService.supportedAbis();
-      final update = await _updateService.findLatest(
-        currentVersion: _appVersion,
-        supportedAbis: abis,
+      final abis = await _updateService.supportedAbis().timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => const <String>[],
       );
+      final update = await _updateService
+          .findLatest(currentVersion: _appVersion, supportedAbis: abis)
+          .timeout(_manualUpdateCheckTimeout);
       if (update == null) {
         if (mounted) {
           setState(() {
@@ -3344,6 +3975,17 @@ class _HomeScreenState extends State<HomeScreen>
       if (mounted) {
         setState(() => _updateMessage = s.updateInstallerOpened);
       }
+    } on TimeoutException {
+      if (mounted) {
+        setState(() => _updateMessage = s.updateCheckTimedOut);
+        _showSnack(
+          s.updateCheckTimedOut,
+          action: SnackBarAction(
+            label: s.retry,
+            onPressed: () => unawaited(_checkAndInstallUpdate()),
+          ),
+        );
+      }
     } on AppUpdatePermissionException {
       if (mounted) {
         setState(() => _updateMessage = s.updateInstallPermission);
@@ -3386,7 +4028,8 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     try {
-      if (!await _updateService.externalUpdatesEnabled()) {
+      if (!(await _updateService.distributionChannel())
+          .externalUpdatesEnabled) {
         return;
       }
       final abis = await _updateService.supportedAbis().timeout(
@@ -4021,7 +4664,7 @@ class _HomeScreenState extends State<HomeScreen>
                       onDonate: () => _openUrl(_donateUrl),
                       onDeveloper: _emailDeveloper,
                       currentVersion: _appVersion,
-                      externalUpdatesEnabled: _externalUpdatesEnabled,
+                      distributionChannel: _distributionChannel,
                       availableVersion: _availableUpdate?.version,
                       updateMessage: _updateMessage,
                       updateBusy: _updateBusy,

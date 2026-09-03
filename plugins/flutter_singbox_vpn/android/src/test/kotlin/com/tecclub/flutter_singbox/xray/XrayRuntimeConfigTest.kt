@@ -29,4 +29,41 @@ internal class XrayRuntimeConfigTest {
 
         assertFalse(runtime.enabled)
     }
+
+    @Test
+    fun detectsCompactHttpHealthProxy() {
+        val config =
+            """{"inbounds":[{"listen":"127.0.0.1","port":20808,"protocol":"http"}]}"""
+
+        assertTrue(XrayRuntimeConfig.exposesHttpProxy(config, 20808))
+    }
+
+    @Test
+    fun detectsFormattedHttpHealthProxy() {
+        val config =
+            """
+            {
+              "inbounds": [
+                {"protocol": "http", "port": 20808}
+              ]
+            }
+            """.trimIndent()
+
+        assertTrue(XrayRuntimeConfig.exposesHttpProxy(config, 20808))
+    }
+
+    @Test
+    fun rejectsNonHttpAndWrongPortHealthProxies() {
+        val config =
+            """{"inbounds":[{"port":20808,"protocol":"socks"},{"port":1080,"protocol":"http"}]}"""
+
+        assertFalse(XrayRuntimeConfig.exposesHttpProxy(config, 20808))
+    }
+
+    @Test
+    fun rejectsInvalidHealthProxyConfig() {
+        assertFalse(XrayRuntimeConfig.exposesHttpProxy("not-json", 20808))
+        assertFalse(XrayRuntimeConfig.exposesHttpProxy("{}", 20808))
+        assertFalse(XrayRuntimeConfig.exposesHttpProxy("{\"inbounds\":[]}", 0))
+    }
 }

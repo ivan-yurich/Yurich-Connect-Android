@@ -190,6 +190,7 @@ class FlutterSingboxPlugin :
     private val configSaveGeneration = AtomicLong(0L)
     private val configSaveMutex = Mutex()
     private var periodicStatusJob: kotlinx.coroutines.Job? = null
+    private var xrayTrafficJob: Job? = null
     @Volatile private var serviceStatusCheckInFlight = false
     private var networkGenerationId = 0
     private var lastNetworkFingerprint = ""
@@ -281,6 +282,46 @@ class FlutterSingboxPlugin :
                 }
                 
                 android.util.Log.e("FlutterSingboxPlugin", "Received broadcast status change: ${status.name}, isStarting=$isStarting, hasStartupError=$hasStartupError")
+
+                val guardedStatus = VpnStatusResolver.resolveServiceBroadcastStatus(
+                    broadcastStatus = status,
+                    isShuttingDown = isShuttingDown,
+                    isStarting = isStarting,
+                    startedByUser = runCatching {
+                        SimpleConfigManager.getStartedByUser()
+                    }.getOrDefault(false),
+                )
+                if (guardedStatus != status) {
+                    if (guardedStatus == Status.Stopping) {
+                        // libbox can publish Stopped before Android has destroyed
+                        // the VpnService and released its TUN. Release every client
+                        // binding so stopSelf() can finish; the cleanup job owns the
+                        // final service check and user-visible Stopped state.
+                        android.util.Log.i(
+                            "FlutterSingboxPlugin",
+                            "Deferring Stopped broadcast until VPN service exit",
+                        )
+                        statusClient.disconnect()
+                        logClient.disconnect()
+                        connection.disconnect()
+                    } else {
+                        // A clean Xray/sing-box process switch emits Stopped from
+                        // the old process after the new startup intent is active.
+                        android.util.Log.i(
+                            "FlutterSingboxPlugin",
+                            "Ignoring stale Stopped broadcast during startup",
+                        )
+                    }
+                    _vpnStatus.value = guardedStatus
+                    statusInitialized = true
+                    sendStatusUpdate(
+                        guardedStatus,
+                        manualDisconnectRequested = manualDisconnectRequested,
+                        sessionReason = sessionReason,
+                        desiredRunning = desiredRunning,
+                    )
+                    return
+                }
                 
                 // Skip if we're shutting down and receive Started status
                 if (isShuttingDown && status == Status.Started) {
@@ -295,6 +336,15 @@ class FlutterSingboxPlugin :
                     hasStartupError = true
                     isStarting = false
                     // Don't return - let the status update flow through
+                }
+
+                // Readiness can be confirmed before the delayed service bind
+                // finishes. Treat the service's Started broadcast as the
+                // authoritative end of startup so a concurrent status poll
+                // cannot regress the tunnel back to Starting indefinitely.
+                if (status == Status.Started) {
+                    isStarting = false
+                    hasStartupError = false
                 }
                 
                 // Update the status
@@ -463,6 +513,7 @@ class FlutterSingboxPlugin :
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 android.util.Log.e("FlutterSingboxPlugin", "Traffic event channel - onListen called")
                 trafficEventSink = events
+                syncXrayTrafficSampler(_vpnStatus.value)
             }
             
             override fun onCancel(arguments: Any?) {
@@ -547,6 +598,7 @@ class FlutterSingboxPlugin :
         try {
             periodicStatusJob?.cancel()
             periodicStatusJob = null
+            stopXrayTrafficSampler()
             serviceStatusCheckInFlight = false
             connection.disconnect()
             statusClient.disconnect()
@@ -661,6 +713,7 @@ class FlutterSingboxPlugin :
         sessionReason: String? = null,
         desiredRunning: Boolean? = null,
     ) {
+        syncXrayTrafficSampler(status)
         android.util.Log.e("FlutterSingboxPlugin", "Sending status update to Flutter: ${status.name}")
         val statusMap = currentNetworkSnapshot().toMutableMap()
         statusMap.putAll(mapOf(
@@ -730,7 +783,8 @@ class FlutterSingboxPlugin :
             connectivity.allNetworks.any { network ->
                 val capabilities = connectivity.getNetworkCapabilities(network) ?: return@any false
                 capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             }
         } catch (e: Exception) {
             android.util.Log.w("FlutterSingboxPlugin", "VPN network snapshot failed", e)
@@ -957,11 +1011,23 @@ class FlutterSingboxPlugin :
 
     private fun updateConnectionNotification(state: Map<*, *>?, result: Result) {
         try {
-            connectionUiState = ConnectionUiState.fromMap(state)
-            if (
-                connectionUiState.status != ConnectionStatus.Disconnected ||
-                _vpnStatus.value != Status.Stopped
-            ) {
+            val nativeStatus = _vpnStatus.value
+            val requestedState = ConnectionUiState.fromMap(state)
+            val resolvedStatus = ConnectionNotificationStatusPolicy.resolve(
+                requestedStatus = requestedState.status,
+                nativeStatus = nativeStatus,
+            )
+            if (requestedState.status != resolvedStatus) {
+                android.util.Log.w(
+                    "FlutterSingboxPlugin",
+                    "Ignoring stale notification status ${requestedState.status}; native=$nativeStatus",
+                )
+            }
+            connectionUiState = requestedState.copy(status = resolvedStatus)
+            requestedState.profileName
+                ?.takeIf { it.isNotBlank() }
+                ?.let(SimpleConfigManager::setActiveProfileName)
+            if (nativeStatus != Status.Stopped) {
                 vpnNotificationHelper.updateNotification(connectionUiState)
             }
             result.success(true)
@@ -1736,24 +1802,80 @@ class FlutterSingboxPlugin :
             "formattedSessionTotal" to TrafficStats.formatBytes(sessionUplink + sessionDownlink)
         ))
         
-        _trafficStats.value = stats as Map<String, Any>
-        updateTrafficNotification(stats)
-        
-        // Send traffic stats to Flutter
-        val handler = Handler(Looper.getMainLooper())
-        handler.post {
-            trafficEventSink?.success(stats)
+        publishTrafficStats(stats)
+    }
+
+    private fun syncXrayTrafficSampler(status: Status) {
+        val isXrayRuntime = isCurrentXrayRuntime()
+        val shouldCollect = XrayTrafficEventPolicy.shouldCollect(
+            status = status,
+            isXrayRuntime = isXrayRuntime,
+        )
+        if (shouldCollect) {
+            startXrayTrafficSampler()
+        } else {
+            stopXrayTrafficSampler(publishIdleSample = isXrayRuntime)
         }
     }
 
-    private data class UidTrafficSample(
-        val txTotal: Long,
-        val rxTotal: Long,
-        val txSpeed: Long,
-        val rxSpeed: Long,
-        val sessionTx: Long,
-        val sessionRx: Long
-    )
+    private fun startXrayTrafficSampler() {
+        if (xrayTrafficJob?.isActive == true) {
+            return
+        }
+        if (sessionStartUidTxBytes < 0L ||
+            sessionStartUidRxBytes < 0L ||
+            lastUidTrafficSampleAt <= 0L
+        ) {
+            resetUidTrafficSession()
+        }
+
+        android.util.Log.i("FlutterSingboxPlugin", "Starting Xray UID traffic sampler")
+        xrayTrafficJob = coroutineScope.launch {
+            try {
+                while (isActive && _vpnStatus.value == Status.Started) {
+                    val stats = XrayTrafficEventPolicy.build(
+                        sample = sampleUidTraffic(),
+                        networkSnapshot = currentNetworkSnapshot(),
+                    )
+                    publishTrafficStats(stats)
+                    kotlinx.coroutines.delay(XRAY_TRAFFIC_SAMPLE_INTERVAL_MS)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                android.util.Log.e(
+                    "FlutterSingboxPlugin",
+                    "Xray UID traffic sampler failed",
+                    error,
+                )
+            }
+        }
+    }
+
+    private fun stopXrayTrafficSampler(publishIdleSample: Boolean = false) {
+        val job = xrayTrafficJob ?: return
+        xrayTrafficJob = null
+        job.cancel()
+        if (publishIdleSample) {
+            publishTrafficStats(
+                XrayTrafficEventPolicy.build(
+                    sample = sampleUidTraffic(),
+                    networkSnapshot = currentNetworkSnapshot(),
+                    active = false,
+                ),
+            )
+        }
+        android.util.Log.i("FlutterSingboxPlugin", "Stopped Xray UID traffic sampler")
+    }
+
+    private fun publishTrafficStats(stats: Map<String, Any>) {
+        _trafficStats.value = stats
+        updateTrafficNotification(stats)
+
+        Handler(Looper.getMainLooper()).post {
+            trafficEventSink?.success(stats)
+        }
+    }
 
     private fun resetUidTrafficSession() {
         val tx = readUidTxBytes()
@@ -1765,12 +1887,12 @@ class FlutterSingboxPlugin :
         lastUidTrafficSampleAt = System.currentTimeMillis()
     }
 
-    private fun sampleUidTraffic(): UidTrafficSample {
+    private fun sampleUidTraffic(): XrayUidTrafficSample {
         val now = System.currentTimeMillis()
         val tx = readUidTxBytes()
         val rx = readUidRxBytes()
         if (tx < 0L || rx < 0L) {
-            return UidTrafficSample(0L, 0L, 0L, 0L, 0L, 0L)
+            return XrayUidTrafficSample(0L, 0L, 0L, 0L, 0L, 0L)
         }
 
         if (sessionStartUidTxBytes < 0L || sessionStartUidRxBytes < 0L) {
@@ -1794,7 +1916,7 @@ class FlutterSingboxPlugin :
         lastUidRxBytes = rx
         lastUidTrafficSampleAt = now
 
-        return UidTrafficSample(
+        return XrayUidTrafficSample(
             txTotal = tx,
             rxTotal = rx,
             txSpeed = txSpeed,
@@ -1833,6 +1955,10 @@ class FlutterSingboxPlugin :
             sessionDuration = currentSessionDuration()
         )
         vpnNotificationHelper.updateNotification(connectionUiState)
+    }
+
+    companion object {
+        private const val XRAY_TRAFFIC_SAMPLE_INTERVAL_MS = 1_000L
     }
 
     private fun currentSessionDuration(): String? {

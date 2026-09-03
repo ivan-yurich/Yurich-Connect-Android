@@ -101,6 +101,13 @@ object ConfigParser {
                 put("level", "warn")
                 put("timestamp", true)
             })
+            put("experimental", buildJsonObject {
+                put("cache_file", buildJsonObject {
+                    put("enabled", true)
+                    put("path", "cache.db")
+                    put("store_fakeip", true)
+                })
+            })
             put("dns", dnsConfig(config.host))
             put("inbounds", buildJsonArray {
                 add(buildJsonObject {

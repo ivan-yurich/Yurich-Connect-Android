@@ -84,11 +84,8 @@ class Application {
          * This is called from the FlutterSingboxPlugin when the plugin is attached to the engine
          */
         fun initialize(context: Context) {
-            application = context.applicationContext
-            
-            // Initialize config manager
-            SimpleConfigManager.init(application)
-            
+            initializeBase(context)
+
             var shouldInitializeLibbox = false
             synchronized(libboxLock) {
                 if (!libboxInitialized && !libboxInitializing) {
@@ -104,7 +101,7 @@ class Application {
                             libboxInitialized = true
                             libboxInitializing = false
                         }
-                    } catch (error: Exception) {
+                    } catch (error: Throwable) {
                         synchronized(libboxLock) {
                             libboxInitializing = false
                         }
@@ -113,20 +110,44 @@ class Application {
                 }
             }
         }
-        
+
         /**
-         * Initialize the application if it hasn't been initialized yet
-         * This is used by components that may run before the Flutter engine starts (e.g., BootReceiver)
+         * Initialize only Android context and persistent settings.
+         *
+         * The VPN process can host either sing-box or Xray. Both cores embed a Go
+         * runtime and must never be loaded into the same process. Background
+         * components therefore use this base-only path and let the selected core
+         * initialize its own native runtime after config classification.
          */
-        fun initializeIfNeeded(context: Context) {
+        fun initializeBase(context: Context) {
+            val appContext = context.applicationContext
+            synchronized(libboxLock) {
+                application = appContext
+                SimpleConfigManager.init(appContext)
+            }
+        }
+
+        /**
+         * Initialize base application state if a component starts before Flutter.
+         */
+        fun initializeBaseIfNeeded(context: Context) {
             try {
-                // Check if already initialized
                 application
             } catch (e: UninitializedPropertyAccessException) {
-                // Not initialized, do it now
-                android.util.Log.d("Application", "Initializing application from external component")
-                initialize(context)
+                android.util.Log.d(
+                    "Application",
+                    "Initializing base application state from external component",
+                )
+                initializeBase(context)
             }
+        }
+
+        /**
+         * Kept for source compatibility. Background initialization is base-only;
+         * FlutterSingboxPlugin.initialize() remains the explicit full libbox path.
+         */
+        fun initializeIfNeeded(context: Context) {
+            initializeBaseIfNeeded(context)
         }
 
         /**
@@ -135,7 +156,7 @@ class Application {
          * initialization path may still be running when BoxService starts.
          */
         fun ensureLibboxInitialized(context: Context) {
-            initializeIfNeeded(context)
+            initializeBaseIfNeeded(context)
 
             var shouldInitialize = false
             val deadline = System.currentTimeMillis() + 5000
@@ -176,7 +197,7 @@ class Application {
                         libboxInitialized = true
                         libboxInitializing = false
                     }
-                } catch (error: Exception) {
+                } catch (error: Throwable) {
                     synchronized(libboxLock) {
                         libboxInitializing = false
                     }
@@ -206,7 +227,9 @@ class Application {
 
             val baseDir = context.filesDir
             baseDir.mkdirs()
-            val workingDir = context.getExternalFilesDir(null) ?: return
+            val workingDir = checkNotNull(context.getExternalFilesDir(null)) {
+                "External files directory is unavailable for libbox"
+            }
             workingDir.mkdirs()
             val tempDir = context.cacheDir
             tempDir.mkdirs()

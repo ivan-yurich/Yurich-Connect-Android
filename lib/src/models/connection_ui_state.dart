@@ -11,6 +11,7 @@ class ConnectionUiState {
     this.countryName,
     this.countryCode,
     this.pingMs,
+    this.latencyLabel,
     this.sessionDuration,
   });
 
@@ -20,6 +21,7 @@ class ConnectionUiState {
   final String? countryName;
   final String? countryCode;
   final int? pingMs;
+  final String? latencyLabel;
   final String uploadSpeed;
   final String downloadSpeed;
   final String totalTraffic;
@@ -40,6 +42,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
   }) {
     return ConnectionUiState(
       status: ConnectionStatus.connecting,
@@ -48,6 +51,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: '0 B/s',
       downloadSpeed: '0 B/s',
       totalTraffic: '0 B',
@@ -63,6 +67,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
     String? sessionDuration,
   }) {
     return ConnectionUiState(
@@ -72,6 +77,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: uploadSpeed,
       downloadSpeed: downloadSpeed,
       totalTraffic: totalTraffic,
@@ -88,6 +94,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
     String? sessionDuration,
   }) {
     return ConnectionUiState(
@@ -97,6 +104,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: uploadSpeed,
       downloadSpeed: downloadSpeed,
       totalTraffic: totalTraffic,
@@ -113,6 +121,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
     String? sessionDuration,
   }) {
     return ConnectionUiState(
@@ -122,6 +131,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: uploadSpeed,
       downloadSpeed: downloadSpeed,
       totalTraffic: totalTraffic,
@@ -138,6 +148,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
     String? sessionDuration,
   }) {
     return ConnectionUiState(
@@ -147,6 +158,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: uploadSpeed,
       downloadSpeed: downloadSpeed,
       totalTraffic: totalTraffic,
@@ -160,6 +172,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
     String? sessionDuration,
   }) {
     return ConnectionUiState(
@@ -169,6 +182,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: '0 B/s',
       downloadSpeed: '0 B/s',
       totalTraffic: '0 B',
@@ -182,6 +196,7 @@ class ConnectionUiState {
     String? countryName,
     String? countryCode,
     int? pingMs,
+    String? latencyLabel,
   }) {
     return ConnectionUiState(
       status: ConnectionStatus.failed,
@@ -190,6 +205,7 @@ class ConnectionUiState {
       countryName: countryName,
       countryCode: countryCode,
       pingMs: pingMs,
+      latencyLabel: latencyLabel,
       uploadSpeed: '0 B/s',
       downloadSpeed: '0 B/s',
       totalTraffic: '0 B',
@@ -205,6 +221,7 @@ class ConnectionUiState {
       'countryName': countryName,
       'countryCode': countryCode,
       'pingMs': pingMs,
+      'latencyLabel': latencyLabel,
       'uploadSpeed': uploadSpeed,
       'downloadSpeed': downloadSpeed,
       'totalTraffic': totalTraffic,

@@ -3,9 +3,11 @@ package online.dnsai.ivanvpn
 import android.Manifest
 import android.content.ClipData
 import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.app.PendingIntent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInstaller
@@ -21,6 +23,7 @@ import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener
@@ -37,6 +40,18 @@ class MainActivity : FlutterActivity() {
     private var firstFrameWatchdog: Runnable? = null
     private var firstFrameListener: FlutterUiDisplayListener? = null
     private var firstFrameEngine: FlutterEngine? = null
+    private var soakChannel: MethodChannel? = null
+    private var soakDartReady = false
+    private var pendingSoakCommand: PendingSoakCommand? = null
+    private var soakQueryReceiverRegistered = false
+    private val soakQueryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            handleSoakControlIntent(
+                intent,
+                statusOnly = intent.action == ACTION_SOAK_FLUTTER_QUERY,
+            )
+        }
+    }
 
     @Volatile
     private var ioExecutor: ExecutorService = newIoExecutor()
@@ -55,6 +70,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        registerSoakQueryReceiver()
         handlePackageInstallerCallback(intent)
     }
 
@@ -113,6 +129,195 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        configureSoakBridge(flutterEngine)
+    }
+
+    private fun configureSoakBridge(flutterEngine: FlutterEngine) {
+        if (BuildConfig.DISTRIBUTION_CHANNEL != "soak") {
+            return
+        }
+        val channel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SOAK_CHANNEL,
+        )
+        soakChannel = channel
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "ready" -> {
+                    soakDartReady = true
+                    result.success(null)
+                    dispatchPendingSoakCommand()
+                }
+                "counter" -> publishSoakCounter(
+                    profileToken = call.argument<String>("profileToken"),
+                    trafficBytes = call.argument<Number>("trafficBytes"),
+                    nativeSessionTotalBytes =
+                        call.argument<Number>("nativeSessionTotalBytes"),
+                    sessionGeneration = call.argument<Number>("sessionGeneration"),
+                    result = result,
+                )
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun publishSoakCounter(
+        profileToken: String?,
+        trafficBytes: Number?,
+        nativeSessionTotalBytes: Number?,
+        sessionGeneration: Number?,
+        result: MethodChannel.Result,
+    ) {
+        val safeToken = profileToken
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { SOAK_PROFILE_TOKEN.matches(it) }
+        val safeTraffic = trafficBytes?.toLong()?.takeIf { it >= 0L }
+        val safeNativeTraffic =
+            nativeSessionTotalBytes?.toLong()?.takeIf { it >= 0L }
+        val safeGeneration =
+            sessionGeneration?.toLong()?.takeIf { it in 0L..Int.MAX_VALUE.toLong() }
+        if (
+            safeToken == null ||
+            safeTraffic == null ||
+            safeNativeTraffic == null ||
+            safeGeneration == null
+        ) {
+            result.error("BAD_COUNTER", "Invalid soak counter payload", null)
+            return
+        }
+        Log.i(
+            SOAK_TAG,
+            "SOAK_QA_COUNTER token=$safeToken generation=$safeGeneration " +
+                "native=$safeNativeTraffic display=$safeTraffic",
+        )
+        result.success(null)
+    }
+
+    private fun registerSoakQueryReceiver() {
+        if (
+            BuildConfig.DISTRIBUTION_CHANNEL != "soak" ||
+            soakQueryReceiverRegistered
+        ) {
+            return
+        }
+        val filter = IntentFilter().apply {
+            addAction(ACTION_SOAK_FLUTTER_QUERY)
+            addAction(ACTION_SOAK_FLUTTER_CONTROL)
+        }
+        ContextCompat.registerReceiver(
+            this,
+            soakQueryReceiver,
+            filter,
+            Manifest.permission.DUMP,
+            mainHandler,
+            ContextCompat.RECEIVER_EXPORTED,
+        )
+        soakQueryReceiverRegistered = true
+    }
+
+    private fun unregisterSoakQueryReceiver() {
+        if (!soakQueryReceiverRegistered) {
+            return
+        }
+        runCatching { unregisterReceiver(soakQueryReceiver) }
+        soakQueryReceiverRegistered = false
+    }
+
+    private fun handleSoakControlIntent(
+        intent: Intent?,
+        statusOnly: Boolean = false,
+    ) {
+        val expectedAction = if (statusOnly) {
+            ACTION_SOAK_FLUTTER_QUERY
+        } else {
+            ACTION_SOAK_FLUTTER_CONTROL
+        }
+        if (
+            BuildConfig.DISTRIBUTION_CHANNEL != "soak" ||
+            intent?.action != expectedAction
+        ) {
+            return
+        }
+        val command = intent.getStringExtra(EXTRA_SOAK_COMMAND)
+            ?.trim()
+            ?.lowercase()
+            .orEmpty()
+        if (command !in SOAK_COMMANDS) {
+            Log.w(SOAK_TAG, "SOAK_QA_REJECTED reason=unsupported_command")
+            return
+        }
+        if (statusOnly && command != "status") {
+            Log.w(SOAK_TAG, "SOAK_QA_REJECTED reason=query_requires_status")
+            return
+        }
+        val requestId = intent.getStringExtra(EXTRA_SOAK_REQUEST_ID)
+            ?.trim()
+            ?.takeIf { SOAK_REQUEST_ID.matches(it) }
+            ?: "invalid"
+        val profileToken = intent.getStringExtra(EXTRA_SOAK_PROFILE_TOKEN)
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { SOAK_PROFILE_TOKEN.matches(it) }
+
+        pendingSoakCommand = PendingSoakCommand(
+            requestId = requestId,
+            command = command,
+            profileToken = profileToken,
+        )
+        dispatchPendingSoakCommand()
+    }
+
+    private fun dispatchPendingSoakCommand() {
+        if (!soakDartReady) {
+            return
+        }
+        val channel = soakChannel ?: return
+        val command = pendingSoakCommand ?: return
+        pendingSoakCommand = null
+        val arguments = mutableMapOf<String, Any>(
+            "requestId" to command.requestId,
+            "command" to command.command,
+        )
+        command.profileToken?.let { arguments["profileToken"] = it }
+        channel.invokeMethod(
+            "execute",
+            arguments,
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    val payload = result as? String
+                    if (payload == null || payload.length > MAX_SOAK_RESULT_LENGTH) {
+                        Log.w(
+                            SOAK_TAG,
+                            "SOAK_QA_RESULT request=${command.requestId} " +
+                                "{\"ok\":false,\"error\":\"invalid_result\"}",
+                        )
+                        return
+                    }
+                    Log.i(
+                        SOAK_TAG,
+                        "SOAK_QA_RESULT request=${command.requestId} $payload",
+                    )
+                }
+
+                override fun error(code: String, message: String?, details: Any?) {
+                    Log.w(
+                        SOAK_TAG,
+                        "SOAK_QA_RESULT request=${command.requestId} " +
+                            "{\"ok\":false,\"error\":\"dart_error\"}",
+                    )
+                }
+
+                override fun notImplemented() {
+                    Log.w(
+                        SOAK_TAG,
+                        "SOAK_QA_RESULT request=${command.requestId} " +
+                            "{\"ok\":false,\"error\":\"not_implemented\"}",
+                    )
+                }
+            },
+        )
     }
 
     private fun inspectApk(path: String?, result: MethodChannel.Result) {
@@ -615,6 +820,7 @@ class MainActivity : FlutterActivity() {
             }
 
     override fun onDestroy() {
+        unregisterSoakQueryReceiver()
         disarmFirstFrameWatchdog()
         ioExecutor.shutdown()
         super.onDestroy()
@@ -753,12 +959,31 @@ class MainActivity : FlutterActivity() {
         override val message: String,
     ) : Exception(message)
 
+    private data class PendingSoakCommand(
+        val requestId: String,
+        val command: String,
+        val profileToken: String?,
+    )
+
     private companion object {
         const val TAG = "YurichUpdater"
         const val APK_MIN_BYTES = 64 * 1024L
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val ACTION_PACKAGE_INSTALL_STATUS = "online.dnsai.ivanvpn.UPDATE_INSTALL_STATUS"
         const val EXTRA_PACKAGE_INSTALL_SESSION_ID = "package_install_session_id"
+        const val ACTION_SOAK_FLUTTER_CONTROL =
+            "online.dnsai.ivanvpn.action.SOAK_FLUTTER_CONTROL"
+        const val ACTION_SOAK_FLUTTER_QUERY =
+            "online.dnsai.ivanvpn.action.SOAK_FLUTTER_QUERY"
+        const val EXTRA_SOAK_COMMAND = "soakCommand"
+        const val EXTRA_SOAK_REQUEST_ID = "soakRequestId"
+        const val EXTRA_SOAK_PROFILE_TOKEN = "soakProfileToken"
+        const val SOAK_CHANNEL = "online.dnsai.ivanvpn/soak"
+        const val SOAK_TAG = "YurichSoakBridge"
+        const val MAX_SOAK_RESULT_LENGTH = 16 * 1024
+        val SOAK_COMMANDS = setOf("inventory", "status", "activate", "reconnect", "stop")
+        val SOAK_REQUEST_ID = Regex("^[a-zA-Z0-9._-]{1,64}$")
+        val SOAK_PROFILE_TOKEN = Regex("^p\\d{4}$")
         const val FIRST_FRAME_TIMEOUT_MS = 8_000L
         const val FIRST_FRAME_RECOVERY_WINDOW_MS = 60_000L
         const val FIRST_FRAME_RECOVERY_LIMIT = 2

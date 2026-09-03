@@ -8,6 +8,7 @@ import dalvik.system.DexClassLoader
 import java.io.File
 import java.lang.reflect.Proxy
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 
 class XrayRunner(
     private val service: VPNService,
@@ -33,6 +34,7 @@ class XrayRunner(
         }
 
         bridge.ensureInitialized(service.applicationContext)
+        Log.i(TAG, "Embedded Xray version: ${redact(bridge.xrayVersion()).take(96)}")
         val testResponse = validateConfig(datDir, configJson)
         if (looksFailed(testResponse)) {
             throw IllegalStateException("Xray config validation failed: $testResponse")
@@ -139,6 +141,8 @@ class XrayRunner(
         private var initialized = false
         private lateinit var classLoader: ClassLoader
         private lateinit var libXrayClass: Class<*>
+        private var dialerControllerProxy: Any? = null
+        private val protectCallCount = AtomicInteger(0)
 
         @Synchronized
         fun ensureInitialized(context: Context) {
@@ -244,7 +248,15 @@ class XrayRunner(
                 when (method.name) {
                     "protectFd" -> {
                         val fd = (args?.firstOrNull() as? Number)?.toInt()
-                        fd != null && service.protect(fd)
+                        val protected = fd != null && service.protect(fd)
+                        val call = protectCallCount.incrementAndGet()
+                        if (call <= PROTECT_LOG_LIMIT || !protected) {
+                            Log.i(
+                                TAG,
+                                "Xray protectFd call=$call fd=${fd ?: -1} protected=$protected",
+                            )
+                        }
+                        protected
                     }
                     "toString" -> "YurichConnectXrayDialerController"
                     else -> null
@@ -253,6 +265,12 @@ class XrayRunner(
             libXrayClass
                 .getMethod("registerDialerController", controllerClass)
                 .invoke(null, proxy)
+            dialerControllerProxy = proxy
+        }
+
+        fun xrayVersion(): String {
+            check(initialized) { "Xray bridge is not initialized" }
+            return libXrayClass.getMethod("xrayVersion").invoke(null) as String
         }
 
         fun setTunFd(fd: Int) {
@@ -296,6 +314,10 @@ class XrayRunner(
         fun getXrayState(): Boolean {
             check(initialized) { "Xray bridge is not initialized" }
             return libXrayClass.getMethod("getXrayState").invoke(null) as Boolean
+        }
+
+        companion object {
+            private const val PROTECT_LOG_LIMIT = 3
         }
     }
 }
