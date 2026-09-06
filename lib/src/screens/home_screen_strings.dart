@@ -270,10 +270,6 @@ class _Strings {
       _ProfileTab.vless => 'Reality',
       _ProfileTab.naive => 'HTTPS',
       _ProfileTab.hysteria => 'Turbo',
-      _ProfileTab.experimental => switch (this) {
-        _Strings.en => 'Experimental',
-        _ => 'Эксперимент',
-      },
     };
     return '$label $count';
   }
@@ -701,7 +697,7 @@ class _Strings {
     languageChanged: 'Язык переключён',
     addProfile: 'Добавить профиль',
     importHint:
-        'https://sub... или vless:// Reality, naive+https://..., hy2://..., pingtunnel://',
+        'https://sub... или vless:// Reality / XHTTP, naive+https://..., hy2://...',
     importAction: 'Импорт',
     clipboard: 'Буфер',
     scanQr: 'Сканировать QR',
@@ -937,7 +933,7 @@ class _Strings {
     languageChanged: 'Language changed',
     addProfile: 'Add profile',
     importHint:
-        'https://sub... or VLESS Reality, naive+https://..., hy2://..., pingtunnel://',
+        'https://sub... or vless:// Reality / XHTTP, naive+https://..., hy2://...',
     importAction: 'Import',
     clipboard: 'Clipboard',
     scanQr: 'Scan QR',

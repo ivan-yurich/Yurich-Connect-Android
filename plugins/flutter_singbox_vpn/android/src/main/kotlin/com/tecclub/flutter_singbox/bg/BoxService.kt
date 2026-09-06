@@ -89,6 +89,7 @@ class BoxService(
         private const val STICKY_RESTART_DELAY_MS = 2_500L
         private const val NETWORK_RESET_DELAY_MS = 250L
         private const val NETWORK_SETTLE_DELAY_MS = 6_000L
+        private const val XRAY_NETWORK_SETTLE_DELAY_MS = 1_000L
         private const val WAKE_SETTLE_DELAY_MS = 3_000L
         private const val NETWORK_WAKE_DEBOUNCE_MS = 5_000L
         private const val NETWORK_WAKE_GRACE_MS = 45_000L
@@ -123,6 +124,28 @@ class BoxService(
     private var xrayRunner: XrayRunner? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessionState = VpnSessionStateMachine()
+    private val instanceElapsedMs = SystemClock.elapsedRealtime()
+    private val nativeSoakObserver by lazy {
+        NativeSoakObserver(service) { includeNetwork ->
+            val snapshot = sessionState.snapshot()
+            val uid = android.os.Process.myUid()
+            NativeSoakSnapshot(
+                pid = android.os.Process.myPid(),
+                instanceElapsedMs = instanceElapsedMs,
+                elapsedMs = SystemClock.elapsedRealtime(),
+                generation = snapshot.generation,
+                phase = snapshot.phase,
+                desiredRunning = snapshot.desiredRunning,
+                runtime = activeRuntimeCore,
+                tunOpen = runCatching { fileDescriptor?.fileDescriptor?.valid() == true }
+                    .getOrDefault(false),
+                uidTxBytes = android.net.TrafficStats.getUidTxBytes(uid),
+                uidRxBytes = android.net.TrafficStats.getUidRxBytes(uid),
+                network = if (includeNetwork) captureNativeNetwork() else NativeNetworkSnapshot(),
+                configFingerprint = nativeConfigBinding?.forGeneration(snapshot.generation),
+            )
+        }
+    }
     private val lifecycleMutex = Mutex()
     private var lifecycleJob: Job? = null
     private var watchdogJob: Job? = null
@@ -147,6 +170,7 @@ class BoxService(
     private var keeperWakeLock: PowerManager.WakeLock? = null
     private var receiverRegistered = false
     private var lastConfigFingerprint: String? = null
+    @Volatile private var nativeConfigBinding: NativeConfigBinding? = null
     private var activeRuntimeCore: VpnRuntimeCore? = null
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -171,6 +195,19 @@ class BoxService(
                             onStartCommand()
                         }
                     }
+                }
+
+                Action.SERVICE_RELOAD -> {
+                    // Each process has its own config cache; preferences do not refresh it.
+                    if (!RuntimeConfigReload.cacheReceived(intent, SimpleConfigManager::cacheConfig)) {
+                        android.util.Log.w("BoxService", "Ignoring reload without a runtime config")
+                        return
+                    }
+                    if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
+                        SimpleConfigManager.setStartedByUser(true)
+                        SimpleConfigManager.setManualDisconnectRequested(false)
+                    }
+                    serviceReload()
                 }
 
 
@@ -284,7 +321,11 @@ class BoxService(
                 content,
                 WATCHDOG_MIXED_PROXY_PORT,
             )
-            lastConfigFingerprint = configFingerprint(content)
+            val fingerprint = configFingerprint(content)
+            lastConfigFingerprint = fingerprint
+            if (nativeSoakObserver.enabled) {
+                nativeConfigBinding = NativeConfigBinding(generation, fingerprint)
+            }
             
             if (content.isBlank() || content == "{}") {
                 android.util.Log.e("BoxService", "Empty configuration detected")
@@ -891,6 +932,7 @@ class BoxService(
     }
 
     private fun ensureReceiversRegistered() {
+        nativeSoakObserver.register()
         if (receiverRegistered) {
             return
         }
@@ -898,6 +940,7 @@ class BoxService(
         ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
             addAction(Action.SERVICE_CLOSE)
             addAction(Action.SERVICE_RESTART)
+            addAction(Action.SERVICE_RELOAD)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -935,6 +978,7 @@ class BoxService(
     }
 
     internal fun onDestroy() {
+        nativeSoakObserver.unregister()
         val destroySnapshot = sessionState.snapshot()
         val shouldRestore = runCatching {
             destroySnapshot.desiredRunning &&
@@ -1038,6 +1082,7 @@ class BoxService(
         reason: String,
         initialDelayMs: Long,
         demoteUntilReady: Boolean,
+        probeAttempts: Int = READINESS_PROBE_ATTEMPTS,
     ) {
         if (!sessionState.isCurrent(generation)) {
             return
@@ -1071,7 +1116,7 @@ class BoxService(
                 }
 
                 delay(initialDelayMs)
-                repeat(READINESS_PROBE_ATTEMPTS) { attempt ->
+                repeat(probeAttempts) { attempt ->
                     if (!isReadinessCurrent(generation, revision)) {
                         return@launch
                     }
@@ -1087,9 +1132,9 @@ class BoxService(
 
                     android.util.Log.w(
                         "BoxService",
-                        "Readiness probe failed ${attempt + 1}/$READINESS_PROBE_ATTEMPTS after $reason"
+                        "Readiness probe failed ${attempt + 1}/$probeAttempts after $reason"
                     )
-                    if (attempt + 1 < READINESS_PROBE_ATTEMPTS) {
+                    if (attempt + 1 < probeAttempts) {
                         delay(READINESS_RETRY_DELAY_MS)
                     }
                 }
@@ -1123,6 +1168,7 @@ class BoxService(
                             reason = "retry:$reason",
                             initialDelayMs = READINESS_BACKGROUND_RETRY_MS,
                             demoteUntilReady = true,
+                            probeAttempts = probeAttempts,
                         )
                     }
                 }
@@ -1251,16 +1297,17 @@ class BoxService(
             currentDefaultNetwork,
         )
         val isDefaultNetworkEvent = reason.contains("default-network", ignoreCase = true)
-        val networkChanged = isDefaultNetworkEvent &&
-            currentDefaultNetwork != lastHealthyDefaultNetwork
+        val networkChanged = isDefaultNetworkEvent && shouldResetRuntimeNetwork
         if (networkChanged) {
             watchdogFlapDetector.reset()
         }
         val alreadyValidating = snapshot.phase == VpnSessionPhase.Reconnecting
         val now = System.currentTimeMillis()
-        if (now - lastNetworkWakeEventAt < NETWORK_WAKE_DEBOUNCE_MS &&
-            !networkChanged &&
-            !alreadyValidating
+        if (TunnelReadinessPolicy.shouldDebounceNetworkEvent(
+                elapsedSinceLastEventMs = now - lastNetworkWakeEventAt,
+                debounceMs = NETWORK_WAKE_DEBOUNCE_MS,
+                networkChanged = networkChanged,
+            )
         ) {
             android.util.Log.d("BoxService", "Watchdog: network/wake event debounced: $reason")
             return
@@ -1282,11 +1329,18 @@ class BoxService(
 
         // A changed Android default network invalidates the previous outbound
         // readiness result even while the VPN NetworkAgent remains VALIDATED.
+        val readinessPlan = TunnelReadinessPolicy.networkChangePlan(
+            runtimeCore = activeRuntimeCore,
+            defaultInitialDelayMs = settleDelayFor(reason),
+            xrayInitialDelayMs = XRAY_NETWORK_SETTLE_DELAY_MS,
+            defaultProbeAttempts = READINESS_PROBE_ATTEMPTS,
+        )
         startReadinessValidation(
             generation = snapshot.generation,
             reason = reason,
-            initialDelayMs = settleDelayFor(reason),
+            initialDelayMs = readinessPlan.initialDelayMs,
             demoteUntilReady = networkChanged || alreadyValidating,
+            probeAttempts = readinessPlan.probeAttempts,
         )
     }
 
@@ -1420,12 +1474,21 @@ class BoxService(
     private fun probeMixedProxyEndpoint(host: String, path: String): Boolean {
         var rawSocket: Socket? = null
         var tlsSocket: SSLSocket? = null
+        val trace = if (nativeSoakObserver.enabled) runCatching {
+            NativeProbeEndpoint.fromHost(host)?.let {
+                NativeHealthProbeTrace(it, sessionState.snapshot().generation, readinessRevision.get(),
+                    SystemClock.elapsedRealtime(), captureNativeNetwork())
+            }
+        }.getOrNull() else null
+        var successful = false
+        var failure = NativeProbeFailure.None
         try {
             rawSocket = Socket()
             rawSocket.connect(
                 InetSocketAddress("127.0.0.1", WATCHDOG_MIXED_PROXY_PORT),
                 HEALTH_CONNECT_TIMEOUT_MS,
             )
+            trace?.enter(NativeProbeStage.ProxyResponse, SystemClock.elapsedRealtime())
             rawSocket.soTimeout = HEALTH_PROXY_RESPONSE_TIMEOUT_MS
             val connectRequest = "CONNECT $host:443 HTTP/1.1\r\n" +
                 "Host: $host:443\r\n" +
@@ -1435,6 +1498,7 @@ class BoxService(
             val connectReader = rawSocket.getInputStream().bufferedReader(Charsets.US_ASCII)
             val connectStatus = connectReader.readLine()
             if (connectStatus?.contains(" 200 ") != true) {
+                failure = NativeProbeFailure.ProxyStatus
                 android.util.Log.w("BoxService", "Watchdog CONNECT status for $host: $connectStatus")
                 return false
             }
@@ -1443,6 +1507,7 @@ class BoxService(
                 if (header.isEmpty()) break
             }
 
+            trace?.enter(NativeProbeStage.Tls, SystemClock.elapsedRealtime())
             tlsSocket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
                 .createSocket(rawSocket, host, 443, true) as SSLSocket
             tlsSocket.soTimeout = HEALTH_TLS_TIMEOUT_MS
@@ -1450,6 +1515,7 @@ class BoxService(
                 endpointIdentificationAlgorithm = "HTTPS"
             }
             tlsSocket.startHandshake()
+            trace?.enter(NativeProbeStage.Http, SystemClock.elapsedRealtime())
             val request = "GET $path HTTP/1.1\r\n" +
                 "Host: $host\r\n" +
                 "User-Agent: YurichConnectNativeKeeper/2\r\n" +
@@ -1459,20 +1525,37 @@ class BoxService(
             val responseStatus = tlsSocket.getInputStream()
                 .bufferedReader(Charsets.US_ASCII)
                 .readLine()
-            val successful = responseStatus?.startsWith("HTTP/") == true &&
+            successful = responseStatus?.startsWith("HTTP/") == true &&
                 (responseStatus.contains(" 204 ") || responseStatus.contains(" 200 "))
             if (!successful) {
+                failure = NativeProbeFailure.HttpStatus
                 android.util.Log.w("BoxService", "Watchdog HTTPS status for $host: $responseStatus")
             }
             return successful
         } catch (e: Exception) {
+            failure = when (e) {
+                is java.net.SocketTimeoutException -> NativeProbeFailure.Timeout
+                is javax.net.ssl.SSLException -> NativeProbeFailure.Tls
+                is java.io.IOException -> NativeProbeFailure.Io
+                else -> NativeProbeFailure.Other
+            }
             android.util.Log.w("BoxService", "Watchdog probe failed for $host: ${e.message}")
             return false
         } finally {
+            if (trace != null) runCatching {
+                android.util.Log.i("YurichNativeHealth", trace.finish(
+                    SystemClock.elapsedRealtime(), successful, failure,
+                ))
+            }
             runCatching { tlsSocket?.close() }
             runCatching { rawSocket?.close() }
         }
     }
+
+    private fun captureNativeNetwork(): NativeNetworkSnapshot =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            NativeNetworkSnapshot.capture(Application.connectivity, DefaultNetworkMonitor.defaultNetwork)
+        } else NativeNetworkSnapshot()
 
     private fun hasDefaultNetwork(): Boolean {
         if (DefaultNetworkMonitor.defaultNetwork != null) {

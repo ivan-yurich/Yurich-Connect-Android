@@ -37,13 +37,16 @@ void main() {
     expect(selected?.id, 'https');
   });
 
-  test('does not auto-select experimental profiles', () {
+  test('does not auto-select unavailable profiles', () {
     final profiles = [
       _profile(
-        'experimental',
-        VpnProfileKind.pingTunnelExperimental,
+        'unavailable',
+        VpnProfileKind.vlessMkcp,
         'tunnel.example',
-        outbound: const {'type': 'pingtunnel'},
+        outbound: const {
+          'type': 'vless',
+          'transport': {'type': 'mkcp'},
+        },
       ),
       _profile(
         'https',
@@ -55,7 +58,7 @@ void main() {
 
     final selected = selector.choose(
       profiles,
-      pingMs: const {'experimental': 1, 'https': 120},
+      pingMs: const {'unavailable': 1, 'https': 120},
     );
 
     expect(selected?.id, 'https');

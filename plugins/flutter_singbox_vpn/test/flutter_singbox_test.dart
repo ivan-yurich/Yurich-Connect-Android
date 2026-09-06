@@ -24,6 +24,9 @@ class MockFlutterSingboxPlatform
   Future<bool> stopVPN() => Future.value(true);
 
   @override
+  Future<bool> reloadVPN() => Future.value(true);
+
+  @override
   Future<String> getVPNStatus() => Future.value('Stopped');
 
   @override
@@ -180,6 +183,14 @@ void main() {
     FlutterSingboxPlatform.instance = fakePlatform;
 
     expect(await flutterSingboxPlugin.getManualDisconnectRequested(), true);
+  });
+
+  test('reloadVPN', () async {
+    FlutterSingbox flutterSingboxPlugin = FlutterSingbox();
+    MockFlutterSingboxPlatform fakePlatform = MockFlutterSingboxPlatform();
+    FlutterSingboxPlatform.instance = fakePlatform;
+
+    expect(await flutterSingboxPlugin.reloadVPN(), true);
   });
 
   // Tests for per-app tunneling methods

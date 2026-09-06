@@ -24,6 +24,8 @@ void main() {
               return true;
             case 'stopVPN':
               return true;
+            case 'reloadVPN':
+              return true;
             case 'getVPNStatus':
               return 'Stopped';
             case 'getManualDisconnectRequested':
@@ -53,6 +55,10 @@ void main() {
 
   test('getVPNStatus', () async {
     expect(await platform.getVPNStatus(), 'Stopped');
+  });
+
+  test('reloadVPN', () async {
+    expect(await platform.reloadVPN(), true);
   });
 
   test('getManualDisconnectRequested', () async {

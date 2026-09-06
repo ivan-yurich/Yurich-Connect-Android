@@ -30,7 +30,7 @@ class ProfileImporter {
   static const _responseTimeout = Duration(seconds: 20);
 
   static final _linkPattern = RegExp(
-    "(?:vless://|naive\\+https://|naive://|hy2://|hysteria2://|hysteria://|pingtunnel://)[^\\s<>\"']+",
+    "(?:vless://|naive\\+https://|naive://|hy2://|hysteria2://|hysteria://)[^\\s<>\"']+",
     caseSensitive: false,
   );
 
@@ -325,7 +325,7 @@ class ProfileImporter {
     }
 
     throw const ProfileImportException(
-      'Не нашёл поддерживаемых ссылок. Поддерживаются vless://, naive+https://, hy2://, hysteria://, pingtunnel://, sing-box JSON и raw-подписки.',
+      'Не нашёл поддерживаемых ссылок. Поддерживаются vless://, naive+https://, hy2://, hysteria://, sing-box JSON и raw-подписки.',
     );
   }
 
@@ -569,6 +569,17 @@ class ProfileImporter {
       if (decoded is Map<String, dynamic>) {
         if (decoded.containsKey('inbounds') &&
             decoded.containsKey('outbounds')) {
+          final outbounds = decoded['outbounds'];
+          if (outbounds is List &&
+              outbounds.whereType<Map>().any(
+                (outbound) =>
+                    outbound['type']?.toString().trim().toLowerCase() ==
+                    'pingtunnel',
+              )) {
+            throw const ProfileImportException(
+              'Конфигурация содержит неподдерживаемый протокол.',
+            );
+          }
           return VpnProfile(
             id: _stableId(text),
             name: 'Sing-box config',
@@ -655,18 +666,6 @@ class ProfileImporter {
         kind: type == 'hysteria2'
             ? VpnProfileKind.hysteria2
             : VpnProfileKind.hysteria,
-        originalInput: source.isEmpty ? originalText : source,
-        server: server,
-        port: port,
-        outbound: normalized,
-      );
-    }
-
-    if (type == 'pingtunnel') {
-      return VpnProfile(
-        id: _stableId(originalText),
-        name: _displayName('', fallback: server),
-        kind: VpnProfileKind.pingTunnelExperimental,
         originalInput: source.isEmpty ? originalText : source,
         server: server,
         port: port,
@@ -859,8 +858,6 @@ class ProfileImporter {
           profiles.add(_parseHysteria2(link));
         } else if (lower.startsWith('hysteria://')) {
           profiles.add(_parseHysteria(link));
-        } else if (lower.startsWith('pingtunnel://')) {
-          profiles.add(_parsePingTunnel(link));
         }
       } on Object catch (error) {
         errors.add('$link: $error');
@@ -1103,43 +1100,6 @@ class ProfileImporter {
       originalInput: link,
       server: uri.host,
       port: port,
-      outbound: outbound,
-    );
-  }
-
-  VpnProfile _parsePingTunnel(String link) {
-    final uri = Uri.parse(link);
-    if (uri.host.isEmpty) {
-      throw const ProfileImportException('PingTunnel ссылка без host.');
-    }
-
-    final query = _query(uri);
-    final userParts = uri.userInfo.split(':');
-    final username = userParts.isNotEmpty
-        ? Uri.decodeComponent(userParts.first)
-        : '';
-    final password = userParts.length > 1
-        ? Uri.decodeComponent(userParts.sublist(1).join(':'))
-        : (query['password'] ?? query['token'] ?? query['auth'] ?? '');
-    final outbound = <String, dynamic>{
-      'type': 'pingtunnel',
-      'tag': 'proxy',
-      'server': uri.host,
-      'server_port': uri.hasPort ? uri.port : 443,
-      if (username.isNotEmpty) 'username': username,
-      if (password.isNotEmpty) 'password': password,
-      if ((query['psk'] ?? '').isNotEmpty) 'psk': query['psk']!,
-      if ((query['sni'] ?? '').isNotEmpty) 'server_name': query['sni']!,
-      if ((query['path'] ?? '').isNotEmpty) 'path': query['path']!,
-    };
-
-    return VpnProfile(
-      id: _stableId(link),
-      name: _displayName(uri.fragment, fallback: uri.host),
-      kind: VpnProfileKind.pingTunnelExperimental,
-      originalInput: link,
-      server: uri.host,
-      port: uri.hasPort ? uri.port : 443,
       outbound: outbound,
     );
   }

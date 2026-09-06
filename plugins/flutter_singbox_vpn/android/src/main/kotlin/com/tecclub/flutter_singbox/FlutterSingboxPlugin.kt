@@ -28,6 +28,7 @@ import androidx.core.app.ActivityCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
 import com.tecclub.flutter_singbox.bg.BoxService
+import com.tecclub.flutter_singbox.bg.RuntimeConfigReload
 import com.tecclub.flutter_singbox.bg.ServiceConnection
 import com.tecclub.flutter_singbox.bg.ServiceNotification
 import com.tecclub.flutter_singbox.bg.VpnNotificationHelper
@@ -907,6 +908,9 @@ class FlutterSingboxPlugin :
             "stopVPN" -> {
                 stopVPN(result)
             }
+            "reloadVPN" -> {
+                reloadVPN(result)
+            }
             "getVPNStatus" -> {
                 getVPNStatus(result)
             }
@@ -1379,6 +1383,39 @@ class FlutterSingboxPlugin :
          }
      }
     
+    private fun reloadVPN(result: Result) {
+        coroutineScope.launch {
+            try {
+                if (isShuttingDown || !isVpnServiceRunning()) {
+                    result.success(false)
+                    return@launch
+                }
+
+                val config = configContent?.takeIf { it.isNotBlank() && it != "{}" }
+                    ?: withContext(Dispatchers.IO) { SimpleConfigManager.getConfig() }
+                val reloadIntent = RuntimeConfigReload.attach(
+                    Intent(Action.SERVICE_RELOAD).apply {
+                        `package` = context.packageName
+                        putExtra(Action.EXTRA_USER_INITIATED, true)
+                    },
+                    config,
+                )
+
+                SimpleConfigManager.setStartedByUser(true)
+                SimpleConfigManager.setManualDisconnectRequested(false)
+                isStarting = true
+                hasStartupError = false
+                _vpnStatus.value = Status.Starting
+                sendStatusUpdate(Status.Starting)
+                context.sendBroadcast(reloadIntent)
+                result.success(true)
+            } catch (e: Exception) {
+                android.util.Log.e("FlutterSingboxPlugin", "Error reloading VPN", e)
+                result.error("RELOAD_VPN_ERROR", e.message, null)
+            }
+        }
+    }
+
     private fun stopVPN(result: Result) {
         try {
             android.util.Log.e("FlutterSingboxPlugin", "Stopping VPN")

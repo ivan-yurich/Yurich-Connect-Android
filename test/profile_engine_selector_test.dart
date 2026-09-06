@@ -86,7 +86,6 @@ void main() {
       VpnProfileKind.hysteria2,
       VpnProfileKind.hysteria,
       VpnProfileKind.singBoxConfig,
-      VpnProfileKind.pingTunnelExperimental,
     ]) {
       expect(
         ProfileEngineSelector.requiresSuccessfulStartupProbe(_profile(kind)),
@@ -100,15 +99,15 @@ void main() {
     expect(VpnProfileKind.vlessTls.isClientSupported, isTrue);
   });
 
-  test('routes experimental PingTunnel to Xray-required engine', () {
+  test('keeps unsupported mKCP unavailable', () {
     final selection = ProfileEngineSelector.select(
-      _profile(VpnProfileKind.pingTunnelExperimental),
+      _profile(VpnProfileKind.vlessMkcp),
     );
 
     expect(selection.engine, VpnCoreEngine.xray);
     expect(selection.canRunInCurrentBuild, false);
     expect(selection.supportLevel, VpnProtocolSupportLevel.unavailable);
-    expect(selection.reason, contains('отдельного движка'));
+    expect(selection.reason, contains('mKCP'));
   });
 }
 

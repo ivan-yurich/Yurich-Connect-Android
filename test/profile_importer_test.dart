@@ -638,20 +638,75 @@ void main() {
     expect(SmartRouteRules.ruDirectPackageNames, isNotEmpty);
   });
 
-  test('imports PingTunnel link as experimental profile', () async {
-    const link = 'pingtunnel://user:token@example.com:443#PingTunnel';
+  test(
+    'rejects retired PingTunnel links without exposing credentials',
+    () async {
+      const link = 'pingtunnel://user:token@example.com:443#PingTunnel';
+      await expectLater(
+        ProfileImporter().importFromText(link),
+        throwsA(
+          isA<ProfileImportException>().having(
+            (error) => error.message,
+            'message',
+            isNot(contains('user:token')),
+          ),
+        ),
+      );
+    },
+  );
 
-    final profiles = await ProfileImporter().importFromText(link);
-    final profile = profiles.first;
+  test('skips PingTunnel in plain, base64 and JSON subscriptions', () async {
+    const links = [
+      'pingtunnel://user:token@example.com:443#Retired',
+      'naive+https://user:password@example.com:443#HTTPS',
+      'hy2://password@example.com:443#Turbo',
+      'PINGTUNNEL://user:token@example.com:443#Retired2',
+    ];
+    for (final payload in [
+      links.join('\n'),
+      base64Encode(utf8.encode(links.join('\n'))),
+      jsonEncode({'links': links}),
+      jsonEncode(links),
+      base64Encode(utf8.encode(jsonEncode({'links': links}))),
+    ]) {
+      final profiles = await ProfileImporter().importFromText(payload);
+      expect(profiles.map((profile) => profile.kind), [
+        VpnProfileKind.naive,
+        VpnProfileKind.hysteria2,
+      ]);
+    }
+  });
 
-    expect(profiles, hasLength(1));
-    expect(profile.kind, VpnProfileKind.pingTunnelExperimental);
-    expect(profile.server, 'example.com');
-    expect(profile.outbound?['type'], 'pingtunnel');
-    expect(
-      () => SingBoxConfigBuilder().build(profile),
-      throwsA(isA<UnsupportedError>()),
-    );
+  test('rejects PingTunnel outbound and full raw configs', () async {
+    const outbound = {
+      'type': 'pingtunnel',
+      'server': 'example.com',
+      'server_port': 443,
+    };
+    for (final config in [
+      outbound,
+      {
+        'inbounds': [],
+        'outbounds': [outbound],
+      },
+      {
+        'inbounds': [],
+        'outbounds': [
+          {...outbound, 'type': 'PingTunnel'},
+        ],
+      },
+      {
+        'links': ['pingtunnel://user:token@example.com:443'],
+      },
+    ]) {
+      final text = jsonEncode(config);
+      for (final payload in [text, base64Encode(utf8.encode(text))]) {
+        await expectLater(
+          ProfileImporter().importFromText(payload),
+          throwsA(isA<ProfileImportException>()),
+        );
+      }
+    }
   });
 
   test('builds Hiddify-like RU app bypass list with global app denylist', () {

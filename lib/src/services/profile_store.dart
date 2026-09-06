@@ -45,6 +45,7 @@ class ProfileStore {
     final decoded = jsonDecode(encoded) as List<dynamic>;
     return decoded
         .whereType<Map>()
+        .where((json) => !VpnProfile.isRetiredJson(json))
         .map((json) => VpnProfile.fromJson(json.cast<String, dynamic>()))
         .toList();
   }

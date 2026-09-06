@@ -6,7 +6,6 @@ enum VpnProfileKind {
   naive,
   hysteria2,
   hysteria,
-  pingTunnelExperimental,
   singBoxConfig,
 }
 
@@ -19,7 +18,6 @@ extension VpnProfileKindLabel on VpnProfileKind {
     VpnProfileKind.naive => 'NaiveProxy',
     VpnProfileKind.hysteria2 => 'Hysteria2',
     VpnProfileKind.hysteria => 'Hysteria',
-    VpnProfileKind.pingTunnelExperimental => 'PingTunnel Experimental',
     VpnProfileKind.singBoxConfig => 'Sing-box',
   };
 
@@ -30,9 +28,7 @@ extension VpnProfileKindLabel on VpnProfileKind {
     VpnProfileKind.naive ||
     VpnProfileKind.hysteria2 ||
     VpnProfileKind.hysteria => true,
-    VpnProfileKind.vlessMkcp ||
-    VpnProfileKind.pingTunnelExperimental ||
-    VpnProfileKind.singBoxConfig => false,
+    VpnProfileKind.vlessMkcp || VpnProfileKind.singBoxConfig => false,
   };
 }
 
@@ -90,6 +86,9 @@ class VpnProfile {
   }
 
   factory VpnProfile.fromJson(Map<String, dynamic> json) {
+    if (isRetiredJson(json)) {
+      throw const FormatException('Profile protocol is no longer supported.');
+    }
     final kindName =
         json['kind'] as String? ?? VpnProfileKind.vlessReality.name;
     return VpnProfile(
@@ -109,6 +108,14 @@ class VpnProfile {
       countryCode: json['countryCode'] as String?,
       countryName: json['countryName'] as String?,
     );
+  }
+
+  // Keep old entries from falling back to VLESS after removing their enum kind.
+  static bool isRetiredJson(Map<dynamic, dynamic> json) {
+    final outbound = json['outbound'];
+    return json['kind'] == 'pingTunnelExperimental' ||
+        (outbound is Map &&
+            outbound['type']?.toString().trim().toLowerCase() == 'pingtunnel');
   }
 
   VpnProfile copyWith({

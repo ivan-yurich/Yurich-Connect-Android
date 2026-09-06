@@ -220,7 +220,6 @@ class SingBoxConfigBuilder {
       VpnProfileKind.naive ||
       VpnProfileKind.vlessXhttp ||
       VpnProfileKind.vlessMkcp ||
-      VpnProfileKind.pingTunnelExperimental ||
       VpnProfileKind.singBoxConfig => false,
     };
   }

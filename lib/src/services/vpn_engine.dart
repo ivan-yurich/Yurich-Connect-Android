@@ -35,6 +35,7 @@ abstract class VpnEngine {
   Future<String> getConfig();
   Future<bool> startVPN();
   Future<bool> stopVPN();
+  Future<bool> reloadVPN();
   Future<List<String>> getLogs();
   Future<bool> clearLogs();
   Future<void> dispose();

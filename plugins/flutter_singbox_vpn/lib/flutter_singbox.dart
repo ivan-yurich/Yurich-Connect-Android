@@ -30,6 +30,11 @@ class FlutterSingbox {
     return FlutterSingboxPlatform.instance.stopVPN();
   }
 
+  /// Reload the active VPN runtime without stopping the Android VPN service.
+  Future<bool> reloadVPN() {
+    return FlutterSingboxPlatform.instance.reloadVPN();
+  }
+
   /// Get current VPN status
   ///
   /// Returns one of the following strings:

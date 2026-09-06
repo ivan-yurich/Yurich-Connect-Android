@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <profileable android:shell="true" />
+        <meta-data
+            android:name="online.dnsai.ivanvpn.SOAK_NATIVE_OBSERVER"
+            android:value="true" />
         <activity
             android:name=".qa.SoakControlActivity"
             android:enabled="true"
