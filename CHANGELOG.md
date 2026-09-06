@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.0.123 (Prerelease) - 2026-09-06
 
+- Raised the GitHub build number to 43135 so it exceeds all published 1.0.117
+  ABI variants. The earlier local 1.0.123 build 39135 is not the release artifact.
 - Removed PingTunnel import, protocol labels and the Experimental profile tab.
   Legacy PingTunnel entries are ignored on load instead of becoming VLESS;
   supported profiles in mixed subscriptions remain importable. Credential
@@ -26,6 +28,11 @@
   inventory profiles on Wi-Fi/mobile, records recovery without opening Flutter,
   preserves failures and restores the original profile/radios on normal exit.
   UI counters and graphical coverage remain separate, untested dimensions.
+
+Known limitations: background profile commands can still time out, and some
+Naive/Hysteria recovery scenarios failed. Recent long runs were interrupted;
+this prerelease does not certify continuous 24-hour stability. It does not
+replace the current stable GitHub release for automatic updates.
 
 ## 1.0.117 - 2026-09-03
 
