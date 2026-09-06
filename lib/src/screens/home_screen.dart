@@ -179,6 +179,8 @@ class _HomeScreenState extends State<HomeScreen>
   final _sessionController = VpnSessionController();
   final _soakCounterPublishCadence = SoakCounterPublishCadence();
   final _manualController = TextEditingController();
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>?
+  _connectionErrorSnackBar;
 
   StreamSubscription<Map<String, dynamic>>? _statusSubscription;
   StreamSubscription<Map<String, dynamic>>? _trafficSubscription;
@@ -1057,6 +1059,9 @@ class _HomeScreenState extends State<HomeScreen>
                 recoverUnexpectedStop = true;
               }
             });
+            if (status == AurumVpnStatus.started) {
+              _dismissConnectionErrorSnack();
+            }
             if (status == AurumVpnStatus.started &&
                 _manualDisconnectRequested &&
                 !_stoppingByUser) {
@@ -2381,7 +2386,9 @@ class _HomeScreenState extends State<HomeScreen>
       operation: operation,
       allowCachedOnError: false,
     );
-    if (status != AurumVpnStatus.stopped) {
+    var useInProcessReload =
+        rapidRestart && !crossEngineRestart && status == AurumVpnStatus.started;
+    if (status != AurumVpnStatus.stopped && !useInProcessReload) {
       final stopped = await _stopVpnCore(
         updateMessage: false,
         operation: operation,
@@ -2490,11 +2497,13 @@ class _HomeScreenState extends State<HomeScreen>
           });
         }
 
+        final reloadInProcess = useInProcessReload;
+        useInProcessReload = false;
         bool started;
         try {
           started = await _nativeCall(
-            'startVPN',
-            _vpnEngine.startVPN(),
+            reloadInProcess ? 'reloadVPN' : 'startVPN',
+            reloadInProcess ? _vpnEngine.reloadVPN() : _vpnEngine.startVPN(),
             timeout: _reconnectPhaseTimeout(
               reconnectPolicy,
               attemptClock,
@@ -3838,6 +3847,9 @@ class _HomeScreenState extends State<HomeScreen>
     if (_busy) {
       return;
     }
+    if (operation != null) {
+      _dismissConnectionErrorSnack();
+    }
     setState(() {
       _busy = true;
       _message = message ?? s.working;
@@ -3857,13 +3869,16 @@ class _HomeScreenState extends State<HomeScreen>
           _lastError = errorText;
           _message = errorText;
         });
-        _showSnack(
+        final errorSnack = _showSnack(
           errorText,
           action: SnackBarAction(
             label: s.report,
             onPressed: () => unawaited(_emailDeveloper()),
           ),
         );
+        if (operation != null) {
+          _connectionErrorSnackBar = errorSnack;
+        }
       }
     } finally {
       if (mounted) {
@@ -3872,13 +3887,32 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  void _showSnack(String text, {SnackBarAction? action}) {
+  void _dismissConnectionErrorSnack() {
+    final errorSnack = _connectionErrorSnackBar;
+    _connectionErrorSnackBar = null;
+    errorSnack?.close();
+  }
+
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _showSnack(
+    String text, {
+    SnackBarAction? action,
+  }) {
     if (!mounted) {
-      return;
+      return null;
     }
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(SnackBar(content: Text(text), action: action));
+    _connectionErrorSnackBar = null;
+    final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
+    final snack = messenger.showSnackBar(
+      SnackBar(content: Text(text), action: action),
+    );
+    unawaited(
+      snack.closed.then((_) {
+        if (identical(_connectionErrorSnackBar, snack)) {
+          _connectionErrorSnackBar = null;
+        }
+      }),
+    );
+    return snack;
   }
 
   Future<void> _openUrl(String value) async {

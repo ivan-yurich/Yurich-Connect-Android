@@ -102,6 +102,12 @@ class MethodChannelFlutterSingbox extends FlutterSingboxPlatform {
   }
 
   @override
+  Future<bool> reloadVPN() async {
+    final result = await methodChannel.invokeMethod<bool>('reloadVPN');
+    return result ?? false;
+  }
+
+  @override
   Future<String> getVPNStatus() async {
     final status = await methodChannel.invokeMethod<String>('getVPNStatus');
     return status ?? 'Stopped';

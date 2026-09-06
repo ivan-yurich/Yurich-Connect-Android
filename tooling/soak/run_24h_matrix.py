@@ -47,6 +47,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+if __package__:
+    from .http_diagnostics import measure_https
+else:
+    from http_diagnostics import measure_https
 
 PACKAGE = "online.dnsai.ivanvpn"
 MAIN_PROCESS = PACKAGE
@@ -120,6 +124,9 @@ EXIT_DETAIL_RE = re.compile(
     r"process=(?P<process>\S+)\s+reason=(?P<reason>\d+)\s+"
     r"\((?P<reason_name>[^)]+)\)\s+subreason=(?P<subreason>\d+)\s+"
     r"\((?P<subreason_name>[^)]+)\)"
+)
+DEVICE_LOCAL_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+$"
 )
 MEMORY_AMOUNT_RE = re.compile(r"(?P<value>\d+(?:[.,]\d+)?)\s*(?P<unit>[KMG]?B)")
 
@@ -266,6 +273,9 @@ CSV_SCHEMAS: dict[str, tuple[str, ...]] = {
         "https_observed",
         "https_ok",
         "https_payload_generated",
+        "tunnel_verified",
+        "tcp_tunnel_ok",
+        "https_tunnel_ok",
     ),
     "exit-events.csv": (
         "detected_utc",
@@ -275,6 +285,7 @@ CSV_SCHEMAS: dict[str, tuple[str, ...]] = {
         "reason_name",
         "subreason_code",
         "subreason_name",
+        "status",
         "pss_kb",
         "rss_kb",
         "classification",
@@ -451,6 +462,7 @@ class ExitEvent:
     subreason_name: str
     pss_kb: int
     rss_kb: int
+    status: int = -1
 
 
 @dataclass(frozen=True)
@@ -914,6 +926,7 @@ def parse_exit_info(raw: str) -> list[ExitEvent]:
             continue
         pss_match = re.search(r"\bpss=([^,\s]+(?:,\d+)?\s*[KMG]?B)", detail_text)
         rss_match = re.search(r"\brss=([^,\s]+(?:,\d+)?\s*[KMG]?B)", detail_text)
+        status_match = re.search(r"\bstatus=(-?\d+)", detail_text)
         timestamp = header.group("timestamp")
         identity = "|".join(
             (
@@ -938,9 +951,19 @@ def parse_exit_info(raw: str) -> list[ExitEvent]:
                 ),
                 pss_kb=parse_memory_amount(pss_match.group(1)) if pss_match else -1,
                 rss_kb=parse_memory_amount(rss_match.group(1)) if rss_match else -1,
+                status=int(status_match.group(1)) if status_match else -1,
             )
         )
     return events
+
+
+def exit_event_is_pre_run(event_timestamp: str, run_started_local: str) -> bool:
+    normalized = event_timestamp.replace(" ", "T", 1)
+    return bool(
+        DEVICE_LOCAL_TIMESTAMP_RE.fullmatch(normalized)
+        and DEVICE_LOCAL_TIMESTAMP_RE.fullmatch(run_started_local)
+        and normalized <= run_started_local
+    )
 
 
 def status_query_args(request_id: str) -> tuple[str, ...]:
@@ -1173,7 +1196,7 @@ class SoakRunner:
         self.completion_reason = "not_started"
         self.started_monotonic = 0.0
         self.started_epoch = 0.0
-        self.diagnostic_started_epoch = 0.0
+        self.diagnostic_started_device_local = ""
         self.started_utc = ""
         self.finished_utc = ""
         self.bridge_sequence = 0
@@ -1237,9 +1260,13 @@ class SoakRunner:
         self.counter_resets = 0
         self.counter_previous: PassiveCounterEvent | None = None
         self.counter_baseline_pending = False
-        self.counter_baseline_not_before_epoch = 0.0
+        self.counter_baseline_not_before_epoch: float | None = None
+        self.counter_baseline_started_monotonic = 0.0
+        self.device_clock_failures = 0
         self.seen_counter_event_ids: set[str] = set()
         self.last_probe_had_traffic = False
+        self.last_probe_tunnel_verified = False
+        self.last_probe_tunnel_observed = False
         self.last_probe_completed_monotonic = 0.0
         self.payload_probe_epochs: list[float] = []
 
@@ -1656,6 +1683,17 @@ class SoakRunner:
             else "unknown"
         )
 
+    def device_local_timestamp(self) -> str:
+        result, error = self.shell(
+            "date",
+            "+%Y-%m-%dT%H:%M:%S.%3N",
+            timeout=15,
+        )
+        if error or result is None:
+            return ""
+        value = result.stdout.strip()
+        return value if DEVICE_LOCAL_TIMESTAMP_RE.fullmatch(value) else ""
+
     def bridge_request(
         self,
         command: str,
@@ -1794,11 +1832,20 @@ class SoakRunner:
         )
         while time.monotonic() < deadline and not self.stop_requested:
             self.write_heartbeat()
+            main_pid, pid_observed = self.pidof(MAIN_PROCESS)
+            if not pid_observed:
+                return None, "observer_unavailable"
+            if not main_pid:
+                return None, "main_process_absent"
             logcat, error = self.adb_run(
                 "logcat",
+                "-b",
+                "main",
                 "-d",
                 "-v",
                 "raw",
+                "--pid",
+                main_pid,
                 "-s",
                 f"{SOAK_TAG}:V",
                 "*:S",
@@ -1958,6 +2005,22 @@ class SoakRunner:
         except (AssertionError, ValueError) as error:
             raise RuntimeError("inventory_schedule_invalid") from error
 
+    def observe_initial_profile(self) -> None:
+        payload, error = self.query_status(timeout_s=5)
+        if error or payload is None:
+            return
+        vpn_pid, pid_observed = self.pidof(VPN_PROCESS)
+        token = str(payload.get("profileToken") or "")
+        profile = self.profile_by_token.get(token)
+        if not pid_observed or not vpn_pid or profile is None:
+            return
+        self.current_profile = profile
+        self.event(
+            "initial_profile_observed",
+            profile=profile.token,
+            engine=profile.engine,
+        )
+
     def verify_inventory_snapshot(self, context: str) -> bool | None:
         self.inventory_verification_attempts += 1
         payload, error = self.bridge_request("inventory")
@@ -2022,12 +2085,15 @@ class SoakRunner:
 
     def pidof(self, process: str) -> tuple[str, bool]:
         result, error = self.shell("pidof", "-s", process, timeout=15)
-        if error == "observer_unavailable":
-            return "", False
-        if result is None:
+        if result is None or error not in {"", "nonzero"}:
             return "", False
         pid = result.stdout.strip()
-        return (pid if pid.isdigit() else ""), True
+        if not error and result.returncode == 0 and re.fullmatch(r"[1-9][0-9]*", pid):
+            return pid, True
+        # Only pidof's clean no-match result proves absence. ADB failures do not.
+        if error == "nonzero" and result.returncode == 1 and not pid and not result.stderr.strip():
+            return "", True
+        return "", False
 
     def vpn_state(self) -> VpnState:
         result, error = self.shell("dumpsys", "connectivity", timeout=45)
@@ -2044,26 +2110,21 @@ class SoakRunner:
         return ProbeResult(True, result.returncode == 0)
 
     def https_probe(self) -> ProbeResult:
-        probe_paths = (
-            "https://speed.cloudflare.com/__down?bytes=65536",
-            "https://www.gstatic.com/generate_204",
-        )
+        self.last_https_attempts = []
         observed = False
-        for index, path in enumerate(probe_paths):
-            result, error = self.shell(
-                "curl",
-                "-fsS",
-                "--max-time",
-                "15",
-                "-o",
-                "/dev/null",
-                path,
-                timeout=22,
+        for index, endpoint in enumerate(("payload", "fallback")):
+            attempt = measure_https(self, endpoint)
+            self.last_https_attempts.append(asdict(attempt))
+            self.event(
+                "https_attempt", endpoint=endpoint, observed=attempt.observed,
+                ok=attempt.ok, exit_code=attempt.exit_code, http_code=attempt.http_code,
+                size_download=attempt.size_download, failure=attempt.failure,
+                **attempt.timings_ms,
             )
-            if error == "observer_unavailable" or result is None:
+            if not attempt.observed:
                 continue
             observed = True
-            if result.returncode == 0:
+            if attempt.ok:
                 return ProbeResult(
                     True,
                     True,
@@ -2117,6 +2178,8 @@ class SoakRunner:
         tcp: ProbeResult,
         https: ProbeResult,
         state: VpnState,
+        *,
+        tunnel_verified: bool = False,
     ) -> None:
         profile = self.current_profile
         self.append_csv(
@@ -2140,6 +2203,9 @@ class SoakRunner:
                 "https_observed": https.observed,
                 "https_ok": https.ok if https.observed else "",
                 "https_payload_generated": https.traffic_generated,
+                "tunnel_verified": tunnel_verified,
+                "tcp_tunnel_ok": tunnel_verified and tcp.observed and tcp.ok,
+                "https_tunnel_ok": tunnel_verified and https.observed and https.ok,
             },
         )
 
@@ -2150,12 +2216,25 @@ class SoakRunner:
             self.last_observed_network = state.network
         tcp = self.tcp_probe()
         https = self.https_probe()
+        post_state = self.vpn_state()
+        profile = self.current_profile
+        # Shell probes can succeed directly after the VPN disappears. Only a
+        # validated target runtime on both sides can qualify their traffic.
+        tunnel_verified = profile is not None and all(
+            candidate.observed
+            and candidate.validated
+            and candidate.network == self.current_network
+            and candidate.runtime == profile.runtime
+            for candidate in (state, post_state)
+        )
+        self.last_probe_tunnel_verified = tunnel_verified
+        self.last_probe_tunnel_observed = state.observed and post_state.observed
         self.probe_samples += 1
         if tcp.observed and not tcp.ok:
             self.tcp_failures += 1
         if https.observed and not https.ok:
             self.https_failures += 1
-        self.write_probe(source, tcp, https, state)
+        self.write_probe(source, tcp, https, state, tunnel_verified=tunnel_verified)
         if source == "scheduled":
             self.observe_issue(
                 "tcp_probe_failed",
@@ -2170,10 +2249,12 @@ class SoakRunner:
                 severity="app",
             )
         self.last_probe_had_traffic = (
-            https.observed and https.ok and https.traffic_generated
+            tunnel_verified and https.observed and https.ok and https.traffic_generated
         )
         if self.last_probe_had_traffic:
-            self.payload_probe_epochs.append(time.time())
+            device_epoch = self.read_device_epoch()
+            if device_epoch is not None:
+                self.payload_probe_epochs.append(device_epoch)
         self.last_probe_completed_monotonic = time.monotonic()
         if self.slot_metrics is not None and self.last_probe_had_traffic:
             self.slot_metrics.payload_probe_success = True
@@ -2223,12 +2304,7 @@ class SoakRunner:
             return ProcessMemory(), ""
         meminfo, mem_error = self.shell("dumpsys", "meminfo", pid, timeout=45)
         status, status_error = self.shell("cat", f"/proc/{pid}/status", timeout=20)
-        fd_result, fd_error = self.shell(
-            "sh",
-            "-c",
-            f"ls -1 /proc/{pid}/fd 2>/dev/null | wc -l",
-            timeout=20,
-        )
+        fd_result, fd_error = self.shell("ls", "-1", f"/proc/{pid}/fd", timeout=20)
         if mem_error == "observer_unavailable":
             return ProcessMemory(), pid
         mem_text = meminfo.stdout if meminfo is not None else ""
@@ -2271,13 +2347,12 @@ class SoakRunner:
         threads_match = re.search(r"^Threads:\s*(\d+)", status_text, re.MULTILINE)
         if rss < 0 and rss_match:
             rss = int(rss_match.group(1))
+        fd_entries = fd_result.stdout.splitlines() if fd_result is not None else []
         fd_count = (
-            safe_int(fd_result.stdout.strip())
-            if fd_result is not None and not fd_error
+            len(fd_entries)
+            if not fd_error and fd_entries and all(entry.isdigit() for entry in fd_entries)
             else -1
         )
-        if fd_count == 0:
-            fd_count = -1
         cpu_percent = (
             cpu_percent_override
             if cpu_percent_override is not None
@@ -2398,18 +2473,54 @@ class SoakRunner:
             self.append_csv("memory.csv", row)
             self.memory_records[role].append(row)
 
+    def read_device_epoch(self) -> float | None:
+        # logcat epoch timestamps use the phone clock, not the host clock.
+        host_before = time.time()
+        result, error = self.shell("date", "-u", "+%s.%N", timeout=10)
+        host_after = time.time()
+        raw = result.stdout.strip() if result is not None and not error else ""
+        valid = re.fullmatch(r"[0-9]{1,12}\.[0-9]{1,9}", raw) is not None
+        if not valid:
+            self.device_clock_failures += 1
+        self.observe_issue(
+            "device_clock_unavailable",
+            bad=not valid,
+            observed=True,
+            severity="observer",
+        )
+        epoch = float(raw) if valid else None
+        self.event(
+            "device_clock_sample",
+            device_epoch=epoch,
+            host_before_epoch=host_before,
+            host_after_epoch=host_after,
+            observed=valid,
+        )
+        return epoch
+
     def read_passive_counter_events(
         self,
+        *,
+        timeout_s: int = 20,
     ) -> tuple[list[PassiveCounterEvent] | None, str]:
+        main_pid, pid_observed = self.pidof(MAIN_PROCESS)
+        if not pid_observed:
+            return None, "observer_unavailable"
+        if not main_pid:
+            return None, "main_process_absent"
         result, error = self.adb_run(
             "logcat",
+            "-b",
+            "main",
             "-d",
             "-v",
             "epoch",
+            "--pid",
+            main_pid,
             "-s",
             f"{SOAK_TAG}:I",
             "*:S",
-            timeout=20,
+            timeout=timeout_s,
         )
         if error or result is None:
             return None, (
@@ -2420,18 +2531,27 @@ class SoakRunner:
         return parse_passive_counter_logs(result.stdout), ""
 
     def baseline_passive_counters(self) -> None:
-        events, error = self.read_passive_counter_events()
+        events: list[PassiveCounterEvent] | None = None
+        error = "counter_log_unavailable"
+        for attempt in range(2):
+            events, error = self.read_passive_counter_events(timeout_s=45)
+            if not error and events is not None:
+                break
+            if attempt == 0:
+                time.sleep(1)
         if error or events is None:
             raise RuntimeError("counter_log_baseline_unavailable")
         self.seen_counter_event_ids.update(event.event_id for event in events)
         self.counter_previous = None
         self.counter_baseline_pending = False
-        self.counter_baseline_not_before_epoch = 0.0
+        self.counter_baseline_not_before_epoch = None
+        self.counter_baseline_started_monotonic = 0.0
 
     def begin_post_transition_counter_baseline(self) -> None:
         self.counter_previous = None
         self.counter_baseline_pending = True
-        self.counter_baseline_not_before_epoch = time.time()
+        self.counter_baseline_started_monotonic = time.monotonic()
+        self.counter_baseline_not_before_epoch = self.read_device_epoch()
 
     def counter_tick(self, *, device_observed: bool | None = None) -> None:
         profile = self.current_profile
@@ -2441,6 +2561,8 @@ class SoakRunner:
             events, error = None, "observer_unavailable"
         else:
             state = self.vpn_state()
+            if self.counter_baseline_pending and self.counter_baseline_not_before_epoch is None:
+                self.counter_baseline_not_before_epoch = self.read_device_epoch()
             events, error = self.read_passive_counter_events()
         self.last_network_observation_fresh = state.observed
         if state.observed:
@@ -2458,7 +2580,8 @@ class SoakRunner:
             evaluation_candidates = [
                 event
                 for event in candidates
-                if event.epoch >= self.counter_baseline_not_before_epoch
+                if self.counter_baseline_not_before_epoch is not None
+                and event.epoch >= self.counter_baseline_not_before_epoch
             ]
         evaluation = evaluate_passive_counters(
             self.counter_previous,
@@ -2469,7 +2592,7 @@ class SoakRunner:
         current = evaluation.current
         baseline_was_pending = self.counter_baseline_pending
         baseline_age_s = (
-            max(0.0, time.time() - self.counter_baseline_not_before_epoch)
+            max(0.0, time.monotonic() - self.counter_baseline_started_monotonic)
             if baseline_was_pending
             else 0.0
         )
@@ -2486,7 +2609,8 @@ class SoakRunner:
         if current is not None:
             self.counter_previous = current
             self.counter_baseline_pending = False
-            self.counter_baseline_not_before_epoch = 0.0
+            self.counter_baseline_not_before_epoch = None
+            self.counter_baseline_started_monotonic = 0.0
         self.counter_samples += 1
         if baseline_grace:
             self.counter_baseline_grace_samples += 1
@@ -2561,7 +2685,9 @@ class SoakRunner:
             "passive_counter_missing",
             bad=not observed and not error and not baseline_grace,
             observed=True,
-            severity="app",
+            # This telemetry comes from Flutter in the UI process. Its absence
+            # while cached/frozen does not prove a native traffic-counter fault.
+            severity="observer",
         )
 
     def observe_issue(
@@ -2957,11 +3083,13 @@ class SoakRunner:
         if event.reason_code == 4:
             return "crash", True
         if event.reason_code == 2:
-            if event.process_role == "vpn" and expected_window:
+            if event.process_role == "vpn" and expected_window and event.status in {9, 15}:
                 return "expected_vpn_signal", False
-            if event.process_role == "vpn" and ambiguous_window:
+            if event.process_role == "vpn" and ambiguous_window and event.status in {-1, 9, 15}:
                 return "ambiguous_vpn_signal", False
-            return "native_crash", True
+            # REASON_SIGNALED also includes SIGKILL and ordinary termination.
+            # Android reports confirmed native crashes as REASON_CRASH_NATIVE.
+            return "signaled_exit", True
         if event.reason_code == 5:
             return "native_crash", True
         if event.reason_code == 6:
@@ -2999,6 +3127,13 @@ class SoakRunner:
             if event.event_id in self.seen_exit_ids:
                 continue
             self.seen_exit_ids.add(event.event_id)
+            if exit_event_is_pre_run(
+                event.timestamp_local,
+                self.diagnostic_started_device_local,
+            ):
+                self.baseline_exit_ids.add(event.event_id)
+                self.event("delayed_pre_run_exit_ignored")
+                continue
             expected_window = (
                 event.process_role == "vpn"
                 and self.planned_vpn_exit_event_pending
@@ -3024,6 +3159,7 @@ class SoakRunner:
                     "reason_name": event.reason_name,
                     "subreason_code": event.subreason_code,
                     "subreason_name": event.subreason_name,
+                    "status": event.status,
                     "pss_kb": event.pss_kb,
                     "rss_kb": event.rss_kb,
                     "classification": classification,
@@ -3040,6 +3176,7 @@ class SoakRunner:
                     "process_role": event.process_role,
                     "reason_code": event.reason_code,
                     "subreason_code": event.subreason_code,
+                    "status": event.status,
                 },
             )
             if failure:
@@ -3057,6 +3194,7 @@ class SoakRunner:
                         "process_role": event.process_role,
                         "reason_code": event.reason_code,
                         "subreason_code": event.subreason_code,
+                        "status": event.status,
                     },
                 )
         if not self.planned_vpn_process_change_active:
@@ -3067,17 +3205,38 @@ class SoakRunner:
         return True
 
     def scan_runtime_isolation(self) -> None:
-        result, error = self.adb_run(
-            "logcat",
-            "-d",
-            "-v",
-            "epoch",
-            "-s",
-            f"{ISOLATION_TAG}:I",
-            "*:S",
-            timeout=30,
+        current_core = (
+            normalize_engine(self.current_profile.engine)
+            if self.current_profile is not None
+            else ""
         )
-        if error or result is None:
+        if current_core and current_core in self.isolation_evidence:
+            return
+        result: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(6):
+            vpn_pid, pid_observed = self.pidof(VPN_PROCESS)
+            if pid_observed and vpn_pid:
+                candidate, error = self.adb_run(
+                    "logcat",
+                    "-b",
+                    "main",
+                    "-d",
+                    "-v",
+                    "epoch",
+                    "--pid",
+                    vpn_pid,
+                    timeout=30,
+                )
+                if (
+                    not error
+                    and candidate is not None
+                    and "RUNTIME_ISOLATION" in candidate.stdout
+                ):
+                    result = candidate
+                    break
+            if attempt < 5:
+                time.sleep(1)
+        if result is None:
             return
         pattern = re.compile(
             r"^\s*(?P<epoch>\d+\.\d+).+RUNTIME_ISOLATION\s+"
@@ -3088,9 +3247,6 @@ class SoakRunner:
             re.MULTILINE,
         )
         for match in pattern.finditer(result.stdout):
-            epoch = float(match.group("epoch"))
-            if epoch + 1 < self.diagnostic_started_epoch:
-                continue
             core = normalize_engine(match.group("core"))
             libbox = match.group("libbox") == "true"
             libgojni = match.group("libgojni") == "true"
@@ -3190,6 +3346,7 @@ class SoakRunner:
         transition_ok = (
             command_ok
             and ready
+            and self.last_probe_tunnel_verified
             and tcp.observed
             and tcp.ok
             and https.observed
@@ -3215,6 +3372,11 @@ class SoakRunner:
             error_code = "tcp_failed"
         elif not https.ok:
             error_code = "https_failed"
+        elif not self.last_probe_tunnel_verified:
+            error_code = (
+                "tunnel_changed_during_probe" if self.last_probe_tunnel_observed
+                else "tunnel_probe_observer_unavailable"
+            )
         row = {
             "timestamp_utc": utc_now(),
             "elapsed_s": self.elapsed_s(),
@@ -3298,6 +3460,7 @@ class SoakRunner:
         reconnect_ok = (
             command_ok
             and ready
+            and self.last_probe_tunnel_verified
             and tcp.observed
             and tcp.ok
             and https.observed
@@ -3321,6 +3484,11 @@ class SoakRunner:
             error_code = "tcp_failed"
         elif not https.ok:
             error_code = "https_failed"
+        elif not self.last_probe_tunnel_verified:
+            error_code = (
+                "tunnel_changed_during_probe" if self.last_probe_tunnel_observed
+                else "tunnel_probe_observer_unavailable"
+            )
         row = {
             "timestamp_utc": utc_now(),
             "elapsed_s": self.elapsed_s(),
@@ -3375,6 +3543,11 @@ class SoakRunner:
     ) -> bool:
         profile = self.current_profile
         previous_network = self.current_network
+        exit_boundary_observed = self.scan_exit_info()
+        self.begin_planned_vpn_process_change_window(
+            required=profile is not None and profile.runtime == "xray",
+            exit_boundary_observed=exit_boundary_observed,
+        )
         started = time.monotonic()
         self.write_heartbeat()
         radio_ok = self.set_radios(network)
@@ -3401,6 +3574,7 @@ class SoakRunner:
         handover_ok = (
             radio_ok
             and ready
+            and self.last_probe_tunnel_verified
             and tcp.observed
             and tcp.ok
             and https.observed
@@ -3423,6 +3597,11 @@ class SoakRunner:
             error_code = "tcp_failed"
         elif not https.ok:
             error_code = "https_failed"
+        elif not self.last_probe_tunnel_verified:
+            error_code = (
+                "tunnel_changed_during_probe" if self.last_probe_tunnel_observed
+                else "tunnel_probe_observer_unavailable"
+            )
         row = {
             "timestamp_utc": utc_now(),
             "elapsed_s": self.elapsed_s(),
@@ -3453,7 +3632,7 @@ class SoakRunner:
             ok=handover_ok,
         )
         self.scan_runtime_isolation()
-        self.scan_exit_info()
+        self.close_planned_vpn_process_change_window()
         if qualifying and not handover_ok:
             self.capture_incident(
                 issue="network_handover_failed",
@@ -4486,6 +4665,7 @@ class SoakRunner:
             **observation_gates,
         }
         observer_gates = {
+            "device_clock_integrity": self.device_clock_failures == 0,
             "observer_coverage": observer_coverage >= OBSERVER_COVERAGE_MIN,
             "observer_max_unknown_streak": (
                 self.observer_max_unknown_streak_s
@@ -4539,6 +4719,7 @@ class SoakRunner:
             "finished_utc": self.finished_utc or None,
             "duration_target_s": self.duration_target_s,
             "duration_hours": self.duration_hours,
+            "device_clock_failures": self.device_clock_failures,
             "elapsed_s": self.elapsed_s(),
             "verdict": {
                 "gates": verdict_gates,
@@ -4952,7 +5133,6 @@ class SoakRunner:
         signal.signal(signal.SIGINT, self.request_stop)
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, self.request_stop)
-        self.diagnostic_started_epoch = time.time()
         try:
             self.ensure_output_is_safe()
             self.write_runner_process(completed=False)
@@ -4973,8 +5153,12 @@ class SoakRunner:
             self.initial_mobile_enabled = mobile
             self.initial_screen_interactive = interactive
             self.radio_baseline_observed = True
+            self.diagnostic_started_device_local = self.device_local_timestamp()
+            if not self.diagnostic_started_device_local:
+                raise RuntimeError("device_time_baseline_unavailable")
             self.write_exit_baseline()
             self.load_inventory()
+            self.observe_initial_profile()
             self.write_manifest_and_schedule()
             self.event(
                 "preflight_started",
@@ -5381,6 +5565,15 @@ NetworkAgentInfo{{network{{2}} ni{{VPN CONNECTED extra: VPN:another.package}} Sc
     assert parsed[0].reason_code == 5
     assert parsed[0].pss_kb == 12 * 1024
     assert parsed[0].rss_kb == 152 * 1024
+    assert exit_event_is_pre_run(
+        "2026-07-26 17:44:53.812",
+        "2026-07-26T17:44:54.000",
+    )
+    assert not exit_event_is_pre_run(
+        "2026-07-26 17:44:54.001",
+        "2026-07-26T17:44:54.000",
+    )
+    assert not exit_event_is_pre_run("invalid", "2026-07-26T17:44:54.000")
     assert round(percentile([1, 2, 3, 4, 5], 0.95), 1) == 4.8
     assert round(linear_slope_per_hour([(0, 100), (1800, 150), (3600, 200)])) == 100
 
@@ -5685,6 +5878,7 @@ Suspend Blockers: size=1
     warmup_runner.current_profile = Profile("p0001", "naive", "singBox")
     warmup_runner.counter_baseline_pending = True
     warmup_runner.counter_baseline_not_before_epoch = time.time()
+    warmup_runner.counter_baseline_started_monotonic = time.monotonic()
     warmup_runner.vpn_state = lambda: VpnState(  # type: ignore[method-assign]
         observed=True,
         validated=True,
@@ -5711,8 +5905,8 @@ Suspend Blockers: size=1
     assert warmup_runner.counter_baseline_pending
     assert captured_counter_rows[-1]["baseline_pending"] is True
     assert captured_counter_rows[-1]["baseline_grace"] is True
-    warmup_runner.counter_baseline_not_before_epoch = (
-        time.time() - COUNTER_BASELINE_GRACE_S - 1
+    warmup_runner.counter_baseline_started_monotonic = (
+        time.monotonic() - COUNTER_BASELINE_GRACE_S - 1
     )
     warmup_runner.counter_tick()
     assert warmup_runner.counter_samples == 2

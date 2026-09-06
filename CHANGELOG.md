@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- Required a healthy config-bound external payload before QA handover/outage
+  injection; unhealthy baselines are explicit scenario skips, not new recovery
+  failures. Radio changes also wait for outstanding profile controls to finish.
+- Fixed QA PID observation treating some ADB errors as an absent VPN process.
+  Only a clean no-match result now proves absence; ambiguous responses remain
+  unknown. Added regression tests without changing the installed Android app.
+- Fixed rapid same-core profile switches reloading the previous profile: the
+  app now sends the saved config with the private reload broadcast, and the VPN
+  process updates its own cache before recycling the runtime. Missing reload
+  payloads are rejected instead of silently reusing an old configuration.
+- Added soak-only, DUMP-protected config fingerprints bound to the native
+  session generation. QA can reject observations from a different runtime
+  configuration without reading profile credentials or waking Flutter.
+- Earlier profile-switch test results without native configuration attribution
+  need revalidation; the focused fix verification is not a completed 24h test.
+- Added config-bound phone checks and a separate native background endurance
+  controller reusing the existing ADB/HTTPS/resource parsers. It checks all
+  inventory profiles on Wi-Fi/mobile, records recovery without opening Flutter,
+  preserves failures and restores the original profile/radios on normal exit.
+  UI counters and graphical coverage remain separate, untested dimensions.
+
 ## 1.0.117 - 2026-09-03
 
 - Released native client bindings after runtime cleanup and waited for the

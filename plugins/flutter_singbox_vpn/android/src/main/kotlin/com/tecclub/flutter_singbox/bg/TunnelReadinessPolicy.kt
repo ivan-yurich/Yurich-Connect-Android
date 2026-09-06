@@ -1,5 +1,10 @@
 package com.tecclub.flutter_singbox.bg
 
+internal data class NetworkReadinessPlan(
+    val initialDelayMs: Long,
+    val probeAttempts: Int,
+)
+
 internal object TunnelReadinessPolicy {
     const val REQUIRED_ENDPOINT_SUCCESSES = 2
 
@@ -36,5 +41,38 @@ internal object TunnelReadinessPolicy {
         return startAttemptAtMs == 0L ||
             nowMs < startAttemptAtMs ||
             nowMs - startAttemptAtMs >= graceMs
+    }
+
+    fun networkChangePlan(
+        runtimeCore: VpnRuntimeCore?,
+        defaultInitialDelayMs: Long,
+        xrayInitialDelayMs: Long,
+        defaultProbeAttempts: Int,
+    ): NetworkReadinessPlan {
+        require(defaultInitialDelayMs >= 0L)
+        require(xrayInitialDelayMs >= 0L)
+        require(defaultProbeAttempts > 0)
+        return if (runtimeCore == VpnRuntimeCore.Xray) {
+            NetworkReadinessPlan(
+                initialDelayMs = xrayInitialDelayMs,
+                probeAttempts = 1,
+            )
+        } else {
+            NetworkReadinessPlan(
+                initialDelayMs = defaultInitialDelayMs,
+                probeAttempts = defaultProbeAttempts,
+            )
+        }
+    }
+
+    fun shouldDebounceNetworkEvent(
+        elapsedSinceLastEventMs: Long,
+        debounceMs: Long,
+        networkChanged: Boolean,
+    ): Boolean {
+        if (networkChanged || elapsedSinceLastEventMs < 0L || debounceMs < 0L) {
+            return false
+        }
+        return elapsedSinceLastEventMs < debounceMs
     }
 }

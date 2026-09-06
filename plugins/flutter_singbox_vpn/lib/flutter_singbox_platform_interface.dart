@@ -47,6 +47,11 @@ abstract class FlutterSingboxPlatform extends PlatformInterface {
     throw UnimplementedError('stopVPN() has not been implemented.');
   }
 
+  /// Reload the active VPN runtime without tearing down the Android service.
+  Future<bool> reloadVPN() {
+    throw UnimplementedError('reloadVPN() has not been implemented.');
+  }
+
   /// Get current VPN status
   Future<String> getVPNStatus() {
     throw UnimplementedError('getVPNStatus() has not been implemented.');
