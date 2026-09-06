@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Removed PingTunnel import, protocol labels and the Experimental profile tab.
+  Legacy PingTunnel entries are ignored on load instead of becoming VLESS;
+  supported profiles in mixed subscriptions remain importable. Credential
+  redaction for legacy links is retained.
 - Required a healthy config-bound external payload before QA handover/outage
   injection; unhealthy baselines are explicit scenario skips, not new recovery
   failures. Radio changes also wait for outstanding profile controls to finish.

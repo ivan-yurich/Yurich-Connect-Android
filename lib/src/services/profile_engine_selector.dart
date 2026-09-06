@@ -51,9 +51,6 @@ class ProfileEngineSelector {
         supportLevel: VpnProtocolSupportLevel.stable,
         coreVersion: singBoxCoreVersion,
       ),
-      VpnProfileKind.pingTunnelExperimental => _xrayOnly(
-        'PingTunnel сейчас помечен как экспериментальный и требует отдельного движка, не включённого в текущую сборку.',
-      ),
       VpnProfileKind.naive ||
       VpnProfileKind.hysteria2 ||
       VpnProfileKind.hysteria ||

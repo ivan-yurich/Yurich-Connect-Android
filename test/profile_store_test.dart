@@ -5,6 +5,7 @@ import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/models/profile_network_stability.dart';
 import 'package:aurum_vpn/src/models/profile_stability.dart';
 import 'package:aurum_vpn/src/services/profile_store.dart';
+import 'package:aurum_vpn/src/services/profile_auto_selector.dart';
 import 'package:aurum_vpn/src/services/secure_profile_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -179,6 +180,75 @@ void main() {
     expect(await secureStorage.read('profiles.v1'), isNotEmpty);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.containsKey('profiles'), isFalse);
+  });
+
+  for (final legacyStorage in [false, true]) {
+    test('ignores retired profiles on load (legacy=$legacyStorage)', () async {
+      const active = VpnProfile(
+        id: 'active',
+        name: 'HTTPS',
+        kind: VpnProfileKind.naive,
+        originalInput: 'naive+https://user:password@example.com:443',
+        outbound: {'type': 'naive'},
+      );
+      final retired = {
+        ...active.toJson(),
+        'id': 'retired',
+        'kind': 'pingTunnelExperimental',
+        'outbound': {'type': 'pingtunnel'},
+      };
+      final encoded = jsonEncode([retired, active.toJson()]);
+      if (legacyStorage) {
+        SharedPreferences.setMockInitialValues({
+          'profiles': encoded,
+          'selectedProfileId': 'retired',
+        });
+      } else {
+        await secureStorage.write('profiles.v1', encoded);
+        await store.saveSelectedProfileId('retired');
+      }
+
+      final loaded = await store.loadProfiles();
+      expect(loaded.map((profile) => profile.toJson()), [active.toJson()]);
+      expect(
+        const ProfileAutoSelector()
+            .choose(
+              loaded,
+              selectedProfileId: await store.loadSelectedProfileId(),
+            )
+            ?.id,
+        active.id,
+      );
+      // Loading must not rewrite the encrypted archive or lose other data.
+      expect(await secureStorage.read('profiles.v1'), encoded);
+      expect((await store.loadProfiles()).single.id, active.id);
+      expect(() => VpnProfile.fromJson(retired), throwsFormatException);
+    });
+  }
+
+  test('a store containing only retired profiles loads as empty', () async {
+    await secureStorage.write(
+      'profiles.v1',
+      jsonEncode([
+        {'id': 'old-kind', 'kind': 'pingTunnelExperimental'},
+        {
+          'id': 'old-outbound',
+          'outbound': {'type': 'PingTunnel'},
+        },
+      ]),
+    );
+    expect(await store.loadProfiles(), isEmpty);
+    expect(
+      VpnProfileKind.values.map((kind) => kind.name),
+      isNot(contains('pingTunnelExperimental')),
+    );
+    expect(
+      () => VpnProfile.fromJson({
+        'id': 'old-outbound',
+        'outbound': {'type': 'pingtunnel'},
+      }),
+      throwsFormatException,
+    );
   });
 
   test('saves profile secrets only in secure storage', () async {

@@ -946,8 +946,6 @@ class _ProfileTile extends StatelessWidget {
                     VpnProfileKind.naive => Icons.public,
                     VpnProfileKind.hysteria2 ||
                     VpnProfileKind.hysteria => Icons.speed_outlined,
-                    VpnProfileKind.pingTunnelExperimental =>
-                      Icons.radar_outlined,
                     _ => Icons.bolt,
                   }, color: selected ? _goldSoft : _mutedGold)
                 : Text(countryFlag!, style: const TextStyle(fontSize: 22)),

@@ -37,4 +37,12 @@ void main() {
       'Authorization: Bearer ***',
     );
   });
+
+  test('still redacts credentials from retired PingTunnel links', () {
+    final redacted = SensitiveDataRedactor.redact(
+      'pingtunnel://legacy-user:legacy-secret@example.com:443',
+    );
+    expect(redacted, isNot(contains('legacy-user')));
+    expect(redacted, isNot(contains('legacy-secret')));
+  });
 }

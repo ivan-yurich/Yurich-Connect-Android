@@ -115,7 +115,7 @@ enum _AppLanguage {
   }
 }
 
-enum _ProfileTab { all, vless, naive, hysteria, experimental }
+enum _ProfileTab { all, vless, naive, hysteria }
 
 enum _SupportTab { help, community }
 
@@ -135,7 +135,6 @@ _ProfileTab _profileTabForKind(VpnProfileKind kind) {
     VpnProfileKind.vlessTls => _ProfileTab.vless,
     VpnProfileKind.naive => _ProfileTab.naive,
     VpnProfileKind.hysteria2 || VpnProfileKind.hysteria => _ProfileTab.hysteria,
-    VpnProfileKind.pingTunnelExperimental => _ProfileTab.experimental,
     VpnProfileKind.vlessMkcp || VpnProfileKind.singBoxConfig => _ProfileTab.all,
   };
 }
@@ -146,13 +145,7 @@ bool _profileMatchesTab(VpnProfile profile, _ProfileTab tab) {
 
 List<VpnProfile> _clientSupportedProfiles(List<VpnProfile> profiles) {
   return profiles
-      .where((profile) {
-        if (profile.kind == VpnProfileKind.vlessXhttp ||
-            profile.kind == VpnProfileKind.pingTunnelExperimental) {
-          return true;
-        }
-        return profile.kind.isClientSupported;
-      })
+      .where((profile) => profile.kind.isClientSupported)
       .toList(growable: false);
 }
 
@@ -3685,7 +3678,6 @@ class _HomeScreenState extends State<HomeScreen>
         VpnProfileKind.vlessTls ||
         VpnProfileKind.vlessXhttp ||
         VpnProfileKind.vlessMkcp => 'vless',
-        VpnProfileKind.pingTunnelExperimental => 'pingtunnel',
         VpnProfileKind.naive => 'naive',
         VpnProfileKind.hysteria2 => 'hysteria2',
         VpnProfileKind.hysteria => 'hysteria',
