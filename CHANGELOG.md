@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.124 - 2026-09-24
 
 - Fixed Smart Route ordering so sing-box domain rules are evaluated before the
   FakeIP catch-all proxy rule, allowing Russian direct-domain rules to apply
