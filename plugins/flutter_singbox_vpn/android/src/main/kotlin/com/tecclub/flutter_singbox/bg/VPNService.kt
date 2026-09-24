@@ -234,7 +234,9 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
         return pfd.fd
     }
 
-    fun openXrayTun(): ParcelFileDescriptor {
+    fun openXrayTun(
+        androidDisallowedPackages: List<String> = emptyList(),
+    ): ParcelFileDescriptor {
         if (prepare(this) != null) error("android: missing vpn permission")
 
         service.fileDescriptor?.close()
@@ -254,11 +256,22 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             builder.setMetered(false)
         }
 
-        runCatching {
-            builder.addDisallowedApplication(packageName)
-        }.onFailure {
-            Log.w(TAG, "Unable to exclude own package from Xray VPN", it)
+        val excludedPackages = linkedSetOf(packageName)
+        androidDisallowedPackages
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .forEach { excludedPackages.add(it) }
+
+        excludedPackages.forEach { excludedPackage ->
+            try {
+                builder.addDisallowedApplication(excludedPackage)
+            } catch (_: NameNotFoundException) {
+                Log.d(TAG, "Xray Smart Route package is not installed: $excludedPackage")
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to exclude package from Xray VPN: $excludedPackage", e)
+            }
         }
+        Log.i(TAG, "Xray TUN excluded packages requested: ${excludedPackages.size}")
 
         val pfd =
             builder.establish() ?: error("android: the application is not prepared or is revoked")

@@ -86,11 +86,11 @@ class SingBoxConfigBuilder {
             'action': 'hijack-dns',
           },
           _unsupportedUdpRule(rejectUnsupportedUdp),
+          if (smartRouteRuDirect) ..._smartRouteRules(),
           {
             'ip_cidr': ['198.18.0.0/15', 'fc00::/18'],
             'outbound': 'proxy',
           },
-          if (smartRouteRuDirect) ..._smartRouteRules(),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
         'default_domain_resolver': useRemoteDns ? _remoteDnsTag : _localDnsTag,

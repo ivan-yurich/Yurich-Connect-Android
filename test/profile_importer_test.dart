@@ -618,6 +618,14 @@ void main() {
     expect(ruDirectRuleIndex, isNonNegative);
     expect(globalProxyRuleIndex, lessThan(ruDirectRuleIndex));
 
+    final fakeIpProxyRuleIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'proxy' &&
+          (rule['ip_cidr'] as List?)?.contains('198.18.0.0/15') == true,
+    );
+    expect(fakeIpProxyRuleIndex, isNonNegative);
+    expect(ruDirectRuleIndex, lessThan(fakeIpProxyRuleIndex));
+
     expect(
       routeRules.any(
         (rule) =>

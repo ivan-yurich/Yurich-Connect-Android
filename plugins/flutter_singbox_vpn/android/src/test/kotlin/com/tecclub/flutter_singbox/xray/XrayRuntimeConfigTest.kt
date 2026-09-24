@@ -19,6 +19,36 @@ internal class XrayRuntimeConfigTest {
 
         assertTrue(runtime.enabled)
         assertEquals("""{"inbounds":[],"outbounds":[]}""", runtime.configJson)
+        assertTrue(runtime.androidDisallowedPackages.isEmpty())
+    }
+
+    @Test
+    fun unwrapsAndroidDisallowedPackages() {
+        val runtime = XrayRuntimeConfig.from(
+            """
+            {
+              "_yurich": {
+                "core": "xray",
+                "schema": 1,
+                "androidDisallowedPackages": [
+                  " online.dnsai.ivanvpn ",
+                  "ru.gosuslugi",
+                  "",
+                  "ru.gosuslugi",
+                  "not-a-package",
+                  123
+                ]
+              },
+              "xray": {"inbounds": [], "outbounds": []}
+            }
+            """.trimIndent()
+        )
+
+        assertTrue(runtime.enabled)
+        assertEquals(
+            listOf("online.dnsai.ivanvpn", "ru.gosuslugi"),
+            runtime.androidDisallowedPackages,
+        )
     }
 
     @Test

@@ -121,6 +121,10 @@ class XrayConfigBuilder {
         'core': runtimeCore,
         'schema': runtimeSchema,
         'profileKind': profile.kind.name,
+        if (smartRouteRuDirect)
+          'androidDisallowedPackages': SmartRouteRules.ruBypassPackages(
+            smartRouteRuBypassPackages,
+          ),
       },
       'xray': config,
     });

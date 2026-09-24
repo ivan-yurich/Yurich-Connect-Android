@@ -335,7 +335,7 @@ class BoxService(
 
             val xrayConfig = XrayRuntimeConfig.from(content)
             if (xrayConfig.enabled) {
-                startXrayService(xrayConfig.configJson, generation)
+                startXrayService(xrayConfig, generation)
                 return
             }
             activeRuntimeCore = VpnRuntimeCore.SingBox
@@ -405,7 +405,8 @@ class BoxService(
         }
     }
 
-    private suspend fun startXrayService(configJson: String, generation: Long) {
+    private suspend fun startXrayService(runtimeConfig: XrayRuntimeConfig, generation: Long) {
+        val configJson = runtimeConfig.configJson
         if (service !is VPNService) {
             stopAndAlert(
                 Alert.StartService,
@@ -433,7 +434,10 @@ class BoxService(
             val runner = XrayRunner(service)
             xrayRunner = runner
             val response = withContext(Dispatchers.IO) {
-                runner.start(configJson)
+                runner.start(
+                    configJson,
+                    runtimeConfig.androidDisallowedPackages,
+                )
             }
             verifyNativeRuntimeIsolation(VpnRuntimeCore.Xray)
             android.util.Log.e("BoxService", "Xray service started: $response")

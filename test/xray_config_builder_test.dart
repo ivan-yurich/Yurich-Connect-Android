@@ -145,11 +145,33 @@ void main() {
 
     final profile = (await ProfileImporter().importFromText(link)).first;
     final wrapper =
-        jsonDecode(XrayConfigBuilder().build(profile, smartRouteRuDirect: true))
+        jsonDecode(
+              XrayConfigBuilder().build(
+                profile,
+                smartRouteRuDirect: true,
+                smartRouteRuBypassPackages: const [
+                  'ru.gosuslugi',
+                  'ru.some.newbank',
+                  'com.android.chrome',
+                  'org.telegram.messenger',
+                ],
+              ),
+            )
             as Map<String, dynamic>;
+    final meta = wrapper['_yurich'] as Map<String, dynamic>;
     final xray = wrapper['xray'] as Map<String, dynamic>;
     final rules = xray['routing']['rules'] as List;
+    final androidDisallowedPackages =
+        (meta['androidDisallowedPackages'] as List).cast<String>();
 
+    expect(androidDisallowedPackages, contains('ru.gosuslugi'));
+    expect(androidDisallowedPackages, contains('ru.some.newbank'));
+    expect(androidDisallowedPackages, contains('ru.sberbankmobile'));
+    expect(androidDisallowedPackages, isNot(contains('com.android.chrome')));
+    expect(
+      androidDisallowedPackages,
+      isNot(contains('org.telegram.messenger')),
+    );
     final hasProxyDomainRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'proxy' &&

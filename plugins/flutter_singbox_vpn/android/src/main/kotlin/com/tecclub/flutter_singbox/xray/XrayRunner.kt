@@ -24,7 +24,10 @@ class XrayRunner(
     @Volatile
     private var started = false
 
-    fun start(configJson: String): String = synchronized(runnerLock) {
+    fun start(
+        configJson: String,
+        androidDisallowedPackages: List<String> = emptyList(),
+    ): String = synchronized(runnerLock) {
         stopLocked()
 
         val datDir = File(service.filesDir, "xray").apply {
@@ -40,7 +43,7 @@ class XrayRunner(
             throw IllegalStateException("Xray config validation failed: $testResponse")
         }
 
-        val tun = service.openXrayTun()
+        val tun = service.openXrayTun(androidDisallowedPackages)
         bridge.registerProtectFd(service)
         bridge.setTunFd(tun.fd)
 

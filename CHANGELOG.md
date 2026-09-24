@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Fixed Smart Route ordering so sing-box domain rules are evaluated before the
+  FakeIP catch-all proxy rule, allowing Russian direct-domain rules to apply
+  reliably when Smart Route is enabled.
+- Applied Smart Route Android app bypass to Xray Reality/XHTTP profiles by
+  carrying the sanitized RU direct package list through the Xray runtime wrapper
+  into the Android VPN TUN setup.
+
 ## 1.0.123 (Prerelease) - 2026-09-06
 
 - Raised the GitHub build number to 43135 so it exceeds all published 1.0.117
