@@ -1095,7 +1095,11 @@ class BoxService(
         val snapshot = sessionState.snapshot()
         if (!watchdogMixedProxyEnabled) {
             serviceScope.launch {
-                markRuntimeReady(generation, "probe-unavailable:$reason")
+                stopAndAlert(
+                    Alert.StartService,
+                    "Локальная проверка VPN недоступна. Повторно подключи профиль из приложения.",
+                    generation,
+                )
             }
             return
         }

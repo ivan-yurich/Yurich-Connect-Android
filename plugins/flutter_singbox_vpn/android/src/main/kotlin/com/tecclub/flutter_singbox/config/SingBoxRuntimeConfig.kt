@@ -23,7 +23,9 @@ internal object SingBoxRuntimeConfig {
         return inbounds.any { element ->
             val inbound = element as? JsonObject ?: return@any false
             inbound["type"]?.jsonPrimitive?.contentOrNull == "mixed" &&
-                inbound["listen_port"]?.jsonPrimitive?.intOrNull == port
+                inbound["listen_port"]?.jsonPrimitive?.intOrNull == port &&
+                inbound["listen"]?.jsonPrimitive?.contentOrNull == "127.0.0.1" &&
+                ((inbound["users"] as? JsonArray)?.isEmpty() != false)
         }
     }
 }

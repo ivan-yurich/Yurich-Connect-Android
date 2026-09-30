@@ -15,6 +15,7 @@ const _updaterUserAgent = 'YurichConnect-Updater';
 const _updateConnectTimeout = Duration(seconds: 30);
 const _updateMetadataTimeout = Duration(seconds: 25);
 const _updateDownloadOpenTimeout = Duration(seconds: 60);
+const _updateDownloadIdleTimeout = Duration(seconds: 30);
 const _maxUpdateMetadataBytes = 1024 * 1024;
 const _maxApkDownloadBytes = 512 * 1024 * 1024;
 const _updateRetryDelays = [
@@ -116,11 +117,15 @@ class AppUpdateIdentityException implements Exception {
 }
 
 class AppUpdateService {
-  AppUpdateService({HttpClient? client, List<Uri>? releaseApiUris})
-    : _client = client ?? HttpClient(),
-      _releaseApiUris =
-          releaseApiUris ??
-          _releaseApiUrls.map(Uri.parse).toList(growable: false) {
+  AppUpdateService({
+    HttpClient? client,
+    List<Uri>? releaseApiUris,
+    Duration downloadIdleTimeout = _updateDownloadIdleTimeout,
+  }) : _client = client ?? HttpClient(),
+       _downloadIdleTimeout = downloadIdleTimeout,
+       _releaseApiUris =
+           releaseApiUris ??
+           _releaseApiUrls.map(Uri.parse).toList(growable: false) {
     _client.connectionTimeout = _updateConnectTimeout;
   }
 
@@ -132,6 +137,7 @@ class AppUpdateService {
   );
 
   final HttpClient _client;
+  final Duration _downloadIdleTimeout;
   final List<Uri> _releaseApiUris;
 
   Future<List<String>> supportedAbis() async {
@@ -200,9 +206,18 @@ class AppUpdateService {
     AppUpdateInfo update, {
     required void Function(double? progress) onProgress,
   }) async {
+    if (!RegExp(
+      r'^[A-Za-z0-9][A-Za-z0-9._-]*\.apk$',
+    ).hasMatch(update.assetName)) {
+      throw StateError('Invalid update APK filename.');
+    }
+    final version = _normalizeVersion(update.version);
+    if (!RegExp(r'^\d+(?:\.\d+)*$').hasMatch(version)) {
+      throw StateError('Invalid update version.');
+    }
     final tempDir = Directory(
       '${Directory.systemTemp.path}${Platform.pathSeparator}'
-      'yurich_connect_updates',
+      'yurich_connect_updates${Platform.pathSeparator}$version',
     );
     if (!await tempDir.exists()) {
       await tempDir.create(recursive: true);
@@ -219,7 +234,6 @@ class AppUpdateService {
     final urls = <Uri>{
       update.downloadUrl,
       ...update.fallbackDownloadUrls,
-      ..._githubDownloadUrls(update.version, update.assetName),
     }.toList(growable: false);
 
     for (final url in urls) {
@@ -259,16 +273,22 @@ class AppUpdateService {
       'application/vnd.android.package-archive, application/octet-stream, */*',
     );
     request.followRedirects = true;
-    final response = await request.close().timeout(_updateDownloadOpenTimeout);
+    final response = await request.close().timeout(
+      _updateDownloadOpenTimeout,
+      onTimeout: () {
+        request.abort();
+        throw TimeoutException('Update server response timed out.');
+      },
+    );
     for (final redirect in response.redirects) {
       _validateRemoteUpdateUri(redirect.location);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      await response.drain<void>();
+      request.abort();
       throw _UpdateHttpException(response.statusCode);
     }
     if (response.contentLength > _maxApkDownloadBytes) {
-      await response.drain<void>();
+      request.abort();
       throw StateError('Update APK exceeds the 512 MiB safety limit.');
     }
 
@@ -278,7 +298,7 @@ class AppUpdateService {
         ? response.contentLength
         : update.size;
     try {
-      await for (final chunk in response) {
+      await for (final chunk in response.timeout(_downloadIdleTimeout)) {
         received += chunk.length;
         if (received > _maxApkDownloadBytes) {
           throw StateError('Update APK exceeds the 512 MiB safety limit.');
@@ -290,6 +310,9 @@ class AppUpdateService {
           onProgress(null);
         }
       }
+    } on Object {
+      request.abort();
+      rethrow;
     } finally {
       await sink.close();
     }
@@ -601,7 +624,11 @@ class AppUpdateService {
       final response = await request.close().timeout(_updateMetadataTimeout);
       final length = response.contentLength;
       await response.drain<void>();
-      return length > 0 ? length : null;
+      return response.statusCode >= 200 &&
+              response.statusCode < 300 &&
+              length > 0
+          ? length
+          : null;
     } on Object {
       return null;
     }

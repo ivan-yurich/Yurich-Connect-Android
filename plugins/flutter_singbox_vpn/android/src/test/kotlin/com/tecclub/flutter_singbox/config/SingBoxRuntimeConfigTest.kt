@@ -40,4 +40,16 @@ internal class SingBoxRuntimeConfigTest {
         )
         assertFalse(SingBoxRuntimeConfig.exposesMixedProxy("not-json", 20808))
     }
+
+    @Test
+    fun rejectsInaccessibleOrAuthenticatedHealthProxies() {
+        assertFalse(SingBoxRuntimeConfig.exposesMixedProxy(
+            """{"inbounds":[{"type":"mixed","listen":"192.168.1.2","listen_port":20808}]}""",
+            20808,
+        ))
+        assertFalse(SingBoxRuntimeConfig.exposesMixedProxy(
+            """{"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":20808,"users":[{"username":"u","password":"p"}]}]}""",
+            20808,
+        ))
+    }
 }

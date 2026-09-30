@@ -268,8 +268,8 @@ class _Strings {
         _ => 'Все',
       },
       _ProfileTab.vless => 'Reality',
-      _ProfileTab.naive => 'HTTPS',
-      _ProfileTab.hysteria => 'Turbo',
+      _ProfileTab.naive => ProtocolDisplayMapper.naiveName,
+      _ProfileTab.hysteria => ProtocolDisplayMapper.hysteriaName,
     };
     return '$label $count';
   }
@@ -672,11 +672,11 @@ class _Strings {
     addProfileHint: 'Добавь подписку Remnawave, QR или отдельный ключ',
     nothingToImport: 'Нечего импортировать.',
     supportedProtocolsOnly:
-        'В этой сборке запускаются Reality, HTTPS/NaiveProxy, Turbo/Hysteria2 и XHTTP через встроенные sing-box и Xray.',
+        'В этой сборке запускаются Reality, Веб/NaiveProxy, ИИ/Hysteria2 и XHTTP через встроенные sing-box и Xray.',
     switchingProfile: 'Переключаю профиль...',
     importFirst: 'Сначала импортируй профиль.',
     autoConnectNoStableProfile:
-        'Для авто-подключения нужен рабочий Reality или HTTPS профиль. Turbo/Hysteria не запускается автоматически.',
+        'Для авто-подключения нужен рабочий Reality или Веб профиль. ИИ/Hysteria не запускается автоматически.',
     configSaveFailed: 'sing-box не сохранил config.',
     vpnStartFailed: 'VPN не стартовал. Открой логи ниже.',
     connectionProbeFailed:
@@ -713,7 +713,7 @@ class _Strings {
     refreshPing: 'Обновить пинг',
     collapseProfiles: 'Свернуть список',
     serverPickerEmpty: 'Сервер не выбран',
-    autoConnectMode: 'Автовыбор Reality/HTTPS, Turbo только вручную',
+    autoConnectMode: 'Автовыбор Reality/Веб, ИИ только вручную',
     openServers: 'Открыть',
     hideServers: 'Скрыть',
     showQr: 'Показать QR',
@@ -792,30 +792,30 @@ class _Strings {
         question: 'Наши протоколы',
         answer:
             'Название в приложении -> технология -> транспорт\n\n'
-            'HTTPS -> NaiveProxy -> TCP/443\n'
-            'Turbo -> Hysteria2 -> UDP/443, QUIC\n'
+            'Веб -> NaiveProxy -> TCP/443\n'
+            'ИИ -> Hysteria2 -> UDP/443, QUIC\n'
             'Reality -> VLESS Reality Vision -> TCP/443\n'
             'XHTTP -> VLESS XHTTP -> TLS или Reality + HTTP/2/443',
       ),
       _FaqItem(
-        question: 'HTTPS — NaiveProxy',
+        question: 'Веб — NaiveProxy',
         answer:
             'Работает как обычное защищённое HTTPS-соединение через Caddy.\n\n'
             '• Ссылка: naive+https://\n'
             '• Хорошая совместимость с Wi-Fi и мобильными операторами.\n'
             '• Трафик похож на обычный веб-браузер.\n'
             '• Надёжный запасной вариант, если Reality не работает.\n'
-            '• В приложении находится в разделе HTTPS.',
+            '• В приложении находится в разделе Веб.',
       ),
       _FaqItem(
-        question: 'Turbo — Hysteria2',
+        question: 'ИИ — Hysteria2',
         answer:
-            'Использует QUIC поверх UDP и хорошо переносит потерю пакетов.\n\n'
+            'ИИ — название протокола в приложении, а не функция искусственного интеллекта. Использует QUIC поверх UDP и хорошо переносит потерю пакетов.\n\n'
             '• Ссылка: hy2://\n'
             '• Обычно быстрее на мобильной сети.\n'
             '• Хорошо подходит для видео, загрузок и нестабильного LTE.\n'
             '• Может не работать в сетях, где оператор блокирует UDP.\n'
-            '• В приложении находится в разделе Turbo.',
+            '• В приложении находится в разделе ИИ.',
       ),
       _FaqItem(
         question: 'Reality — VLESS Reality',
@@ -844,10 +844,10 @@ class _Strings {
         question: 'Какой протокол выбирать?',
         answer:
             '• Основной вариант: Reality.\n'
-            '• Нестабильная мобильная сеть: Turbo.\n'
-            '• Максимальная совместимость: HTTPS.\n'
+            '• Нестабильная мобильная сеть: ИИ.\n'
+            '• Максимальная совместимость: Веб.\n'
             '• Дополнительный современный вариант: XHTTP.\n\n'
-            'Если сеть блокирует UDP, вместо Turbo выбери Reality или HTTPS. HAProxy, Caddy, DNS, WARP и Smart Route — не клиентские протоколы: они отвечают за распределение соединений, маскировку, DNS и маршрутизацию.',
+            'Если сеть блокирует UDP, вместо ИИ выбери Reality или Веб. HAProxy, Caddy, DNS, WARP и Smart Route — не клиентские протоколы: они отвечают за распределение соединений, маскировку, DNS и маршрутизацию.',
       ),
       _FaqItem(
         question: 'Как работает Smart Route?',
@@ -866,7 +866,7 @@ class _Strings {
       _FaqItem(
         question: 'Как работает Auto DNS?',
         answer:
-            'Auto DNS перехватывает DNS-запросы внутри TUN и защищает их от подмены оператором. Для Reality, Turbo и XHTTP используются защищённые резолверы Cloudflare и Google через туннель. HTTPS/NaiveProxy сохраняет локальный bootstrap DNS ради совместимости и стабильного поиска адреса сервера — это осознанный компромисс режима HTTPS.',
+            'Auto DNS перехватывает DNS-запросы внутри TUN и защищает их от подмены оператором. Для Reality, ИИ и XHTTP используются защищённые резолверы Cloudflare и Google через туннель. Веб/NaiveProxy сохраняет локальный bootstrap DNS ради совместимости и стабильного поиска адреса сервера — это осознанный компромисс режима Веб.',
       ),
       _FaqItem(
         question: 'Как включить и проверить Auto DNS?',
@@ -875,7 +875,7 @@ class _Strings {
             '2. Включи Auto DNS. При активном VPN приложение выполнит короткое переподключение.\n'
             '3. На LTE и публичном Wi-Fi рекомендуется держать Auto DNS включённым.\n'
             '4. Если Wi-Fi требует входа через captive portal, временно выключи VPN или Auto DNS, авторизуйся в сети и включи защиту снова.\n'
-            '5. Для проверки открой DNS leak test после подключения: для Reality, Turbo и XHTTP нормальны резолверы Cloudflare или Google.\n\n'
+            '5. Для проверки открой DNS leak test после подключения: для Reality, ИИ и XHTTP нормальны резолверы Cloudflare или Google.\n\n'
             'Auto DNS не меняет страну VPN и не заменяет Smart Route.',
       ),
       _FaqItem(
@@ -908,11 +908,11 @@ class _Strings {
     addProfileHint: 'Add a Remnawave subscription, QR code, or single key',
     nothingToImport: 'Nothing to import.',
     supportedProtocolsOnly:
-        'This build runs Reality, HTTPS/NaiveProxy, Turbo/Hysteria2, and XHTTP through the bundled sing-box and Xray cores.',
+        'This build runs Reality, Веб/NaiveProxy, ИИ/Hysteria2, and XHTTP through the bundled sing-box and Xray cores.',
     switchingProfile: 'Switching profile...',
     importFirst: 'Import a profile first.',
     autoConnectNoStableProfile:
-        'Auto connect needs a working Reality or HTTPS profile. Turbo/Hysteria is not started automatically.',
+        'Auto connect needs a working Reality or Веб profile. ИИ/Hysteria is not started automatically.',
     configSaveFailed: 'sing-box did not save the config.',
     vpnStartFailed: 'VPN did not start. Check the logs below.',
     connectionProbeFailed:
@@ -949,7 +949,7 @@ class _Strings {
     refreshPing: 'Refresh ping',
     collapseProfiles: 'Collapse list',
     serverPickerEmpty: 'No server selected',
-    autoConnectMode: 'Auto selects Reality/HTTPS; Turbo is manual only',
+    autoConnectMode: 'Auto selects Reality/Веб; ИИ is manual only',
     openServers: 'Open',
     hideServers: 'Hide',
     showQr: 'Show QR',
@@ -1027,30 +1027,30 @@ class _Strings {
         question: 'Our protocols',
         answer:
             'App name -> technology -> transport\n\n'
-            'HTTPS -> NaiveProxy -> TCP/443\n'
-            'Turbo -> Hysteria2 -> UDP/443, QUIC\n'
+            'Веб -> NaiveProxy -> TCP/443\n'
+            'ИИ -> Hysteria2 -> UDP/443, QUIC\n'
             'Reality -> VLESS Reality Vision -> TCP/443\n'
             'XHTTP -> VLESS XHTTP -> TLS or Reality + HTTP/2/443',
       ),
       _FaqItem(
-        question: 'HTTPS — NaiveProxy',
+        question: 'Веб — NaiveProxy',
         answer:
             'Works like a regular secure HTTPS connection through Caddy.\n\n'
             '• Link: naive+https://\n'
             '• Strong compatibility with Wi-Fi and mobile operators.\n'
             '• Traffic resembles a normal web browser.\n'
             '• A reliable fallback when Reality does not work.\n'
-            '• Shown in the HTTPS section of the app.',
+            '• Shown in the Веб section of the app.',
       ),
       _FaqItem(
-        question: 'Turbo — Hysteria2',
+        question: 'ИИ — Hysteria2',
         answer:
-            'Uses QUIC over UDP and handles packet loss well.\n\n'
+            'ИИ is the protocol name in the app, not an artificial intelligence feature. Uses QUIC over UDP and handles packet loss well.\n\n'
             '• Link: hy2://\n'
             '• Usually faster on mobile networks.\n'
             '• Well suited to video, downloads, and unstable LTE.\n'
             '• May fail on networks where the operator blocks UDP.\n'
-            '• Shown in the Turbo section of the app.',
+            '• Shown in the ИИ section of the app.',
       ),
       _FaqItem(
         question: 'Reality — VLESS Reality',
@@ -1079,10 +1079,10 @@ class _Strings {
         question: 'Which protocol should I choose?',
         answer:
             '• Primary option: Reality.\n'
-            '• Unstable mobile network: Turbo.\n'
-            '• Maximum compatibility: HTTPS.\n'
+            '• Unstable mobile network: ИИ.\n'
+            '• Maximum compatibility: Веб.\n'
             '• Additional modern option: XHTTP.\n\n'
-            'If a network blocks UDP, choose Reality or HTTPS instead of Turbo. HAProxy, Caddy, DNS, WARP, and Smart Route are not client protocols; they provide connection distribution, camouflage, DNS, and routing.',
+            'If a network blocks UDP, choose Reality or Веб instead of ИИ. HAProxy, Caddy, DNS, WARP, and Smart Route are not client protocols; they provide connection distribution, camouflage, DNS, and routing.',
       ),
       _FaqItem(
         question: 'How does Smart Route work?',
@@ -1101,7 +1101,7 @@ class _Strings {
       _FaqItem(
         question: 'How does Auto DNS work?',
         answer:
-            'Auto DNS captures DNS requests inside the TUN and protects them from operator manipulation. Reality, Turbo, and XHTTP use protected Cloudflare and Google resolvers through the tunnel. HTTPS/NaiveProxy keeps local bootstrap DNS for compatibility and reliable server lookup; this is an intentional tradeoff of HTTPS mode.',
+            'Auto DNS captures DNS requests inside the TUN and protects them from operator manipulation. Reality, ИИ, and XHTTP use protected Cloudflare and Google resolvers through the tunnel. Веб/NaiveProxy keeps local bootstrap DNS for compatibility and reliable server lookup; this is an intentional tradeoff of Веб mode.',
       ),
       _FaqItem(
         question: 'How do I enable and verify Auto DNS?',
@@ -1110,7 +1110,7 @@ class _Strings {
             '2. Enable Auto DNS. An active VPN performs a short reconnect.\n'
             '3. Keep Auto DNS enabled on LTE and public Wi-Fi.\n'
             '4. If Wi-Fi requires a captive portal, temporarily disable the VPN or Auto DNS, sign in, then enable protection again.\n'
-            '5. Run a DNS leak test after connecting. Cloudflare or Google resolvers are expected for Reality, Turbo, and XHTTP.\n\n'
+            '5. Run a DNS leak test after connecting. Cloudflare or Google resolvers are expected for Reality, ИИ, and XHTTP.\n\n'
             'Auto DNS does not change the VPN country and does not replace Smart Route.',
       ),
       _FaqItem(

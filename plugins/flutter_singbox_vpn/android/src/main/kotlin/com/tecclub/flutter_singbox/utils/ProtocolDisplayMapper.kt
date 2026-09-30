@@ -19,10 +19,14 @@ object ProtocolDisplayMapper {
         }
         if (
             normalizedProtocol == "vless" &&
-            normalizedSecurity == "reality" &&
             (normalizedTransport == "xhttp" || normalizedTransport == "splithttp")
         ) {
-            return "Xray REALITY XHTTP / Современный"
+            val securityName = when (normalizedSecurity) {
+                "reality" -> "REALITY "
+                "tls" -> "TLS "
+                else -> ""
+            }
+            return "Xray ${securityName}XHTTP / Современный"
         }
         if (
             normalizedProtocol == "vless" &&
@@ -32,14 +36,14 @@ object ProtocolDisplayMapper {
             return "Xray REALITY gRPC / Резервный"
         }
         if (normalizedProtocol == "naive" || normalizedProtocol == "naiveproxy") {
-            return "Yurich Proxy Naive / Быстрый"
+            return "Веб"
         }
         if (
             normalizedProtocol == "hysteria2" ||
             normalizedProtocol == "hy2" ||
             normalizedProtocol == "hysteria"
         ) {
-            return "Hysteria 2 / Турбо"
+            return "ИИ"
         }
 
         return protocol?.trim()?.takeIf { it.isNotEmpty() } ?: "Unknown protocol"

@@ -169,7 +169,8 @@ void main() {
           'YurichConnect-test-${DateTime.now().microsecondsSinceEpoch}.apk';
       final cachedFile = File(
         '${Directory.systemTemp.path}${Platform.pathSeparator}'
-        'yurich_connect_updates${Platform.pathSeparator}$assetName',
+        'yurich_connect_updates${Platform.pathSeparator}1.0.63'
+        '${Platform.pathSeparator}$assetName',
       );
       addTearDown(() async {
         if (await cachedFile.exists()) {
@@ -231,6 +232,101 @@ void main() {
       throwsA(isA<StateError>()),
     );
   });
+
+  test(
+    'does not reuse a previous release cache when metadata has no size',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var requests = 0;
+      server.listen((request) async {
+        requests += 1;
+        request.response.add([0x50, 0x4B, 0x03, 0x04, requests]);
+        await request.response.close();
+      });
+      final assetName = 'cache-${DateTime.now().microsecondsSinceEpoch}.apk';
+      final files = <File>[];
+      addTearDown(() async {
+        for (final file in files) {
+          if (await file.exists()) await file.delete();
+        }
+      });
+      final service = AppUpdateService();
+      for (final version in ['1.0.124', '1.0.125']) {
+        files.add(
+          await service.download(
+            AppUpdateInfo(
+              version: version,
+              assetName: assetName,
+              downloadUrl: Uri.parse(
+                'http://127.0.0.1:${server.port}/update.apk',
+              ),
+              size: null,
+            ),
+            onProgress: (_) {},
+          ),
+        );
+      }
+      expect(requests, 2);
+      expect(files.first.path, isNot(files.last.path));
+      expect((await files.last.readAsBytes()).last, 2);
+    },
+  );
+
+  test(
+    'rejects APK filenames that escape the update cache directory',
+    () async {
+      final service = AppUpdateService();
+      for (final name in ['../other.apk', r'..\other.apk', '/other.apk']) {
+        await expectLater(
+          service.download(
+            AppUpdateInfo(
+              version: '1.0.125',
+              assetName: name,
+              downloadUrl: Uri.parse('https://example.com/update.apk'),
+              size: null,
+            ),
+            onProgress: (_) {},
+          ),
+          throwsStateError,
+        );
+      }
+    },
+  );
+
+  test(
+    'retries a stalled download instead of waiting forever for its body',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var requests = 0;
+      server.listen((request) async {
+        requests += 1;
+        if (requests == 1) {
+          request.response.add([0x50, 0x4B]);
+          await request.response.flush();
+        } else {
+          request.response.add([0x50, 0x4B, 0x03, 0x04]);
+          await request.response.close();
+        }
+      });
+      final service = AppUpdateService(
+        downloadIdleTimeout: const Duration(milliseconds: 150),
+      );
+      final file = await service.download(
+        AppUpdateInfo(
+          version: '1.0.125',
+          assetName: 'stalled-${DateTime.now().microsecondsSinceEpoch}.apk',
+          downloadUrl: Uri.parse('http://127.0.0.1:${server.port}/update.apk'),
+          size: 4,
+        ),
+        onProgress: (_) {},
+      );
+      addTearDown(() => file.delete());
+      expect(requests, 2);
+      expect(await file.readAsBytes(), [0x50, 0x4B, 0x03, 0x04]);
+    },
+  );
 
   test('accepts only the installed package and signing certificate', () {
     final service = AppUpdateService();

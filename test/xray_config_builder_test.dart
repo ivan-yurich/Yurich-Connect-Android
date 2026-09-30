@@ -165,7 +165,7 @@ void main() {
         (meta['androidDisallowedPackages'] as List).cast<String>();
 
     expect(androidDisallowedPackages, contains('ru.gosuslugi'));
-    expect(androidDisallowedPackages, contains('ru.some.newbank'));
+    expect(androidDisallowedPackages, isNot(contains('ru.some.newbank')));
     expect(androidDisallowedPackages, contains('ru.sberbankmobile'));
     expect(androidDisallowedPackages, isNot(contains('com.android.chrome')));
     expect(

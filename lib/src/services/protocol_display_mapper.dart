@@ -3,6 +3,9 @@ import '../models/vpn_profile.dart';
 class ProtocolDisplayMapper {
   const ProtocolDisplayMapper._();
 
+  static const naiveName = 'Веб';
+  static const hysteriaName = 'ИИ';
+
   static String mapProfile(VpnProfile profile) {
     final outbound = profile.outbound;
     final transport = _transportFromOutbound(outbound);
@@ -51,10 +54,14 @@ class ProtocolDisplayMapper {
       return 'Xray REALITY TCP / Стабильный';
     }
     if (normalizedProtocol == 'vless' &&
-        normalizedSecurity == 'reality' &&
         (normalizedTransport == 'xhttp' ||
             normalizedTransport == 'splithttp')) {
-      return 'Xray REALITY XHTTP / Современный';
+      final securityName = switch (normalizedSecurity) {
+        'reality' => 'REALITY ',
+        'tls' => 'TLS ',
+        _ => '',
+      };
+      return 'Xray ${securityName}XHTTP / Современный';
     }
     if (normalizedProtocol == 'vless' &&
         normalizedSecurity == 'reality' &&
@@ -62,12 +69,12 @@ class ProtocolDisplayMapper {
       return 'Xray REALITY gRPC / Резервный';
     }
     if (normalizedProtocol == 'naive' || normalizedProtocol == 'naiveproxy') {
-      return 'Yurich Proxy Naive / Быстрый';
+      return naiveName;
     }
     if (normalizedProtocol == 'hysteria2' ||
         normalizedProtocol == 'hy2' ||
         normalizedProtocol == 'hysteria') {
-      return 'Turbo WARP / Hysteria2';
+      return hysteriaName;
     }
 
     final fallback = protocol.trim();

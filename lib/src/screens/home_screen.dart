@@ -17,7 +17,6 @@ import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
 import '../services/first_successful_future.dart';
 import '../services/fixed_size_batches.dart';
-import '../services/installed_apps_service.dart';
 import '../services/power_manager_service.dart';
 import '../services/preferred_first.dart';
 import '../services/profile_auto_selector.dart';
@@ -91,6 +90,7 @@ const _privacyPolicyUrl =
     'https://github.com/ivan-yurich/Yurich-Connect-Android/blob/main/PRIVACY.md';
 const _playStoreUrl =
     'https://play.google.com/store/apps/details?id=online.dnsai.ivanvpn';
+final _logAnsiEscapePattern = RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]');
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -168,7 +168,6 @@ class _HomeScreenState extends State<HomeScreen>
   final _updateService = AppUpdateService();
   final _powerManagerService = PowerManagerService();
   final _geoService = ProfileGeoService();
-  final _installedAppsService = InstalledAppsService();
   final _sessionController = VpnSessionController();
   final _soakCounterPublishCadence = SoakCounterPublishCadence();
   final _manualController = TextEditingController();
@@ -237,6 +236,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _soakVpnInitialized = false;
   bool _soakReadyAnnounced = false;
   bool _logsExpanded = false;
+  bool _uiForeground = true;
   String? _lastConfigSummary;
   String? _lastKeeperAction;
   String? _updateMessage;
@@ -280,7 +280,8 @@ class _HomeScreenState extends State<HomeScreen>
     if (since == null || _status != AurumVpnStatus.started) {
       return null;
     }
-    final duration = _clockNow.difference(since);
+    final now = _uiForeground ? _clockNow : DateTime.now();
+    final duration = now.difference(since);
     return duration.isNegative ? Duration.zero : duration;
   }
 
@@ -633,29 +634,39 @@ class _HomeScreenState extends State<HomeScreen>
     _glowController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2400),
-    )..repeat(reverse: true);
+    );
     _glowPulse = CurvedAnimation(
       parent: _glowController,
       curve: Curves.easeInOut,
     );
+    _uiForeground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    if (_uiForeground) {
+      _glowController.repeat(reverse: true);
+      _startUptimeTimer();
+    }
     _startBootTask('load', _load, timeout: const Duration(seconds: 12));
     _startBootTask('init-vpn', _initVpn, timeout: const Duration(seconds: 8));
     _statusWatchdogTimer = Timer.periodic(
       const Duration(seconds: 20),
       (_) => unawaited(_refreshStatusWatchdog()),
     );
-    _uptimeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || _status != AurumVpnStatus.started) {
-        return;
-      }
-      setState(() => _clockNow = DateTime.now());
-    });
     _subscriptionReminderTimer = Timer.periodic(
       const Duration(hours: 6),
       (_) => unawaited(_showSubscriptionRenewalReminder(_profiles)),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_refreshBatteryOptimizationStatus(prompt: true));
+    });
+  }
+
+  void _startUptimeTimer() {
+    _uptimeTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || !_uiForeground || _status != AurumVpnStatus.started) {
+        return;
+      }
+      setState(() => _clockNow = DateTime.now());
     });
   }
 
@@ -697,11 +708,19 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
+    _uiForeground = state == AppLifecycleState.resumed;
+    if (_uiForeground) {
+      _glowController.repeat(reverse: true);
+      _startUptimeTimer();
+      setState(() => _clockNow = DateTime.now());
       _lastNetworkEvent = 'app-resume';
       unawaited(_refreshBatteryOptimizationStatus());
       unawaited(_refreshNetworkSnapshot('app-resume'));
       unawaited(_handleResumeRecovery());
+    } else {
+      _uptimeTimer?.cancel();
+      _uptimeTimer = null;
+      _glowController.stop();
     }
   }
 
@@ -1140,7 +1159,7 @@ class _HomeScreenState extends State<HomeScreen>
               if (hasTraffic && _status == AurumVpnStatus.started) {
                 _recordNetworkTrafficIfNeeded(sessionTotal, now);
               }
-              if (displayChanged || healthChanged) {
+              if (_uiForeground && (displayChanged || healthChanged)) {
                 setState(applyTrafficUpdate);
               } else {
                 applyTrafficUpdate();
@@ -2250,7 +2269,7 @@ class _HomeScreenState extends State<HomeScreen>
       _profileStabilityStats,
     );
     nextStats[profile.id] = update(_profileStabilityFor(profile.id));
-    if (mounted) {
+    if (mounted && _uiForeground) {
       setState(() => _profileStabilityStats = nextStats);
     } else {
       _profileStabilityStats = nextStats;
@@ -2278,7 +2297,7 @@ class _HomeScreenState extends State<HomeScreen>
     profileStats[type] = update(
       _profileNetworkStabilityFor(profile.id, networkType: type),
     );
-    if (mounted) {
+    if (mounted && _uiForeground) {
       setState(() => _profileNetworkStabilityStats = nextStats);
     } else {
       _profileNetworkStabilityStats = nextStats;
@@ -3369,7 +3388,7 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() {
           _profilePingMs.remove(profile.id);
           _profilePingText[profile.id] = stopwatch.elapsedMilliseconds <= 1
-              ? 'UDP ok'
+              ? 'DNS ok'
               : 'DNS ${stopwatch.elapsedMilliseconds} ms';
           _profilePingError.remove(profile.id);
         });
@@ -3656,45 +3675,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<List<String>> _smartRouteBypassPackages() async {
-    if (!_smartRouteRuDirect) {
-      return const [];
-    }
-    try {
-      return await _installedAppsService.installedPackageNames().timeout(
-        const Duration(seconds: 2),
-      );
-    } on Object catch (error) {
-      _queueLog(
-        'Smart Route installed apps scan skipped: ${_redactSensitive('$error')}',
-      );
-      return const [];
-    }
-  }
-
-  String _profileKindLabel(VpnProfileKind kind) {
-    return ProtocolDisplayMapper.mapProtocolToDisplayName(
-      switch (kind) {
-        VpnProfileKind.vlessReality ||
-        VpnProfileKind.vlessTls ||
-        VpnProfileKind.vlessXhttp ||
-        VpnProfileKind.vlessMkcp => 'vless',
-        VpnProfileKind.naive => 'naive',
-        VpnProfileKind.hysteria2 => 'hysteria2',
-        VpnProfileKind.hysteria => 'hysteria',
-        VpnProfileKind.singBoxConfig => 'Sing-box',
-      },
-      transport: switch (kind) {
-        VpnProfileKind.vlessXhttp => 'xhttp',
-        VpnProfileKind.vlessMkcp => 'mkcp',
-        _ => 'tcp',
-      },
-      security: switch (kind) {
-        VpnProfileKind.vlessReality ||
-        VpnProfileKind.vlessXhttp ||
-        VpnProfileKind.vlessMkcp => 'reality',
-        _ => null,
-      },
-    );
+    return _smartRouteRuDirect
+        ? SmartRouteRules.ruBypassPackages(const [])
+        : const [];
   }
 
   Future<void> _deleteProfile(VpnProfile profile) async {
@@ -4192,7 +4175,7 @@ class _HomeScreenState extends State<HomeScreen>
         'last_healthy_local: ${_lastHealthyAt!.toIso8601String()}',
       if (profile != null) ...[
         'profile: ${_redactSensitive(profile.name)}',
-        'protocol: ${_profileKindLabel(profile.kind)}',
+        'protocol: ${ProtocolDisplayMapper.mapProfile(profile)}',
         if (engineSelection != null) ...[
           'core_engine: ${engineSelection.engine.name}',
           'core_version: ${engineSelection.coreVersion}',
@@ -4235,7 +4218,7 @@ class _HomeScreenState extends State<HomeScreen>
           final expires = item.subscriptionExpiresAt?.toUtc().toIso8601String();
           return [
             '- ${_redactSensitive(item.name)}',
-            _profileKindLabel(item.kind),
+            ProtocolDisplayMapper.mapProfile(item),
             _redactSensitive(item.endpoint),
             'country=${_profileCountryFlag(item) ?? 'unknown'}'
                 '${_profileCountryCode(item) == null ? '' : ' ${_profileCountryCode(item)}'}',
@@ -4546,13 +4529,19 @@ class _HomeScreenState extends State<HomeScreen>
           return;
         }
 
-        setState(() {
+        void applyLogs() {
           _logs.addAll(_pendingLogs);
           _pendingLogs.clear();
           if (_logs.length > _maxStoredLogs) {
             _logs.removeRange(0, _logs.length - _maxStoredLogs);
           }
-        });
+        }
+
+        if (_uiForeground) {
+          setState(applyLogs);
+        } else {
+          applyLogs();
+        }
       } on Object catch (error, stackTrace) {
         _handleEngineStreamError('log-flush', error, stackTrace);
       }
@@ -4560,7 +4549,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _cleanLog(String message) {
-    return message.replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '').trim();
+    return message.replaceAll(_logAnsiEscapePattern, '').trim();
   }
 
   @override
@@ -4593,7 +4582,13 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
             SizedBox(width: 10),
-            Text(_appName),
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(_appName),
+              ),
+            ),
           ],
         ),
       ),
@@ -4660,7 +4655,7 @@ class _HomeScreenState extends State<HomeScreen>
                       healthFailuresStatus: _healthFailuresStatusLabel,
                       stabilityNeedsAttention:
                           _connectionDegraded || !_batteryOptimizationIgnored,
-                      kindLabel: _profileKindLabel,
+                      kindLabel: ProtocolDisplayMapper.mapProfile,
                       displayName: _profileDisplayName,
                       countryFlag: _profileCountryFlag,
                       pingLabel: _profilePingLabel,

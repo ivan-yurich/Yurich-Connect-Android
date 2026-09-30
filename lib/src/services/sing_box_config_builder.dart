@@ -30,7 +30,7 @@ class SingBoxConfigBuilder {
       if (raw == null || raw.trim().isEmpty) {
         throw StateError('Пустой sing-box config.');
       }
-      return raw;
+      return _withHealthProxy(raw);
     }
 
     final outbound = profile.outbound;
@@ -100,6 +100,38 @@ class SingBoxConfigBuilder {
     };
 
     return const JsonEncoder.withIndent('  ').convert(config);
+  }
+
+  String _withHealthProxy(String raw) {
+    final config = jsonDecode(raw) as Map<String, dynamic>;
+    final inbounds = (config['inbounds'] as List? ?? const []).toList();
+    final existing = inbounds.whereType<Map>().where(
+      (inbound) => inbound['listen_port'] == localMixedProxyPort,
+    );
+    if (existing.isNotEmpty) {
+      if (existing.length != 1 ||
+          existing.single['type'] != 'mixed' ||
+          existing.single['listen'] != '127.0.0.1' ||
+          (existing.single['users'] as List? ?? const []).isNotEmpty) {
+        throw StateError(
+          'Порт $localMixedProxyPort нужен для локальной проверки VPN. '
+          'Измени конфликтующий inbound в JSON-конфиге.',
+        );
+      }
+      return raw;
+    }
+
+    final tags = inbounds
+        .whereType<Map>()
+        .map((inbound) => inbound['tag'])
+        .toSet();
+    var tag = 'yurich-health-in';
+    for (var suffix = 1; tags.contains(tag); suffix += 1) {
+      tag = 'yurich-health-in-$suffix';
+    }
+    inbounds.add({..._mixedInbound(), 'tag': tag});
+    config['inbounds'] = inbounds;
+    return jsonEncode(config);
   }
 
   Map<String, dynamic> _tunInbound({

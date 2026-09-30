@@ -81,8 +81,8 @@ class _StatusPanel extends StatelessWidget {
       animation: pulse,
       builder: (context, child) {
         final glowPower = connected || degraded ? pulse.value : 0.0;
-        return SizedBox(
-          height: 196,
+        return ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 196),
           child: DecoratedBox(
             decoration: BoxDecoration(
               gradient: degraded
@@ -113,6 +113,7 @@ class _StatusPanel extends StatelessWidget {
         );
       },
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
@@ -475,7 +476,7 @@ class _ProfilePanel extends StatelessWidget {
   final String autoRecoveryStatus;
   final String healthFailuresStatus;
   final bool stabilityNeedsAttention;
-  final String Function(VpnProfileKind kind) kindLabel;
+  final String Function(VpnProfile profile) kindLabel;
   final String Function(VpnProfile profile) displayName;
   final String? Function(VpnProfile profile) countryFlag;
   final String Function(VpnProfile profile) pingLabel;
@@ -690,7 +691,7 @@ class _ServerPickerSummary extends StatelessWidget {
   final int visibleCount;
   final bool profilesExpanded;
   final VoidCallback onToggle;
-  final String Function(VpnProfileKind kind) kindLabel;
+  final String Function(VpnProfile profile) kindLabel;
   final String Function(VpnProfile profile) displayName;
   final String? Function(VpnProfile profile) countryFlag;
   final String Function(VpnProfile profile) pingLabel;
@@ -706,7 +707,7 @@ class _ServerPickerSummary extends StatelessWidget {
         ? strings.autoConnectMode
         : [
             if (flag != null && flag.isNotEmpty) flag,
-            kindLabel(profile.kind),
+            kindLabel(profile),
             profile.endpoint,
             pingLabel(profile),
           ].where((value) => value.trim().isNotEmpty).join(' · ');
@@ -835,7 +836,9 @@ class _ProfileTabBar extends StatelessWidget {
         children: [
           for (final tab in _ProfileTab.values) ...[
             AnimatedBuilder(
-              animation: pulse,
+              animation: selectedTab == tab
+                  ? pulse
+                  : const AlwaysStoppedAnimation<double>(0),
               builder: (context, child) {
                 final selected = selectedTab == tab;
                 return DecoratedBox(
@@ -922,7 +925,7 @@ class _ProfileTile extends StatelessWidget {
   final bool selected;
   final bool active;
   final VoidCallback onTap;
-  final String Function(VpnProfileKind kind) kindLabel;
+  final String Function(VpnProfile profile) kindLabel;
   final String displayName;
   final String? countryFlag;
   final String pingLabel;
@@ -967,7 +970,7 @@ class _ProfileTile extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                '${kindLabel(profile.kind)} · ${profile.endpoint}',
+                '${kindLabel(profile)} · ${profile.endpoint}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: _mutedGold),
@@ -1204,7 +1207,7 @@ class _ProfileInsightPanel extends StatelessWidget {
 
   final _Strings strings;
   final VpnProfile? profile;
-  final String Function(VpnProfileKind kind) kindLabel;
+  final String Function(VpnProfile profile) kindLabel;
   final String? countryFlag;
   final String? pingLabel;
   final String? subscriptionStatus;
@@ -1285,7 +1288,7 @@ class _ProfileInsightPanel extends StatelessWidget {
                       _InsightRow(
                         icon: Icons.route_outlined,
                         label: strings.protocolLabel,
-                        value: kindLabel(profile!.kind),
+                        value: kindLabel(profile!),
                       ),
                       _InsightRow(
                         icon: Icons.network_cell_outlined,

@@ -1,8 +1,6 @@
 class SmartRouteRules {
   const SmartRouteRules._();
 
-  static const _ruPackagePrefix = 'ru.';
-
   static const globalProxyDomains = [
     'chat.openai.com',
     'api.openai.com',
@@ -261,15 +259,6 @@ class SmartRouteRules {
   static List<String> ruBypassPackages(Iterable<String> installedPackages) {
     final denied = ruBypassDenyPackageNames.toSet();
     final packages = <String>{...ruDirectPackageNames};
-    for (final packageName in installedPackages) {
-      final normalized = packageName.trim();
-      if (normalized.isEmpty || denied.contains(normalized)) {
-        continue;
-      }
-      if (normalized.startsWith(_ruPackagePrefix)) {
-        packages.add(normalized);
-      }
-    }
     packages.removeAll(denied);
     final sorted = packages.toList()..sort();
     return sorted;

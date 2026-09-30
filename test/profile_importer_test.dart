@@ -569,7 +569,7 @@ void main() {
     expect(excludedPackages, isNot(contains('com.google.android.youtube')));
     expect(excludedPackages, isNot(contains('org.telegram.messenger')));
     expect(excludedPackages, contains('ru.gosuslugi'));
-    expect(excludedPackages, contains('ru.some.newbank'));
+    expect(excludedPackages, isNot(contains('ru.some.newbank')));
     expect(excludedPackages, contains('ru.sberbankmobile'));
     expect(excludedPackages, contains('ru.vk.android'));
 
@@ -717,7 +717,7 @@ void main() {
     }
   });
 
-  test('builds Hiddify-like RU app bypass list with global app denylist', () {
+  test('bypasses only known apps and never expands by package prefix', () {
     final packages = SmartRouteRules.ruBypassPackages(const [
       'ru.gosuslugi',
       'ru.some.newbank',
@@ -737,7 +737,7 @@ void main() {
     ]);
 
     expect(packages, contains('ru.gosuslugi'));
-    expect(packages, contains('ru.some.newbank'));
+    expect(packages, isNot(contains('ru.some.newbank')));
     expect(packages, contains('ru.sberbankmobile'));
     expect(packages, isNot(contains('ru.yandex.browser')));
     expect(packages, isNot(contains('ru.yandex.searchplugin')));
@@ -1277,6 +1277,35 @@ void main() {
       ),
     );
   });
+
+  test(
+    'subscription deadline closes a stalled body without further retries',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var requests = 0;
+      server.listen((request) async {
+        requests += 1;
+        request.response.write('vless://');
+        await request.response.flush();
+      });
+
+      await expectLater(
+        ProfileImporter(
+          subscriptionTimeout: const Duration(milliseconds: 250),
+        ).importFromText('http://127.0.0.1:${server.port}/s/token/'),
+        throwsA(
+          isA<ProfileImportException>().having(
+            (error) => error.message,
+            'message',
+            contains('не ответил вовремя'),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(requests, 1);
+    },
+  );
 
   test('rejects subscriptions with too many profiles', () async {
     final links = List.generate(ProfileImporter.maxImportedProfiles + 1, (i) {

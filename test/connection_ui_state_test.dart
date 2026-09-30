@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:aurum_vpn/src/models/connection_status.dart';
 import 'package:aurum_vpn/src/models/connection_ui_state.dart';
+import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:aurum_vpn/src/services/protocol_display_mapper.dart';
 import 'package:aurum_vpn/src/utils/traffic_formatter.dart';
 
@@ -35,6 +36,48 @@ void main() {
   });
 
   group('ProtocolDisplayMapper', () {
+    test('distinguishes TLS and Reality XHTTP without changing profiles', () {
+      for (final transport in ['xhttp', 'splithttp']) {
+        expect(
+          ProtocolDisplayMapper.mapProtocolToDisplayName(
+            'vless',
+            transport: transport,
+            security: 'tls',
+          ),
+          'Xray TLS XHTTP / Современный',
+        );
+        expect(
+          ProtocolDisplayMapper.mapProtocolToDisplayName(
+            'vless',
+            transport: transport,
+          ),
+          'Xray XHTTP / Современный',
+        );
+      }
+      for (final reality in [false, true]) {
+        final profile = VpnProfile(
+          id: 'xhttp-display',
+          name: 'XHTTP',
+          kind: VpnProfileKind.vlessXhttp,
+          originalInput: 'test-profile',
+          outbound: {
+            'type': 'vless',
+            'transport': {'type': 'xhttp'},
+            'tls': {
+              'enabled': true,
+              if (reality) 'reality': {'enabled': true},
+            },
+          },
+        );
+        final snapshot = profile.toJson();
+        expect(
+          ProtocolDisplayMapper.mapProfile(profile),
+          'Xray ${reality ? 'REALITY' : 'TLS'} XHTTP / Современный',
+        );
+        expect(profile.toJson(), snapshot);
+      }
+    });
+
     test('maps public protocol names', () {
       expect(
         ProtocolDisplayMapper.mapProtocolToDisplayName(
@@ -54,12 +97,13 @@ void main() {
       );
       expect(
         ProtocolDisplayMapper.mapProtocolToDisplayName('naiveproxy'),
-        'Yurich Proxy Naive / Быстрый',
+        'Веб',
       );
-      expect(
-        ProtocolDisplayMapper.mapProtocolToDisplayName('hy2'),
-        'Turbo WARP / Hysteria2',
-      );
+      expect(ProtocolDisplayMapper.mapProtocolToDisplayName('hy2'), 'ИИ');
+      for (final protocol in ['hysteria', 'hysteria2', ' HY2 ']) {
+        expect(ProtocolDisplayMapper.mapProtocolToDisplayName(protocol), 'ИИ');
+      }
+      expect(ProtocolDisplayMapper.mapProtocolToDisplayName('naive'), 'Веб');
     });
   });
 

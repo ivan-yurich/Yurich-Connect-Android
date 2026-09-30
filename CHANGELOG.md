@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.0.127 - 2026-09-30
+
+- Fixed TLS XHTTP falling back to a generic vless label in the status panel.
+- Derived protocol labels in the profile list, details and diagnostics from
+  each profile's actual transport/security rather than assumed Reality settings.
+  Saved profiles and generated connection configs are unchanged.
+- Covered TLS, Reality and unspecified-security XHTTP labels in Flutter and
+  Android regression tests, including the splithttp alias.
+
+## 1.0.126 - 2026-09-29
+
+- Renamed public Hysteria protocol labels to "ИИ" and NaiveProxy labels to
+  "Веб", including protocol tabs, connection details, and bilingual FAQ.
+  Technical protocol identifiers and saved profiles remain unchanged.
+- Paused the UI uptime timer and glow animation while the app is backgrounded;
+  traffic and log events still update state without rebuilding the hidden UI.
+  Native VPN health monitoring and notification updates remain active.
+- Stopped animation listeners on unselected protocol tabs and reused the log
+  ANSI cleanup pattern instead of compiling it for every log message.
+- Allowed the connection panel to fit its contents and kept the app title
+  within the toolbar on narrow screens.
+
+## 1.0.125 - 2026-09-29
+
+- Limited Smart Route app bypass to explicitly listed services; unknown ru.*
+  packages now remain inside the VPN.
+- Added a loopback health proxy to imported sing-box JSON configs and stopped
+  reporting Connected when the native readiness probe is unavailable.
+- Bounded subscription import to 45 seconds and cancelled outstanding HTTP
+  requests when the deadline expires.
+- Scoped APK caches to release versions, bounded stalled downloads, and removed
+  implicit download fallbacks outside the release metadata.
+- Replaced the misleading Hysteria UDP ok indicator with DNS ok; DNS resolution
+  alone does not confirm that a QUIC endpoint is reachable.
+
 ## 1.0.124 - 2026-09-24
 
 - Fixed Smart Route ordering so sing-box domain rules are evaluated before the

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -23,6 +24,11 @@ class _FetchedSubscription {
 }
 
 class ProfileImporter {
+  ProfileImporter({Duration subscriptionTimeout = const Duration(seconds: 45)})
+    : _subscriptionTimeout = subscriptionTimeout;
+
+  final Duration _subscriptionTimeout;
+
   static const maxImportCharacters = 2 * 1024 * 1024;
   static const maxSubscriptionBytes = 4 * 1024 * 1024;
   static const maxImportedProfiles = 1000;
@@ -56,6 +62,38 @@ class ProfileImporter {
   }
 
   Future<_FetchedSubscription> _fetchSubscription(Uri uri) async {
+    final directClient = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 12);
+    final proxyClient = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..findProxy = (_) =>
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+    var cancelled = false;
+    try {
+      return await _fetchSubscriptionCandidates(
+        uri,
+        directClient: directClient,
+        proxyClient: proxyClient,
+        isCancelled: () => cancelled,
+      ).timeout(
+        _subscriptionTimeout,
+        onTimeout: () => throw const ProfileImportException(
+          'Сервер подписки не ответил вовремя. Проверь сеть и повтори импорт.',
+        ),
+      );
+    } finally {
+      cancelled = true;
+      directClient.close(force: true);
+      proxyClient.close(force: true);
+    }
+  }
+
+  Future<_FetchedSubscription> _fetchSubscriptionCandidates(
+    Uri uri, {
+    required HttpClient directClient,
+    required HttpClient proxyClient,
+    required bool Function() isCancelled,
+  }) async {
     final clients = [
       'sing-box/1.13.11 (Android; YurichConnect)',
       'HiddifyNext/2.5.7',
@@ -68,11 +106,14 @@ class ProfileImporter {
     for (final userAgent in clients) {
       for (final candidateUri in uris) {
         for (final viaLocalProxy in const [false, true]) {
+          if (isCancelled()) {
+            throw const ProfileImportException('Импорт подписки завершён.');
+          }
           try {
             final fetched = await _get(
               candidateUri,
               userAgent: userAgent,
-              viaLocalProxy: viaLocalProxy,
+              client: viaLocalProxy ? proxyClient : directClient,
             );
             final body = fetched.body;
             if (_canParsePayload(body)) {
@@ -86,6 +127,9 @@ class ProfileImporter {
             }
             candidates.add(body);
           } on Object catch (error) {
+            if (isCancelled()) {
+              rethrow;
+            }
             lastError = ProfileImportException(
               '${_fetchModeLabel(viaLocalProxy)} ${candidateUri.path}: $error',
             );
@@ -141,51 +185,47 @@ class ProfileImporter {
   Future<_FetchedSubscription> _get(
     Uri uri, {
     required String userAgent,
-    bool viaLocalProxy = false,
+    required HttpClient client,
   }) async {
-    final client = HttpClient()
-      ..connectionTimeout = Duration(seconds: viaLocalProxy ? 8 : 12);
-    if (viaLocalProxy) {
-      client.findProxy = (_) =>
-          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
-    }
-    try {
-      var currentUri = uri;
-      for (var redirectCount = 0; ; redirectCount += 1) {
-        _validateSubscriptionUri(currentUri);
-        final request = await client.getUrl(currentUri);
-        request.headers.set(HttpHeaders.userAgentHeader, userAgent);
-        request.headers.set(
-          HttpHeaders.acceptHeader,
-          'text/plain, application/json, */*',
-        );
-        request.followRedirects = false;
+    var currentUri = uri;
+    for (var redirectCount = 0; ; redirectCount += 1) {
+      _validateSubscriptionUri(currentUri);
+      final request = await client.getUrl(currentUri);
+      request.headers.set(HttpHeaders.userAgentHeader, userAgent);
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        'text/plain, application/json, */*',
+      );
+      request.followRedirects = false;
 
-        final response = await request.close().timeout(_responseTimeout);
-        if (_isRedirectStatus(response.statusCode)) {
-          final location = response.headers.value(HttpHeaders.locationHeader);
-          await response.drain<void>();
-          if (location == null || redirectCount >= _maxRedirects) {
-            throw const ProfileImportException(
-              'Слишком много перенаправлений подписки.',
-            );
-          }
-          currentUri = currentUri.resolve(location);
-          continue;
+      final response = await request.close().timeout(
+        _responseTimeout,
+        onTimeout: () {
+          request.abort();
+          throw TimeoutException('Subscription server response timed out.');
+        },
+      );
+      if (_isRedirectStatus(response.statusCode)) {
+        final location = response.headers.value(HttpHeaders.locationHeader);
+        await response.drain<void>();
+        if (location == null || redirectCount >= _maxRedirects) {
+          throw const ProfileImportException(
+            'Слишком много перенаправлений подписки.',
+          );
         }
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          await response.drain<void>();
-          throw ProfileImportException('HTTP ${response.statusCode}.');
-        }
-
-        final body = await _readLimitedBody(response);
-        return _FetchedSubscription(
-          body: body,
-          expiresAt: _subscriptionExpiresAtFromHeaders(response.headers),
-        );
+        currentUri = currentUri.resolve(location);
+        continue;
       }
-    } finally {
-      client.close(force: true);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        await response.drain<void>();
+        throw ProfileImportException('HTTP ${response.statusCode}.');
+      }
+
+      final body = await _readLimitedBody(response);
+      return _FetchedSubscription(
+        body: body,
+        expiresAt: _subscriptionExpiresAtFromHeaders(response.headers),
+      );
     }
   }
 
