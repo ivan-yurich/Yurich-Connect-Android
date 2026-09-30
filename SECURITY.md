@@ -4,7 +4,7 @@
 
 Please report security issues privately by email:
 
-[ai@ivan-it.net](mailto:ai@ivan-it.net)
+[hello@ivan-it.net](mailto:hello@ivan-it.net)
 
 Do not open a public GitHub issue for private keys, credentials, subscription
 links, server configs, or vulnerabilities that could expose users.
@@ -24,6 +24,7 @@ Releases instead of being committed to the repository.
 
 ## Supported Versions
 
-The latest GitHub Release and the current Google Play production release are
-supported. GitHub builds use the in-app signed APK updater; Play builds never
+The latest GitHub Release is the supported public distribution. A Play build
+flavor exists, but this policy does not claim a Google Play production listing.
+GitHub builds use the in-app signed APK updater; Play builds never
 request package-install permission and update only through Google Play.

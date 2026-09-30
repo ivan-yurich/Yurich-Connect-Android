@@ -28,4 +28,4 @@ VPN profiles remain on the device until the user deletes them or clears the app'
 
 ## Contact
 
-Privacy questions: `ai@ivan-it.net`
+Privacy questions: [hello@ivan-it.net](mailto:hello@ivan-it.net)
