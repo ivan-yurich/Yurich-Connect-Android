@@ -15,35 +15,40 @@ object ProtocolDisplayMapper {
             normalizedSecurity == "reality" &&
             (normalizedTransport.isEmpty() || normalizedTransport == "tcp")
         ) {
-            return "Xray REALITY TCP / Стабильный"
+            return "Reality"
         }
         if (
             normalizedProtocol == "vless" &&
             (normalizedTransport == "xhttp" || normalizedTransport == "splithttp")
         ) {
             val securityName = when (normalizedSecurity) {
-                "reality" -> "REALITY "
-                "tls" -> "TLS "
+                "reality" -> " (REALITY)"
+                "tls" -> " (TLS)"
                 else -> ""
             }
-            return "Xray ${securityName}XHTTP / Современный"
+            return "XHTTP$securityName"
         }
         if (
             normalizedProtocol == "vless" &&
             normalizedSecurity == "reality" &&
             normalizedTransport == "grpc"
         ) {
-            return "Xray REALITY gRPC / Резервный"
+            return "Reality (gRPC)"
         }
         if (normalizedProtocol == "naive" || normalizedProtocol == "naiveproxy") {
-            return "Веб"
+            return "NaiveProxy"
         }
         if (
             normalizedProtocol == "hysteria2" ||
-            normalizedProtocol == "hy2" ||
-            normalizedProtocol == "hysteria"
+            normalizedProtocol == "hy2"
         ) {
-            return "ИИ"
+            return "Hysteria2"
+        }
+        if (normalizedProtocol == "hysteria") {
+            return "Hysteria"
+        }
+        if (normalizedProtocol == "vless" && normalizedSecurity == "tls") {
+            return if (normalizedTransport == "grpc") "VLESS TLS (gRPC)" else "VLESS TLS"
         }
 
         return protocol?.trim()?.takeIf { it.isNotEmpty() } ?: "Unknown protocol"

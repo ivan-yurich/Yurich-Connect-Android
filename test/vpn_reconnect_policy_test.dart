@@ -55,7 +55,10 @@ void main() {
       crossEngineRestart: false,
     );
 
-    expect(quic.statusTimeout, const Duration(seconds: 16));
+    expect(quic.statusTimeout, const Duration(seconds: 24));
+    expect(quic.maxAttemptsPerPlan, 2);
+    expect(quic.retryDelay, const Duration(milliseconds: 500));
+    expect(quic.attemptBudget, const Duration(seconds: 65));
     expect(xray.statusTimeout, const Duration(seconds: 16));
     expect(xray.startCallTimeout, const Duration(seconds: 7));
     expect(xray.startupProbeTimeout, const Duration(seconds: 16));
@@ -73,6 +76,50 @@ void main() {
     expect(policy.maxPlans, 2);
     expect(policy.maxAttemptsPerPlan, 1);
     expect(policy.fallbackDelay, const Duration(milliseconds: 300));
+  });
+
+  test('QUIC retry cannot extend the remaining readiness budget', () {
+    for (final crossEngine in [false, true]) {
+      final policy = VpnReconnectPolicy.resolve(
+        kind: VpnProfileKind.hysteria2,
+        engine: VpnCoreEngine.singBox,
+        rapidRestart: true,
+        crossEngineRestart: crossEngine,
+      );
+
+      expect(policy.maxPlans, 1);
+      expect(policy.maxAttemptsPerPlan, 2);
+      expect(
+        policy.timeoutWithinAttemptBudget(
+          policy.statusTimeout,
+          elapsed: const Duration(seconds: 60),
+        ),
+        const Duration(seconds: 5),
+      );
+      expect(
+        policy.timeoutWithinAttemptBudget(
+          policy.startupProbeTimeout,
+          elapsed: const Duration(seconds: 65),
+        ),
+        Duration.zero,
+      );
+      expect(
+        policy.isAttemptBudgetExpired(const Duration(seconds: 65)),
+        isTrue,
+      );
+    }
+  });
+
+  test('legacy Hysteria keeps the existing rapid policy', () {
+    final policy = VpnReconnectPolicy.resolve(
+      kind: VpnProfileKind.hysteria,
+      engine: VpnCoreEngine.singBox,
+      rapidRestart: true,
+      crossEngineRestart: false,
+    );
+    expect(policy.maxAttemptsPerPlan, 1);
+    expect(policy.statusTimeout, const Duration(seconds: 16));
+    expect(policy.attemptBudget, const Duration(seconds: 25));
   });
 
   test('cross-engine switch keeps stop confirmation and bounded attempt', () {

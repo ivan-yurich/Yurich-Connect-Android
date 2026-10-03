@@ -6,6 +6,18 @@ import kotlin.test.assertTrue
 
 class NetworkResetTrackerTest {
     @Test
+    fun `network loss is a change even though it cannot reset onto a new network`() {
+        val tracker = NetworkResetTracker<String>()
+        tracker.markCurrent("wifi")
+        assertTrue(tracker.isDifferentNetwork(null))
+        assertFalse(tracker.onNetworkEvent(null))
+        assertFalse(tracker.isDifferentNetwork(null))
+        assertTrue(tracker.isDifferentNetwork("cellular"))
+        assertTrue(tracker.onNetworkEvent("cellular"))
+        assertFalse(tracker.isDifferentNetwork("cellular"))
+    }
+
+    @Test
     fun `duplicate callbacks for the active network do not reset runtime`() {
         val tracker = NetworkResetTracker<String>()
 

@@ -5,7 +5,7 @@ enum VpnReconnectMode { initial, rapidSameEngine, rapidCrossEngine }
 
 /// Bounds reconnect work without changing the more tolerant cold-start path.
 ///
-/// Rapid switches use one attempt per plan and a protocol-aware readiness
+/// Rapid switches use bounded attempts and a protocol-aware readiness
 /// budget so a bad profile cannot occupy the command queue for several
 /// minutes. The cold-start path keeps its tolerant retries.
 final class VpnReconnectPolicy {
@@ -74,20 +74,25 @@ final class VpnReconnectPolicy {
         : VpnReconnectMode.rapidSameEngine;
     final isXray = engine == VpnCoreEngine.xray;
     final isNaive = kind == VpnProfileKind.naive;
+    final isHysteria2 = kind == VpnProfileKind.hysteria2;
 
     // Android native startup may need about 14 seconds before Started becomes
     // observable on LTE. Keep the readiness window independent from config
     // persistence and the asynchronous start command.
-    const statusTimeout = Duration(seconds: 16);
+    final statusTimeout = Duration(seconds: isHysteria2 ? 24 : 16);
     final extendedStart = crossEngineRestart || isXray;
-    final attemptBudget = extendedStart
+    // LTE may fail the first QUIC session but recover after a clean retry.
+    // Include cleanup between attempts in the budget; final cleanup may exceed it.
+    final attemptBudget = isHysteria2
+        ? const Duration(seconds: 65)
+        : extendedStart
         ? const Duration(seconds: 32)
         : const Duration(seconds: 25);
 
     return VpnReconnectPolicy(
       mode: mode,
       maxPlans: isNaive ? 2 : 1,
-      maxAttemptsPerPlan: 1,
+      maxAttemptsPerPlan: isHysteria2 ? 2 : 1,
       configTimeout: const Duration(seconds: 4),
       startCallTimeout: Duration(seconds: extendedStart ? 7 : 5),
       statusTimeout: statusTimeout,
@@ -97,7 +102,9 @@ final class VpnReconnectPolicy {
       // Never start the next runtime while the previous one is still Stopping.
       stopStatusTimeout: const Duration(seconds: 20),
       startSettleDelay: Duration(milliseconds: crossEngineRestart ? 650 : 120),
-      retryDelay: Duration.zero,
+      retryDelay: isHysteria2
+          ? const Duration(milliseconds: 500)
+          : Duration.zero,
       fallbackDelay: const Duration(milliseconds: 300),
       attemptBudget: attemptBudget,
     );

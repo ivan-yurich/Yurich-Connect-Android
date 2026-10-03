@@ -4,8 +4,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'src/app.dart';
+import 'src/services/on_device_diagnostics.dart';
 
-void main() {
+void main() => _launch(tvMode: false);
+
+@pragma('vm:entry-point')
+void tvMain() => _launch(tvMode: true);
+
+void _launch({required bool tvMode}) {
   runZonedGuarded(
     () {
       WidgetsFlutterBinding.ensureInitialized();
@@ -23,9 +29,10 @@ void main() {
         return true;
       };
 
-      runApp(const YurichConnectApp());
+      runApp(YurichConnectApp(tvMode: tvMode));
     },
     (error, stack) {
+      unawaited(OnDeviceDiagnosticsService.recordError('uncaught'));
       debugPrint('Unhandled Yurich Connect error: $error\n$stack');
     },
   );

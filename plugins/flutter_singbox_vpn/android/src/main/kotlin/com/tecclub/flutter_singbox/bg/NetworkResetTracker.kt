@@ -5,6 +5,9 @@ internal class NetworkResetTracker<T> {
     private var pendingRecovery = false
 
     @Synchronized
+    fun isDifferentNetwork(network: T?): Boolean = currentNetwork != network
+
+    @Synchronized
     fun markCurrent(network: T?) {
         currentNetwork = network
         pendingRecovery = false

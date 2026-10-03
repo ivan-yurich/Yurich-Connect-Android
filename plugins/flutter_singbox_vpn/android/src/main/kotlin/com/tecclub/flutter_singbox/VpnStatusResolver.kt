@@ -16,18 +16,15 @@ internal object VpnStatusResolver {
 
     fun resolveRunningServiceStatus(
         startedByUser: Boolean,
-        isStarting: Boolean,
         isShuttingDown: Boolean,
-        currentStatus: Status,
+        nativeStatus: Status?,
         requiresActiveVpnNetwork: Boolean,
         hasActiveVpnNetwork: Boolean
     ): Status = when {
-        isStarting -> Status.Starting
         isShuttingDown -> Status.Stopping
-        currentStatus == Status.Stopping -> Status.Stopping
         !startedByUser -> Status.Stopped
-        requiresActiveVpnNetwork && !hasActiveVpnNetwork -> Status.Starting
-        currentStatus == Status.Starting && !requiresActiveVpnNetwork -> Status.Starting
-        else -> Status.Started
+        nativeStatus == null -> Status.Starting
+        nativeStatus == Status.Started && requiresActiveVpnNetwork && !hasActiveVpnNetwork -> Status.Starting
+        else -> nativeStatus
     }
 }

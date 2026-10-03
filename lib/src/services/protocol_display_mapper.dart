@@ -3,8 +3,9 @@ import '../models/vpn_profile.dart';
 class ProtocolDisplayMapper {
   const ProtocolDisplayMapper._();
 
-  static const naiveName = 'Веб';
-  static const hysteriaName = 'ИИ';
+  static const naiveName = 'NaiveProxy';
+  static const hysteriaName = 'Hysteria';
+  static const hysteria2Name = 'Hysteria2';
 
   static String mapProfile(VpnProfile profile) {
     final outbound = profile.outbound;
@@ -51,30 +52,34 @@ class ProtocolDisplayMapper {
     if (normalizedProtocol == 'vless' &&
         normalizedSecurity == 'reality' &&
         (normalizedTransport.isEmpty || normalizedTransport == 'tcp')) {
-      return 'Xray REALITY TCP / Стабильный';
+      return 'Reality';
     }
     if (normalizedProtocol == 'vless' &&
         (normalizedTransport == 'xhttp' ||
             normalizedTransport == 'splithttp')) {
       final securityName = switch (normalizedSecurity) {
-        'reality' => 'REALITY ',
-        'tls' => 'TLS ',
+        'reality' => ' (REALITY)',
+        'tls' => ' (TLS)',
         _ => '',
       };
-      return 'Xray ${securityName}XHTTP / Современный';
+      return 'XHTTP$securityName';
     }
     if (normalizedProtocol == 'vless' &&
         normalizedSecurity == 'reality' &&
         normalizedTransport == 'grpc') {
-      return 'Xray REALITY gRPC / Резервный';
+      return 'Reality (gRPC)';
     }
     if (normalizedProtocol == 'naive' || normalizedProtocol == 'naiveproxy') {
       return naiveName;
     }
-    if (normalizedProtocol == 'hysteria2' ||
-        normalizedProtocol == 'hy2' ||
-        normalizedProtocol == 'hysteria') {
+    if (normalizedProtocol == 'hysteria2' || normalizedProtocol == 'hy2') {
+      return hysteria2Name;
+    }
+    if (normalizedProtocol == 'hysteria') {
       return hysteriaName;
+    }
+    if (normalizedProtocol == 'vless' && normalizedSecurity == 'tls') {
+      return normalizedTransport == 'grpc' ? 'VLESS TLS (gRPC)' : 'VLESS TLS';
     }
 
     final fallback = protocol.trim();

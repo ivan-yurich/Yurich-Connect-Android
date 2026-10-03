@@ -1,5 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
+import com.tecclub.flutter_singbox.session.VpnSessionPhase
+
 internal data class NetworkReadinessPlan(
     val initialDelayMs: Long,
     val probeAttempts: Int,
@@ -9,11 +11,28 @@ internal object TunnelReadinessPolicy {
     const val REQUIRED_ENDPOINT_SUCCESSES = 2
 
     fun isHealthy(successfulEndpoints: Int, totalEndpoints: Int): Boolean {
-        if (totalEndpoints < REQUIRED_ENDPOINT_SUCCESSES) {
+        if (totalEndpoints < REQUIRED_ENDPOINT_SUCCESSES ||
+            successfulEndpoints < 0 || successfulEndpoints > totalEndpoints
+        ) {
             return false
         }
         return successfulEndpoints >= REQUIRED_ENDPOINT_SUCCESSES
     }
+
+    fun canHandleNetworkEvent(
+        phase: VpnSessionPhase,
+        desiredRunning: Boolean,
+        runtimeActive: Boolean,
+        restarting: Boolean,
+    ): Boolean = desiredRunning && runtimeActive && !restarting && phase in setOf(
+        VpnSessionPhase.Starting, VpnSessionPhase.Reconnecting, VpnSessionPhase.Connected,
+    )
+
+    fun isPhysicalInternetNetwork(
+        capabilitiesKnown: Boolean,
+        internetCapable: Boolean,
+        vpnTransport: Boolean,
+    ): Boolean = capabilitiesKnown && internetCapable && !vpnTransport
 
     fun canRestart(
         nowMs: Long,

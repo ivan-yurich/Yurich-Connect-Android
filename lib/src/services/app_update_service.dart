@@ -28,6 +28,7 @@ const _apkZipMagic = [0x50, 0x4B];
 
 enum AppDistributionChannel {
   github,
+  tv,
   play,
   soak,
   unknown;
@@ -35,6 +36,7 @@ enum AppDistributionChannel {
   static AppDistributionChannel fromWireValue(String? value) {
     return switch (value?.trim().toLowerCase()) {
       'github' => AppDistributionChannel.github,
+      'tv' => AppDistributionChannel.tv,
       'play' => AppDistributionChannel.play,
       'soak' => AppDistributionChannel.soak,
       _ => AppDistributionChannel.unknown,

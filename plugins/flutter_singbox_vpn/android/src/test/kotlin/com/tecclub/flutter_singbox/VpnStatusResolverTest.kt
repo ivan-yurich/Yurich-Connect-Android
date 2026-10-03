@@ -57,7 +57,7 @@ class VpnStatusResolverTest {
     fun staleServiceWithoutUserStartIsStopped() {
         assertEquals(
             Status.Stopped,
-            resolve(startedByUser = false, currentStatus = Status.Stopped)
+            resolve(startedByUser = false, nativeStatus = Status.Stopped)
         )
     }
 
@@ -68,19 +68,18 @@ class VpnStatusResolverTest {
             resolve(
                 startedByUser = false,
                 isShuttingDown = true,
-                currentStatus = Status.Started
+                nativeStatus = Status.Started
             )
         )
     }
 
     @Test
-    fun startupWinsOverAStaleStoppedState() {
+    fun nativeStartupIsNotConnected() {
         assertEquals(
             Status.Starting,
             resolve(
                 startedByUser = true,
-                isStarting = true,
-                currentStatus = Status.Stopped
+                nativeStatus = Status.Starting
             )
         )
     }
@@ -91,7 +90,7 @@ class VpnStatusResolverTest {
             Status.Starting,
             resolve(
                 startedByUser = true,
-                currentStatus = Status.Started,
+                nativeStatus = Status.Started,
                 requiresActiveVpnNetwork = true,
                 hasActiveVpnNetwork = false
             )
@@ -102,7 +101,7 @@ class VpnStatusResolverTest {
     fun activeStartedServiceIsStarted() {
         assertEquals(
             Status.Started,
-            resolve(startedByUser = true, currentStatus = Status.Started)
+            resolve(startedByUser = true, nativeStatus = Status.Started)
         )
     }
 
@@ -110,35 +109,46 @@ class VpnStatusResolverTest {
     fun runningServicePreservesReadinessGate() {
         assertEquals(
             Status.Starting,
-            resolve(startedByUser = true, currentStatus = Status.Starting)
+            resolve(startedByUser = true, nativeStatus = Status.Starting)
         )
     }
 
     @Test
-    fun validatedXrayNetworkRecoversAStaleStartingState() {
+    fun validatedNetworkDoesNotOverrideNativeStartup() {
         assertEquals(
-            Status.Started,
+            Status.Starting,
             resolve(
                 startedByUser = true,
-                currentStatus = Status.Starting,
+                nativeStatus = Status.Starting,
                 requiresActiveVpnNetwork = true,
                 hasActiveVpnNetwork = true
             )
         )
     }
 
+    @Test
+    fun missingNativeResponseCannotBeInferredFromUserIntentOrValidatedNetwork() {
+        assertEquals(Status.Starting, resolve(
+            startedByUser = true, nativeStatus = null,
+            requiresActiveVpnNetwork = true, hasActiveVpnNetwork = true,
+        ))
+    }
+
+    @Test
+    fun observedNativeStopIsNotAConnectedService() {
+        assertEquals(Status.Stopped, resolve(startedByUser = true, nativeStatus = Status.Stopped))
+    }
+
     private fun resolve(
         startedByUser: Boolean,
-        isStarting: Boolean = false,
         isShuttingDown: Boolean = false,
-        currentStatus: Status,
+        nativeStatus: Status?,
         requiresActiveVpnNetwork: Boolean = false,
         hasActiveVpnNetwork: Boolean = true
     ): Status = VpnStatusResolver.resolveRunningServiceStatus(
         startedByUser = startedByUser,
-        isStarting = isStarting,
         isShuttingDown = isShuttingDown,
-        currentStatus = currentStatus,
+        nativeStatus = nativeStatus,
         requiresActiveVpnNetwork = requiresActiveVpnNetwork,
         hasActiveVpnNetwork = hasActiveVpnNetwork
     )

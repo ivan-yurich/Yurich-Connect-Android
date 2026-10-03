@@ -45,26 +45,25 @@ class MethodChannelFlutterSingbox extends FlutterSingboxPlatform {
         StreamController<Map<String, dynamic>>.broadcast();
     _logStreamController = StreamController<Map<String, dynamic>>.broadcast();
 
-    // Listen to status events
-    _statusEventChannel.receiveBroadcastStream().listen((event) {
-      if (event is Map) {
-        _statusStreamController.add(Map<String, dynamic>.from(event));
-      }
-    });
+    _listenToEvents(_statusEventChannel, _statusStreamController);
+    _listenToEvents(_trafficEventChannel, _trafficStreamController);
+    _listenToEvents(_logEventChannel, _logStreamController);
+  }
 
-    // Listen to traffic events
-    _trafficEventChannel.receiveBroadcastStream().listen((event) {
-      if (event is Map) {
-        _trafficStreamController.add(Map<String, dynamic>.from(event));
+  void _listenToEvents(
+    EventChannel channel,
+    StreamController<Map<String, dynamic>> controller,
+  ) {
+    channel.receiveBroadcastStream().listen((event) {
+      if (event is! Map) {
+        return;
       }
-    });
-
-    // Listen to log events
-    _logEventChannel.receiveBroadcastStream().listen((event) {
-      if (event is Map) {
-        _logStreamController.add(Map<String, dynamic>.from(event));
+      try {
+        controller.add(Map<String, dynamic>.from(event));
+      } on Object catch (error, stackTrace) {
+        controller.addError(error, stackTrace);
       }
-    });
+    }, onError: controller.addError);
   }
 
   @override

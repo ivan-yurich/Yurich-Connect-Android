@@ -1627,6 +1627,7 @@ class _AppCenterPanel extends StatelessWidget {
               strings: strings,
               logs: logs,
               onExpansionChanged: onExpansionChanged,
+              russian: language == _AppLanguage.ru,
             ),
           ],
         ),
@@ -1883,24 +1884,28 @@ class _UpdatePanel extends StatelessWidget {
     final hasUpdate = availableVersion != null;
     final description = switch (distributionChannel) {
       AppDistributionChannel.github => strings.updateDescription,
+      AppDistributionChannel.tv => 'Yurich Connect TV APK / GitHub',
       AppDistributionChannel.play => strings.playUpdateDescription,
       AppDistributionChannel.soak => strings.soakUpdateDescription,
       AppDistributionChannel.unknown => strings.unknownUpdateDescription,
     };
     final channelLabel = switch (distributionChannel) {
       AppDistributionChannel.github => strings.updateChannel,
+      AppDistributionChannel.tv => 'GitHub / Android TV',
       AppDistributionChannel.play => strings.playUpdateChannel,
       AppDistributionChannel.soak => strings.soakUpdateChannel,
       AppDistributionChannel.unknown => strings.unknownUpdateChannel,
     };
     final actionLabel = switch (distributionChannel) {
       AppDistributionChannel.github => strings.checkUpdates,
+      AppDistributionChannel.tv => 'GitHub',
       AppDistributionChannel.play => strings.openGooglePlay,
       AppDistributionChannel.soak => strings.updatesDisabled,
       AppDistributionChannel.unknown => strings.retry,
     };
     final actionIcon = switch (distributionChannel) {
       AppDistributionChannel.github => Icons.download_for_offline_outlined,
+      AppDistributionChannel.tv => Icons.open_in_new,
       AppDistributionChannel.play => Icons.open_in_new,
       AppDistributionChannel.soak => Icons.science_outlined,
       AppDistributionChannel.unknown => Icons.refresh,
@@ -2062,11 +2067,13 @@ class _LogsPanel extends StatelessWidget {
     required this.strings,
     required this.logs,
     required this.onExpansionChanged,
+    required this.russian,
   });
 
   final _Strings strings;
   final List<String> logs;
   final ValueChanged<bool> onExpansionChanged;
+  final bool russian;
 
   @override
   Widget build(BuildContext context) {
@@ -2075,6 +2082,10 @@ class _LogsPanel extends StatelessWidget {
       tilePadding: EdgeInsets.zero,
       title: Text(strings.logs),
       children: [
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) ...[
+          DiagnosticsPanel(russian: russian),
+          const SizedBox(height: 12),
+        ],
         Container(
           width: double.infinity,
           constraints: const BoxConstraints(minHeight: 92),

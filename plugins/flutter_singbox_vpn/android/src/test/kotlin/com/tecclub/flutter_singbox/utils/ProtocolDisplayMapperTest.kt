@@ -8,12 +8,12 @@ class ProtocolDisplayMapperTest {
     fun distinguishesXhttpSecurityAndAliases() {
         for (transport in listOf("xhttp", "splithttp")) {
             for ((security, label) in listOf(
-                "tls" to "TLS ",
-                "reality" to "REALITY ",
+                "tls" to " (TLS)",
+                "reality" to " (REALITY)",
                 "" to ""
             )) {
                 assertEquals(
-                    "Xray ${label}XHTTP / Современный",
+                    "XHTTP$label",
                     ProtocolDisplayMapper.mapProtocolToDisplayName("vless", transport, security)
                 )
             }
@@ -22,24 +22,32 @@ class ProtocolDisplayMapperTest {
 
     @Test
     fun mapsHysteriaAliasesToPublicName() {
-        for (protocol in listOf("hysteria", "hysteria2", " HY2 ")) {
-            assertEquals("ИИ", ProtocolDisplayMapper.mapProtocolToDisplayName(protocol))
+        for (protocol in listOf("hy2", "hysteria2", " HY2 ")) {
+            assertEquals("Hysteria2", ProtocolDisplayMapper.mapProtocolToDisplayName(protocol))
         }
+        assertEquals("Hysteria", ProtocolDisplayMapper.mapProtocolToDisplayName("hysteria"))
     }
 
     @Test
     fun mapsNaiveAliasesToPublicName() {
         for (protocol in listOf("naive", " NaiveProxy ")) {
-            assertEquals("Веб", ProtocolDisplayMapper.mapProtocolToDisplayName(protocol))
+            assertEquals("NaiveProxy", ProtocolDisplayMapper.mapProtocolToDisplayName(protocol))
         }
     }
 
     @Test
     fun preservesRealityAndUnknownProtocolLabels() {
         assertEquals(
-            "Xray REALITY TCP / Стабильный",
+            "Reality",
             ProtocolDisplayMapper.mapProtocolToDisplayName("vless", "tcp", "reality")
         )
         assertEquals("custom", ProtocolDisplayMapper.mapProtocolToDisplayName("custom"))
+        assertEquals(
+            "Reality (gRPC)",
+            ProtocolDisplayMapper.mapProtocolToDisplayName(" VLESS ", " GRPC ", " REALITY ")
+        )
+        assertEquals(
+            "VLESS TLS", ProtocolDisplayMapper.mapProtocolToDisplayName("vless", "tcp", "tls")
+        )
     }
 }

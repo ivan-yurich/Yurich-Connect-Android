@@ -28,6 +28,8 @@ import androidx.core.app.ActivityCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
 import com.tecclub.flutter_singbox.bg.BoxService
+import com.tecclub.flutter_singbox.bg.NativeConfigBinding
+import com.tecclub.flutter_singbox.bg.NativeStatusQuery
 import com.tecclub.flutter_singbox.bg.RuntimeConfigReload
 import com.tecclub.flutter_singbox.bg.ServiceConnection
 import com.tecclub.flutter_singbox.bg.ServiceNotification
@@ -267,7 +269,10 @@ class FlutterSingboxPlugin :
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Action.BROADCAST_STATUS_CHANGED) {
                 val statusOrdinal = intent.getIntExtra(Action.EXTRA_STATUS, Status.Stopped.ordinal)
-                val status = Status.values()[statusOrdinal]
+                val reportedStatus = Status.values().getOrNull(statusOrdinal) ?: return
+                val status = if (reportedStatus == Status.Started && !NativeStatusQuery.matchesConfig(
+                    intent.getStringExtra(Action.EXTRA_CONFIG_FINGERPRINT), expectedConfigFingerprint(),
+                )) Status.Starting else reportedStatus
                 val manualDisconnectRequested = if (
                     intent.hasExtra(Action.EXTRA_MANUAL_DISCONNECT_REQUESTED)
                 ) {
@@ -760,15 +765,29 @@ class FlutterSingboxPlugin :
         }
     }
 
-    private fun inferredRunningStatus(): Status {
+    private fun expectedConfigFingerprint(): String? = runCatching {
+        val config = SimpleConfigManager.getConfig()
+        config.takeIf { it.isNotBlank() && it != "{}" }?.let(NativeConfigBinding::fingerprint)
+    }.getOrNull()
+
+    private suspend fun inferredRunningStatus(): Status {
+        val queryGeneration = lifecycleGeneration.get()
+        val expected = expectedConfigFingerprint()
+        val requiresActiveVpnNetwork = isCurrentXrayRuntime()
+        val reply = NativeStatusQuery.read(context, expected)
+        val nativeStatus = reply.takeIf {
+            queryGeneration == lifecycleGeneration.get() && expected == expectedConfigFingerprint()
+        }
         val startedByUser = runCatching { SimpleConfigManager.getStartedByUser() }
             .getOrDefault(false)
-        val requiresActiveVpnNetwork = isCurrentXrayRuntime()
+        if (nativeStatus != null) {
+            isStarting = nativeStatus == Status.Starting
+            if (nativeStatus == Status.Started) hasStartupError = false
+        }
         return VpnStatusResolver.resolveRunningServiceStatus(
             startedByUser = startedByUser,
-            isStarting = isStarting,
             isShuttingDown = isShuttingDown,
-            currentStatus = _vpnStatus.value,
+            nativeStatus = nativeStatus,
             requiresActiveVpnNetwork = requiresActiveVpnNetwork,
             hasActiveVpnNetwork = !requiresActiveVpnNetwork || hasActiveVpnNetwork()
         )
@@ -1390,6 +1409,7 @@ class FlutterSingboxPlugin :
                     result.success(false)
                     return@launch
                 }
+                lifecycleGeneration.incrementAndGet()
 
                 val config = configContent?.takeIf { it.isNotBlank() && it != "{}" }
                     ?: withContext(Dispatchers.IO) { SimpleConfigManager.getConfig() }
@@ -1692,6 +1712,17 @@ class FlutterSingboxPlugin :
     // ServiceConnection.Callback implementation
     override fun onServiceStatusChanged(status: Status) {
         android.util.Log.e("FlutterSingboxPlugin", "onServiceStatusChanged: ${status.name}, hasStartupError=$hasStartupError")
+        val guarded = VpnStatusResolver.resolveServiceBroadcastStatus(
+            broadcastStatus = status,
+            isShuttingDown = isShuttingDown,
+            isStarting = isStarting,
+            startedByUser = runCatching { SimpleConfigManager.getStartedByUser() }.getOrDefault(false),
+        )
+        if (guarded != status) {
+            _vpnStatus.value = guarded
+            sendStatusUpdate(guarded)
+            return
+        }
         
         // Skip if we're shutting down and receive Started status
         if (isShuttingDown && status == Status.Started) {

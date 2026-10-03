@@ -19,6 +19,10 @@ void main() {
       AppDistributionChannel.soak,
     );
     expect(
+      AppDistributionChannel.fromWireValue(' TV '),
+      AppDistributionChannel.tv,
+    );
+    expect(
       AppDistributionChannel.fromWireValue('unexpected'),
       AppDistributionChannel.unknown,
     );
@@ -30,6 +34,7 @@ void main() {
 
   test('enables external APK updates only for the GitHub channel', () {
     expect(AppDistributionChannel.github.externalUpdatesEnabled, isTrue);
+    expect(AppDistributionChannel.tv.externalUpdatesEnabled, isFalse);
     expect(AppDistributionChannel.play.externalUpdatesEnabled, isFalse);
     expect(AppDistributionChannel.soak.externalUpdatesEnabled, isFalse);
     expect(AppDistributionChannel.unknown.externalUpdatesEnabled, isFalse);

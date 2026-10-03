@@ -44,14 +44,14 @@ void main() {
             transport: transport,
             security: 'tls',
           ),
-          'Xray TLS XHTTP / Современный',
+          'XHTTP (TLS)',
         );
         expect(
           ProtocolDisplayMapper.mapProtocolToDisplayName(
             'vless',
             transport: transport,
           ),
-          'Xray XHTTP / Современный',
+          'XHTTP',
         );
       }
       for (final reality in [false, true]) {
@@ -72,7 +72,7 @@ void main() {
         final snapshot = profile.toJson();
         expect(
           ProtocolDisplayMapper.mapProfile(profile),
-          'Xray ${reality ? 'REALITY' : 'TLS'} XHTTP / Современный',
+          'XHTTP (${reality ? 'REALITY' : 'TLS'})',
         );
         expect(profile.toJson(), snapshot);
       }
@@ -85,7 +85,7 @@ void main() {
           transport: 'tcp',
           security: 'reality',
         ),
-        'Xray REALITY TCP / Стабильный',
+        'Reality',
       );
       expect(
         ProtocolDisplayMapper.mapProtocolToDisplayName(
@@ -93,17 +93,42 @@ void main() {
           transport: 'xhttp',
           security: 'reality',
         ),
-        'Xray REALITY XHTTP / Современный',
+        'XHTTP (REALITY)',
       );
       expect(
         ProtocolDisplayMapper.mapProtocolToDisplayName('naiveproxy'),
-        'Веб',
+        'NaiveProxy',
       );
-      expect(ProtocolDisplayMapper.mapProtocolToDisplayName('hy2'), 'ИИ');
-      for (final protocol in ['hysteria', 'hysteria2', ' HY2 ']) {
-        expect(ProtocolDisplayMapper.mapProtocolToDisplayName(protocol), 'ИИ');
+      for (final protocol in ['hy2', 'hysteria2', ' HY2 ']) {
+        expect(
+          ProtocolDisplayMapper.mapProtocolToDisplayName(protocol),
+          'Hysteria2',
+        );
       }
-      expect(ProtocolDisplayMapper.mapProtocolToDisplayName('naive'), 'Веб');
+      expect(
+        ProtocolDisplayMapper.mapProtocolToDisplayName('hysteria'),
+        'Hysteria',
+      );
+      expect(
+        ProtocolDisplayMapper.mapProtocolToDisplayName('naive'),
+        'NaiveProxy',
+      );
+      expect(
+        ProtocolDisplayMapper.mapProtocolToDisplayName(
+          ' VLESS ',
+          transport: ' GRPC ',
+          security: ' REALITY ',
+        ),
+        'Reality (gRPC)',
+      );
+      expect(
+        ProtocolDisplayMapper.mapProtocolToDisplayName(
+          'vless',
+          transport: 'tcp',
+          security: 'tls',
+        ),
+        'VLESS TLS',
+      );
     });
   });
 

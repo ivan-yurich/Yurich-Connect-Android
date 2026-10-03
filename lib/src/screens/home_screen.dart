@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -28,6 +29,7 @@ import '../services/profile_engine_selector.dart';
 import '../services/profile_store.dart';
 import '../services/sensitive_data_redactor.dart';
 import '../services/soak_counter_publish_cadence.dart';
+import '../services/on_device_diagnostics.dart';
 import '../services/protocol_display_mapper.dart';
 import '../services/sing_box_log_filter.dart';
 import '../services/smart_route_rules.dart';
@@ -40,6 +42,8 @@ import '../services/xray_config_builder.dart';
 import '../theme/yurich_theme.dart';
 import '../utils/traffic_formatter.dart';
 import 'qr_scan_screen.dart';
+import 'diagnostics_panel.dart';
+import 'tv_home_screen.dart';
 
 part 'home_screen_widgets.dart';
 part 'home_screen_strings.dart';
@@ -150,7 +154,9 @@ List<VpnProfile> _clientSupportedProfiles(List<VpnProfile> profiles) {
 }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.tvMode = false});
+
+  final bool tvMode;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -363,6 +369,9 @@ class _HomeScreenState extends State<HomeScreen>
   bool get _connected =>
       _status == AurumVpnStatus.started || _status == AurumVpnStatus.starting;
 
+  bool get _nativeOwnsTunnelHealth =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
   bool get _connectionDegraded {
     if (_stoppingByUser) {
       return false;
@@ -388,6 +397,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   bool _isTunnelStale(DateTime now) {
+    // Android's Started is config-bound and confirmed by the native HTTPS quorum.
+    // Quiet UI counters do not override that service-owned readiness decision.
+    if (_nativeOwnsTunnelHealth) {
+      return false;
+    }
     if (_status != AurumVpnStatus.started || !_autoRecoveryArmed) {
       return false;
     }
@@ -643,15 +657,14 @@ class _HomeScreenState extends State<HomeScreen>
         WidgetsBinding.instance.lifecycleState == null ||
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     if (_uiForeground) {
-      _glowController.repeat(reverse: true);
+      if (!widget.tvMode) _glowController.repeat(reverse: true);
       _startUptimeTimer();
     }
     _startBootTask('load', _load, timeout: const Duration(seconds: 12));
     _startBootTask('init-vpn', _initVpn, timeout: const Duration(seconds: 8));
-    _statusWatchdogTimer = Timer.periodic(
-      const Duration(seconds: 20),
-      (_) => unawaited(_refreshStatusWatchdog()),
-    );
+    if (_uiForeground) {
+      _startStatusWatchdog();
+    }
     _subscriptionReminderTimer = Timer.periodic(
       const Duration(hours: 6),
       (_) => unawaited(_showSubscriptionRenewalReminder(_profiles)),
@@ -668,6 +681,13 @@ class _HomeScreenState extends State<HomeScreen>
       }
       setState(() => _clockNow = DateTime.now());
     });
+  }
+
+  void _startStatusWatchdog() {
+    _statusWatchdogTimer ??= Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => unawaited(_refreshStatusWatchdog()),
+    );
   }
 
   void _startBootTask(
@@ -710,8 +730,9 @@ class _HomeScreenState extends State<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _uiForeground = state == AppLifecycleState.resumed;
     if (_uiForeground) {
-      _glowController.repeat(reverse: true);
+      if (!widget.tvMode) _glowController.repeat(reverse: true);
       _startUptimeTimer();
+      _startStatusWatchdog();
       setState(() => _clockNow = DateTime.now());
       _lastNetworkEvent = 'app-resume';
       unawaited(_refreshBatteryOptimizationStatus());
@@ -720,6 +741,8 @@ class _HomeScreenState extends State<HomeScreen>
     } else {
       _uptimeTimer?.cancel();
       _uptimeTimer = null;
+      _statusWatchdogTimer?.cancel();
+      _statusWatchdogTimer = null;
       _glowController.stop();
     }
   }
@@ -735,6 +758,7 @@ class _HomeScreenState extends State<HomeScreen>
     _lastResumeRecoveryAt = startedAt;
     await Future<void>.delayed(_resumeHealthCheckDelay);
     if (!mounted ||
+        !_uiForeground ||
         _stoppingByUser ||
         _manualDisconnectRequested ||
         !_autoRecoveryArmed) {
@@ -743,6 +767,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     final status = await _refreshVpnStatus();
     if (!mounted ||
+        !_uiForeground ||
         _stoppingByUser ||
         _manualDisconnectRequested ||
         !_autoRecoveryArmed) {
@@ -758,6 +783,7 @@ class _HomeScreenState extends State<HomeScreen>
       _setKeeperAction('resume-settle');
       await Future<void>.delayed(_resumeNetworkSettleDelay);
       if (!mounted ||
+          !_uiForeground ||
           _stoppingByUser ||
           _manualDisconnectRequested ||
           !_autoRecoveryArmed) {
@@ -766,6 +792,7 @@ class _HomeScreenState extends State<HomeScreen>
 
       final settledStatus = await _refreshVpnStatus();
       if (!mounted ||
+          !_uiForeground ||
           _stoppingByUser ||
           _manualDisconnectRequested ||
           !_autoRecoveryArmed) {
@@ -1046,6 +1073,9 @@ class _HomeScreenState extends State<HomeScreen>
               }
               if (status == AurumVpnStatus.started) {
                 _lastError = null;
+                if (_nativeOwnsTunnelHealth) {
+                  _tunnelHealthFailures = 0;
+                }
                 if (!_manualDisconnectRequested) {
                   _autoRecoveryArmed = true;
                 }
@@ -1539,6 +1569,7 @@ class _HomeScreenState extends State<HomeScreen>
   ]) {
     final errorText = _redactSensitive('$error');
     _recordStabilityEvent('engine-stream-error:$source:$errorText');
+    unawaited(OnDeviceDiagnosticsService.recordError('event_stream'));
     _queueLog('Engine stream error [$source]: $errorText');
     if (stackTrace != null) {
       _queueLog('Engine stream stack [$source]: $stackTrace');
@@ -1550,6 +1581,14 @@ class _HomeScreenState extends State<HomeScreen>
         _status == AurumVpnStatus.started &&
         !_manualDisconnectRequested &&
         !_stoppingByUser;
+    if (_nativeOwnsTunnelHealth && shouldProbeNow) {
+      // Event delivery failure is not evidence that the native tunnel failed.
+      _setKeeperAction('native-health-owner:engine-stream-$source');
+      if (_uiForeground) {
+        unawaited(_refreshVpnStatus());
+      }
+      return;
+    }
     setState(() {
       _lastError = errorText;
       if (_status == AurumVpnStatus.started) {
@@ -1650,6 +1689,14 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _showImportSheet() async {
+    if (widget.tvMode) {
+      final input = await showTvImportDialog(
+        context,
+        russian: _language == _AppLanguage.ru,
+      );
+      if (input != null && mounted) await _importText(input);
+      return;
+    }
     await showDialog<void>(
       context: context,
       builder: (context) {
@@ -2532,12 +2579,16 @@ class _HomeScreenState extends State<HomeScreen>
         if (started) {
           final finalStatus = await _waitForVpnStatus(
             {AurumVpnStatus.started},
-            timeout: reconnectPolicy.statusTimeout,
+            timeout: reconnectPolicy.timeoutWithinAttemptBudget(
+              reconnectPolicy.statusTimeout,
+              elapsed: attemptClock.elapsed,
+            ),
             operation: operation,
           );
           if (finalStatus == AurumVpnStatus.started) {
             _sessionController.ensureCurrent(operation);
             final requiresSuccessfulProbe =
+                !_nativeOwnsTunnelHealth &&
                 ProfileEngineSelector.requiresSuccessfulStartupProbe(profile);
             if (!requiresSuccessfulProbe) {
               connected = true;
@@ -2545,7 +2596,10 @@ class _HomeScreenState extends State<HomeScreen>
               break;
             }
 
-            final probeTimeout = reconnectPolicy.startupProbeTimeout;
+            final probeTimeout = reconnectPolicy.timeoutWithinAttemptBudget(
+              reconnectPolicy.startupProbeTimeout,
+              elapsed: attemptClock.elapsed,
+            );
             final probePassed = await _sessionController.cancelWhenSuperseded(
               operation,
               _probeLocalMixedProxy(attempts: 1).timeout(
@@ -2597,7 +2651,11 @@ class _HomeScreenState extends State<HomeScreen>
             await _bestEffortNative(
               'saveConfig retry',
               _vpnEngine.saveConfig(config),
-              timeout: _nativeConfigTimeout,
+              timeout: _reconnectPhaseTimeout(
+                reconnectPolicy,
+                attemptClock,
+                _nativeConfigTimeout,
+              ),
             );
           }
           _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 14));
@@ -2913,6 +2971,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _refreshStatusWatchdog() async {
     if (!mounted ||
+        !_uiForeground ||
         _busy ||
         _statusWatchdogInFlight ||
         _manualDisconnectRequested ||
@@ -3026,6 +3085,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final now = DateTime.now();
+    if (_nativeOwnsTunnelHealth) {
+      _setKeeperAction('native-health-owner:$source');
+      return;
+    }
     if (_isNetworkChanging(now)) {
       _setKeeperAction('health-skip-network-changing:$source');
       _nextTunnelHealthCheckAt =
@@ -3211,19 +3274,16 @@ class _HomeScreenState extends State<HomeScreen>
     int attempts = 2,
     bool logFailures = true,
   }) async {
-    final endpoints = <({Uri uri, bool allowCertificateMismatch})>[
+    final endpoints = <({Uri uri, int expectedStatus})>[
       (
-        uri: Uri.https('cp.cloudflare.com', '/generate_204'),
-        allowCertificateMismatch: false,
+        uri: Uri.https('www.cloudflare.com', '/cdn-cgi/trace'),
+        expectedStatus: 200,
       ),
       (
-        uri: Uri.https('www.gstatic.com', '/generate_204'),
-        allowCertificateMismatch: false,
+        uri: Uri.https('connectivitycheck.gstatic.com', '/generate_204'),
+        expectedStatus: 204,
       ),
-      // Some Naive servers have broken resolver settings but still proxy IP
-      // targets correctly. This probe keeps startup from rejecting such
-      // profiles while server-side DNS is being repaired.
-      (uri: Uri.https('1.1.1.1', '/'), allowCertificateMismatch: true),
+      (uri: Uri.https('www.google.com', '/generate_204'), expectedStatus: 204),
     ];
 
     for (var attempt = 1; attempt <= attempts; attempt += 1) {
@@ -3246,14 +3306,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<bool> _probeLocalMixedProxyEndpoint(
-    ({Uri uri, bool allowCertificateMismatch}) endpoint, {
+    ({Uri uri, int expectedStatus}) endpoint, {
     required bool logFailures,
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 5)
-      ..badCertificateCallback = endpoint.allowCertificateMismatch
-          ? (_, host, _) => host == endpoint.uri.host
-          : null
       ..findProxy = (_) =>
           'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
     try {
@@ -3272,7 +3329,7 @@ class _HomeScreenState extends State<HomeScreen>
         const Duration(seconds: 3),
         onTimeout: () {},
       );
-      if (response.statusCode >= 200 && response.statusCode < 400) {
+      if (response.statusCode == endpoint.expectedStatus) {
         return true;
       }
       if (logFailures) {
@@ -3913,6 +3970,11 @@ class _HomeScreenState extends State<HomeScreen>
     switch (distributionChannel) {
       case AppDistributionChannel.github:
         break;
+      case AppDistributionChannel.tv:
+        await _openUrl(
+          'https://github.com/ivan-yurich/Yurich-Connect-Android/releases',
+        );
+        return;
       case AppDistributionChannel.play:
         _showSnack(s.playUpdatesOnly);
         await _openUrl(_playStoreUrl);
@@ -4564,6 +4626,57 @@ class _HomeScreenState extends State<HomeScreen>
         ? (_selectedProfileId ?? selected?.id)
         : (_selectedProfileId ?? selected?.id ?? connectCandidate?.id);
     final activeProfileId = _connected ? selectedProfileId : null;
+
+    if (widget.tvMode) {
+      return TvHomeScreen(
+        russian: _language == _AppLanguage.ru,
+        connection: _connectionUiState,
+        connected: _connected,
+        busy: _busy,
+        message: SensitiveDataRedactor.redact(_message),
+        uptime: _formatDuration(_connectedDuration),
+        version: _appVersion,
+        smartRoute: _smartRouteRuDirect,
+        autoDns: _dnsProtectionMode.protectsAgainstLeaks,
+        refreshing: _subscriptionRefreshBusy,
+        logs: _logs.map(SensitiveDataRedactor.redact).toList(growable: false),
+        profiles: [
+          for (final profile in _profiles)
+            TvProfileItem(
+              id: profile.id,
+              name: _profileDisplayName(profile),
+              protocol: ProtocolDisplayMapper.mapProfile(profile),
+              country: _profileCountryFlag(profile) ?? '',
+              latency: _profilePingLabel(profile),
+              group: switch (profile.kind) {
+                VpnProfileKind.vlessXhttp => TvProtocolGroup.xhttp,
+                VpnProfileKind.naive => TvProtocolGroup.naive,
+                VpnProfileKind.hysteria || VpnProfileKind.hysteria2 =>
+                  TvProtocolGroup.hysteria,
+                _ => TvProtocolGroup.vless,
+              },
+              selected: profile.id == selectedProfileId,
+              active: profile.id == activeProfileId,
+            ),
+        ],
+        onToggle: () => unawaited(_toggleVpn()),
+        onSelect: (id) => unawaited(
+          _selectProfile(_profiles.firstWhere((profile) => profile.id == id)),
+        ),
+        onImport: () => unawaited(_showImportSheet()),
+        onRefresh: () => unawaited(_refreshSubscriptions()),
+        onSmartRoute: (enabled) => unawaited(_setSmartRouteRuDirect(enabled)),
+        onAutoDns: (enabled) => unawaited(_setDnsLeakProtection(enabled)),
+        onLogsVisible: (visible) => unawaited(_setLogsExpanded(visible)),
+        onLanguage: () => unawaited(
+          _setLanguage(
+            _language == _AppLanguage.ru ? _AppLanguage.en : _AppLanguage.ru,
+          ),
+        ),
+        onReleases: () => unawaited(_checkAndInstallUpdate()),
+        onPrivacy: () => unawaited(_openUrl(_privacyPolicyUrl)),
+      );
+    }
 
     return Scaffold(
       appBar: AppBar(

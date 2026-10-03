@@ -12,6 +12,7 @@
 .swiftpm/
 .gradle/
 **/.gradle/
+**/.cxx/
 migrate_working_dir/
 
 # IntelliJ related

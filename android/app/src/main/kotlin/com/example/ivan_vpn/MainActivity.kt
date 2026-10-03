@@ -24,6 +24,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import com.tecclub.flutter_singbox.diagnostics.OnDeviceDiagnostics
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener
@@ -35,6 +36,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
 class MainActivity : FlutterActivity() {
+    override fun getDartEntrypointFunctionName(): String =
+        if (BuildConfig.DISTRIBUTION_CHANNEL == "tv") "tvMain"
+        else super.getDartEntrypointFunctionName()
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private var firstFrameRendered = false
     private var firstFrameWatchdog: Runnable? = null
@@ -44,6 +49,7 @@ class MainActivity : FlutterActivity() {
     private var soakDartReady = false
     private var pendingSoakCommand: PendingSoakCommand? = null
     private var soakQueryReceiverRegistered = false
+    private var diagnosticExportResult: MethodChannel.Result? = null
     private val soakQueryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             handleSoakControlIntent(
@@ -130,7 +136,77 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
+            "online.dnsai.ivanvpn/diagnostics").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "status" -> runIo(result) { OnDeviceDiagnostics.status(applicationContext) }
+                "start" -> runIo(result) { OnDeviceDiagnostics.start(applicationContext) }
+                "stop" -> runIo(result) { OnDeviceDiagnostics.stop(applicationContext) }
+                "export" -> beginDiagnosticExport(result)
+                "recordError" -> {
+                    val type = call.argument<String>("type")
+                    if (type !in setOf("framework", "uncaught", "event_stream")) {
+                        result.error("BAD_DIAGNOSTIC_EVENT", "Invalid error category", null)
+                    } else {
+                        OnDeviceDiagnostics.record(applicationContext, "flutter_error",
+                            labels = mapOf("errorType" to requireNotNull(type)))
+                        result.success(null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
         configureSoakBridge(flutterEngine)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun beginDiagnosticExport(result: MethodChannel.Result) {
+        if (diagnosticExportResult != null) {
+            result.error("EXPORT_BUSY", "Export already open", null)
+            return
+        }
+        diagnosticExportResult = result
+        try {
+            startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+                putExtra(Intent.EXTRA_TITLE, "YurichConnect-diagnostics-7days.zip")
+            }, DIAGNOSTIC_EXPORT_REQUEST)
+        } catch (error: Exception) {
+            diagnosticExportResult = null
+            result.error("EXPORT_UNAVAILABLE", "System file picker unavailable", null)
+        }
+    }
+
+    @Deprecated("Used by FlutterActivity's activity-result bridge")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != DIAGNOSTIC_EXPORT_REQUEST) return
+        val result = diagnosticExportResult ?: return
+        diagnosticExportResult = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            result.success(false)
+            return
+        }
+        runIo(result) {
+            val output = contentResolver.openOutputStream(uri, "w")
+                ?: throw NativeMethodFailure("EXPORT_UNAVAILABLE", "Document cannot be written")
+            output.use { OnDeviceDiagnostics.export(applicationContext, it) }
+            true
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        OnDeviceDiagnostics.record(applicationContext, "ui", labels = mapOf("state" to "resumed"))
+        OnDeviceDiagnostics.sample(applicationContext)
+    }
+
+    override fun onPause() {
+        OnDeviceDiagnostics.record(applicationContext, "ui", labels = mapOf("state" to "hidden"))
+        super.onPause()
     }
 
     private fun configureSoakBridge(flutterEngine: FlutterEngine) {
@@ -361,17 +437,22 @@ class MainActivity : FlutterActivity() {
 
     private fun getInstalledPackages(): List<String> {
         return try {
-            val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-            }
-            val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                packageManager.queryIntentActivities(
-                    launcherIntent,
-                    PackageManager.ResolveInfoFlags.of(0L),
-                )
+            val categories = if (BuildConfig.DISTRIBUTION_CHANNEL == "tv") {
+                listOf(Intent.CATEGORY_LAUNCHER, Intent.CATEGORY_LEANBACK_LAUNCHER)
             } else {
-                @Suppress("DEPRECATION")
-                packageManager.queryIntentActivities(launcherIntent, 0)
+                listOf(Intent.CATEGORY_LAUNCHER)
+            }
+            val activities = categories.flatMap { category ->
+                val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(category)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    packageManager.queryIntentActivities(
+                        launcherIntent,
+                        PackageManager.ResolveInfoFlags.of(0L),
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageManager.queryIntentActivities(launcherIntent, 0)
+                }
             }
             (activities.mapNotNull { it.activityInfo?.packageName } + packageName)
                 .distinct()
@@ -820,6 +901,8 @@ class MainActivity : FlutterActivity() {
             }
 
     override fun onDestroy() {
+        diagnosticExportResult?.error("EXPORT_INTERRUPTED", "Activity closed during export", null)
+        diagnosticExportResult = null
         unregisterSoakQueryReceiver()
         disarmFirstFrameWatchdog()
         ioExecutor.shutdown()
@@ -966,6 +1049,7 @@ class MainActivity : FlutterActivity() {
     )
 
     private companion object {
+        const val DIAGNOSTIC_EXPORT_REQUEST = 7247
         const val TAG = "YurichUpdater"
         const val APK_MIN_BYTES = 64 * 1024L
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
