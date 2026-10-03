@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in on-device 7-day diagnostics with private bounded SQLite storage,
+  existing native health observations, resource samples and Android exit-info.
+  Passwords, subscription URLs, endpoints and raw exception messages are excluded.
+  Recording does not introduce a timer, foreground service or wake lock.
+- Added user-controlled ZIP export through the Android document picker and a
+  bounded offline analyzer that separates failures from missing observations.
+- Replaced ambiguous AI/Web labels with NaiveProxy, Hysteria and Hysteria2.
+  Shortened Reality/XHTTP labels, preserving gRPC and TLS/REALITY distinctions.
+  Profile identifiers, subscription formats and generated configs are unchanged.
+- Handle physical network changes while an active runtime is still Starting;
+  invalidate readiness on network loss without mistaking the VPN for the uplink.
+- Use monotonic time for network-event debounce and wake grace.
+- Close native health sockets when their coroutine is cancelled, so an obsolete
+  probe does not keep blocking an I/O worker during a network transition.
+- Pause hidden Flutter status polling. Android native readiness owns health
+  decisions; idle UI counters do not imply a broken connection.
+- Forward native event-channel errors to application subscribers instead of
+  leaving them unhandled. Event delivery errors do not imply tunnel failure;
+  the foreground UI refreshes native status without restarting the VPN.
+- Avoid renewing wake locks for healthy task removal or entry into Doze.
+- Removed certificate-mismatch acceptance from the Flutter health fallback.
+- Added config-bound single-profile recovery diagnostics using the same HTTPS
+  endpoints as the native watchdog, without opening UI during recovery.
+
+## 1.0.128-tv.20261003.1 (Prerelease) - 2026-10-03
+
+- Added a separate Android TV build with a landscape remote-first interface,
+  Leanback launcher/banner, ARM32/ARM64 packaging, subscription input without
+  camera access, existing Smart Route/Auto DNS settings and redacted log viewing.
+  D-pad traversal materializes offscreen profiles in the bounded lazy list.
+  Back navigation does not stop VPN. The TV channel never installs phone APKs;
+  TV releases are manual until a dedicated TV update feed is published.
+  Mobile UI, protocol configs and profile storage formats are unchanged.
+- Prepared a privacy-redacted gallery, prerelease notes, installation/rollback
+  guidance and an allowlisted publication ZIP with the signed TV APK and checksums.
+  Edited illustrations are not presented as network or long-running test evidence.
+- Rechecked 179 Flutter tests, 118 Android/Kotlin tests and 7 diagnostic-analyzer
+  tests. This prerelease does not replace the stable phone release or certify
+  physical-TV network compatibility or 24/7 stability.
+
 ## 1.0.127 - 2026-09-30
 
 - Fixed TLS XHTTP falling back to a generic vless label in the status panel.

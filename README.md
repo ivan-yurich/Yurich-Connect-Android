@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/images/app_icon.png" alt="Логотип Yurich Connect" width="104" height="104">
   <h1>Yurich Connect</h1>
-  <p>Android VPN-клиент Ивана Юрьевича на базе sing-box и Xray.</p>
+  <p>VPN-клиент Ивана Юрьевича для Android и Android TV на базе sing-box и Xray.</p>
   <p>Подписки, Smart Route, Auto DNS и фоновое восстановление соединения.</p>
   <p>
     <a href="https://github.com/ivan-yurich/Yurich-Connect-Android/releases/latest"><img src="https://img.shields.io/github/v/release/ivan-yurich/Yurich-Connect-Android?label=Release&amp;color=0891b2" alt="Последний релиз"></a>
@@ -11,6 +11,7 @@
   <p>
     <a href="https://github.com/ivan-yurich/Yurich-Connect-Android/releases/latest/download/YurichConnect-android-release.apk"><strong>Скачать APK</strong></a>
     · <a href="https://github.com/ivan-yurich/Yurich-Connect-Android/releases">История релизов</a>
+    · <a href="docs/ANDROID_TV.md">Android TV</a>
     · <a href="https://ivan-it.net/">Сайт автора</a>
     · <a href="https://t.me/ivan_it_net">Telegram</a>
   </p>
@@ -25,6 +26,8 @@
 - Фоновый VPN-сервис с внешними проверками доступности и автовосстановлением.
 - Статус, время подключения и счётчики трафика в приложении и уведомлении Android.
 - Русский и английский интерфейс; локальная диагностика со скрытием известных секретов.
+- Опциональная [диагностика на телефоне за 7 дней](docs/ON_DEVICE_DIAGNOSTICS.md)
+  без подключения к компьютеру, с ручным экспортом ZIP.
 - Проверка обновлений GitHub-сборки и проверка подписи APK перед установкой.
 
 Приложение является клиентом: для подключения нужна действующая подписка или собственный VPN-сервер. Работа зависит также от сервера, оператора и ограничений Android.
@@ -48,13 +51,13 @@
 | Название в интерфейсе | Технология | Когда использовать |
 | --- | --- | --- |
 | **Reality** | VLESS Reality, TCP | Основной вариант; точный transport определяется профилем |
-| **Веб** | NaiveProxy, HTTPS / TCP | Совместимость с сетями, где UDP недоступен |
-| **ИИ** | Hysteria2, QUIC / UDP | Видео, загрузки и мобильные сети, разрешающие UDP |
+| **NaiveProxy** | HTTPS / TCP | Совместимость с сетями, где UDP недоступен |
+| **Hysteria2** | QUIC / UDP | Видео и загрузки в сетях, разрешающих UDP |
 | **XHTTP** | VLESS XHTTP, TLS или Reality | Дополнительный экспериментальный вариант через Xray |
 
-**ИИ** — пользовательское название Hysteria, не функция искусственного интеллекта. Названия в самой подписке могут отличаться от подписей протоколов в приложении.
+Названия соответствуют технологиям. Hysteria первой версии и Hysteria2 различаются в профилях; обе версии собраны в разделе Hysteria. Вкладка VLESS объединяет Reality, VLESS TLS и XHTTP. Названия серверов в самой подписке могут отличаться от подписей протоколов в приложении.
 
-XHTTP требует совместимого сервера и конфигурации. TLS-XHTTP и Reality-XHTTP показываются отдельно. Если UDP блокируется, попробуйте Reality или Веб.
+XHTTP требует совместимого сервера и конфигурации. `XHTTP (TLS)` и `XHTTP (REALITY)` показываются отдельно. Если UDP блокируется, попробуйте Reality или NaiveProxy.
 
 PingTunnel удалён из поддерживаемых протоколов. Произвольный sing-box JSON может импортироваться, но его запуск из пользовательского интерфейса пока недоступен; mKCP также не заявляется как рабочий вариант.
 
@@ -62,7 +65,7 @@ PingTunnel удалён из поддерживаемых протоколов. 
 
 **Smart Route** применяет списки доменов и разрешённых приложений. Известные российские сервисы могут идти напрямую; зарубежные и неизвестные направления остаются в VPN. Приложение не отправляет любой пакет `ru.*` напрямую только из-за имени. При прямом маршруте сервис видит обычный IP оператора: это осознанное разделение трафика, а не режим полной анонимности.
 
-**Auto DNS** управляет DNS внутри VPN-конфигурации. Для Веб / NaiveProxy сохраняется локальное разрешение адреса сервера (bootstrap) ради совместимости. Поэтому приложение не заявляет абсолютное отсутствие любых DNS-запросов вне туннеля во всех режимах.
+**Auto DNS** управляет DNS внутри VPN-конфигурации. Для NaiveProxy сохраняется локальное разрешение адреса сервера (bootstrap) ради совместимости. Поэтому приложение не заявляет абсолютное отсутствие любых DNS-запросов вне туннеля во всех режимах.
 
 Переключение этих настроек при активном VPN может вызвать короткое переподключение. В сети с captive portal сначала выполните вход в Wi-Fi, затем включите VPN. Подробные инструкции доступны в FAQ приложения.
 
@@ -73,6 +76,41 @@ PingTunnel удалён из поддерживаемых протоколов. 
 </p>
 
 Иллюстрация интерфейса; названия, доступные профили и показатели зависят от версии и подписки. Другие снимки находятся в [`promo/screenshots`](promo/screenshots).
+
+## Yurich Connect TV
+
+Отдельный интерфейс для телевизоров и приставок: управление пультом,
+горизонтальная компоновка, подписки и настройки сети на одном экране.
+TV-версия использует VPN-ядро мобильного клиента, а не растянутый телефонный UI.
+
+<p align="center">
+  <img src="promo/screenshots/tv/tv-settings.png" alt="Обработанная иллюстрация настроек Yurich Connect TV; личные данные скрыты" width="960">
+</p>
+
+<p align="center">
+  <img src="promo/screenshots/tv/tv-profiles.png" alt="Профили и фильтры протоколов на Android TV; личные данные скрыты" width="440">
+  <img src="promo/screenshots/tv/tv-import.png" alt="Импорт подписки на Android TV; поле ввода пустое" width="440">
+</p>
+
+- Управление стрелками и OK, видимый фокус, прокрутка длинного списка профилей.
+- Импорт подписки через экранную клавиатуру или явное действие «Вставить».
+- Reality, NaiveProxy, Hysteria2 и экспериментальный XHTTP через общее VPN-ядро.
+- Smart Route, Auto DNS, русский/английский интерфейс и просмотр логов.
+- Отдельный TV APK для ARM32/ARM64; Android 7.0 / API 24 или новее.
+- Обновление вручную **только TV APK**; телефонная сборка не скачивается.
+
+**Статус: предварительная TV-версия `1.0.128-tv.20261003.1`.**
+[Скачать TV APK](https://github.com/ivan-yurich/Yurich-Connect-Android/releases/download/v1.0.128-tv.20261003.1/YurichConnect-TV-arm-v1.0.128-tv.20261003.1.apk) ·
+[Страница TV-релиза](https://github.com/ivan-yurich/Yurich-Connect-Android/releases/tag/v1.0.128-tv.20261003.1)
+
+Фотографии устройства показывают лаунчер и экраны приложения. Иллюстрации
+кадрированы и отретушированы генеративным редактором; личные данные скрыты.
+Они не являются замерами сети или подтверждением стабильности 24/7.
+
+[Установка и совместимость](docs/ANDROID_TV.md) ·
+[Описание TV-релиза](docs/releases/v1.0.128-tv.20261003.1.md) ·
+[Полная галерея](promo/screenshots/tv/README.md) ·
+[Порядок публикации](docs/TV_PUBLICATION.md)
 
 ## Релиз 1.0.127
 
@@ -87,6 +125,17 @@ PingTunnel удалён из поддерживаемых протоколов. 
 Подробнее: [заметки релиза](docs/releases/v1.0.127.md) и [CHANGELOG](CHANGELOG.md).
 
 ## Разработка
+
+### Android TV
+
+Добавлен отдельный вариант `tv`: горизонтальный интерфейс с управлением пультом,
+подписками, Smart Route, Auto DNS и логами. Он использует существующее VPN-ядро;
+телефонный интерфейс не заменён. TV APK для ARM32/ARM64 собирается командой
+`.\tooling\build_tv.ps1`. Подробности, ограничения и установка:
+[Android TV](docs/ANDROID_TV.md). Внешний интернет, сон и восстановление сети на
+физической приставке требуют отдельной проверки.
+
+### Android Для Телефона
 
 Стек: Flutter / Dart, Android Kotlin, sing-box и Xray. Нужны Flutter SDK, Android SDK / NDK и JDK 17. Версия Flutter для CI указана в [workflow](.github/workflows/android.yml).
 
@@ -124,6 +173,6 @@ Windows-клиент развивается отдельно: [Yurich Connect Wi
 <details>
 <summary>English Overview</summary>
 
-Yurich Connect is an Android VPN client built with Flutter, Kotlin, sing-box and Xray. It supports subscription import, Reality, NaiveProxy (Веб), Hysteria2 (ИИ), experimental XHTTP, Smart Route and Auto DNS. A valid VPN subscription or server is required. Download the signed APK from GitHub Releases; do not uninstall the app before updating. Short device checks do not establish 24/7 reliability. Contact: [hello@ivan-it.net](mailto:hello@ivan-it.net).
+Yurich Connect is an Android VPN client built with Flutter, Kotlin, sing-box and Xray. It supports subscription import, Reality, NaiveProxy, Hysteria2, experimental XHTTP, Smart Route and Auto DNS. A valid VPN subscription or server is required. Download the signed APK from GitHub Releases; do not uninstall the app before updating. Short device checks do not establish 24/7 reliability. Contact: [hello@ivan-it.net](mailto:hello@ivan-it.net).
 
 </details>
