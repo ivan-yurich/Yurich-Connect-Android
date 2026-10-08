@@ -34,4 +34,10 @@ class DiagnosticPolicyTest {
         assertEquals("main", DiagnosticPolicy.role("example", "example"))
         assertEquals("other", DiagnosticPolicy.role("private-name", "example"))
     }
+
+    @Test fun `restart budget and process recycle are distinct safe observations`() {
+        assertTrue(DiagnosticPolicy.validate("recovery_deferred",
+            mapOf("attempt" to 5, "cooldownMs" to 900_000), emptyMap()))
+        assertTrue(DiagnosticPolicy.validate("recycle", emptyMap(), mapOf("cause" to "core_switch")))
+    }
 }

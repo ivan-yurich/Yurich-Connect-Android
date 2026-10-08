@@ -33,7 +33,11 @@ void main() {
         return {
           'active': active,
           'available': available,
+          'startedAtMs': DateTime(2026, 10, 2, 12, 30).millisecondsSinceEpoch,
           'endsAtMs': DateTime(2026, 10, 9, 12, 30).millisecondsSinceEpoch,
+          'endedAtMs': !active && available
+              ? DateTime(2026, 10, 3, 12, 30).millisecondsSinceEpoch
+              : 0,
           'events': 12,
           'rotatedEvents': 0,
         };
@@ -69,6 +73,19 @@ void main() {
     expect(stopped.active, isFalse);
     expect(stopped.available, isTrue);
     expect(stopped.events, 12);
+    expect(stopped.stoppedEarly, isTrue);
+  });
+
+  test('deadline completion is distinct from early stop', () {
+    final run = DiagnosticRun.fromMap({
+      'endedAtMs': 604801000,
+      'endsAtMs': 604801000,
+    });
+    expect(run.stoppedEarly, isFalse);
+    expect(
+      DiagnosticRun.fromMap({'endsAtMs': 8640000000000001}).endsAt,
+      isNull,
+    );
   });
 
   test('only error categories cross the native boundary', () async {
@@ -122,7 +139,8 @@ void main() {
     expect(find.textContaining('До '), findsOneWidget);
     await tester.tap(find.byType(Switch));
     await tester.pumpAndSettle();
-    expect(find.text('Завершена'), findsOneWidget);
+    expect(find.text('Остановлена досрочно'), findsOneWidget);
+    expect(find.textContaining('Начало:'), findsOneWidget);
     expect(find.text('Событий: 12'), findsOneWidget);
     expect(calls.where((c) => c.method == 'stop').length, 1);
   });
@@ -177,5 +195,21 @@ void main() {
     await showPanel(tester, russian: false);
     expect(find.text('7-day diagnostics'), findsOneWidget);
     expect(find.byTooltip('Export ZIP'), findsOneWidget);
+  });
+
+  testWidgets('failed status read is not presented as a never-started run', (
+    tester,
+  ) async {
+    fail = true;
+    await showPanel(tester);
+    expect(find.text('Не запущена'), findsNothing);
+    expect(find.text('Диагностика недоступна'), findsOneWidget);
+    expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNull);
+    fail = false;
+    available = true;
+    await tester.tap(find.byTooltip('Повторить проверку'));
+    await tester.pumpAndSettle();
+    expect(find.text('Остановлена досрочно'), findsOneWidget);
+    expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
   });
 }

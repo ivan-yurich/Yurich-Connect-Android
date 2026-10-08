@@ -1890,7 +1890,10 @@ class _UpdatePanel extends StatelessWidget {
       AppDistributionChannel.unknown => strings.unknownUpdateDescription,
     };
     final channelLabel = switch (distributionChannel) {
-      AppDistributionChannel.github => strings.updateChannel,
+      AppDistributionChannel.github =>
+        AppUpdateService.usesTestingChannel(currentVersion)
+            ? strings.testingUpdateChannel
+            : strings.updateChannel,
       AppDistributionChannel.tv => 'GitHub / Android TV',
       AppDistributionChannel.play => strings.playUpdateChannel,
       AppDistributionChannel.soak => strings.soakUpdateChannel,

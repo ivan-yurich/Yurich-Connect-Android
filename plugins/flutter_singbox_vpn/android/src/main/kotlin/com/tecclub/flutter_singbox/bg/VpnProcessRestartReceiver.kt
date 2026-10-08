@@ -1,9 +1,12 @@
 package com.tecclub.flutter_singbox.bg
 
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.tecclub.flutter_singbox.Application
@@ -19,9 +22,29 @@ class VpnProcessRestartReceiver : BroadcastReceiver() {
 
         val pendingResult = goAsync()
         val appContext = context.applicationContext
+        val previousPid = intent.getIntExtra(EXTRA_PREVIOUS_VPN_PID, -1)
         thread(name = "yurich-vpn-core-switch") {
             try {
-                Thread.sleep(RESTART_DELAY_MS)
+                val receiverPid = Process.myPid()
+                val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                    ?: error("Process observer unavailable")
+                val waitingAt = SystemClock.elapsedRealtime()
+                val exited = VpnProcessRestartPolicy.awaitPreviousProcessExit(
+                    previousPid = previousPid,
+                    receiverPid = receiverPid,
+                    elapsedRealtime = SystemClock::elapsedRealtime,
+                    sleep = Thread::sleep,
+                    processExists = { pid ->
+                        val ownPids = activityManager.runningAppProcesses
+                            ?.filter { it.uid == Process.myUid() }?.map { it.pid }?.toSet()
+                        VpnProcessRestartPolicy.previousProcessExists(pid, receiverPid, ownPids)
+                    },
+                )
+                if (!exited) {
+                    Log.w(TAG, "Clean VPN restart skipped: previous process exit not confirmed")
+                    return@thread
+                }
+                Log.i(TAG, "Previous VPN process exit confirmed after ${SystemClock.elapsedRealtime() - waitingAt}ms")
                 Application.initializeBaseIfNeeded(appContext)
                 val shouldRestart = SimpleConfigManager.getStartedByUser(appContext) &&
                     SimpleConfigManager.hasValidConfig(appContext)
@@ -50,7 +73,7 @@ class VpnProcessRestartReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_RESTART_CLEAN_PROCESS =
             "com.tecclub.flutter_singbox.action.RESTART_CLEAN_VPN_PROCESS"
+        const val EXTRA_PREVIOUS_VPN_PID = "previous_vpn_pid"
         private const val TAG = "VpnProcessRestart"
-        private const val RESTART_DELAY_MS = 1_800L
     }
 }

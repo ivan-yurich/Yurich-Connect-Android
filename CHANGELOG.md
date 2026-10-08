@@ -1,7 +1,55 @@
 # Changelog
 
-## Unreleased
+## 1.0.128-test.20261008.10 (Prerelease) - 2026-10-08
 
+- Testing phone builds now discover published Android prereleases from a bounded
+  GitHub release list. Stable builds keep the stable latest feed; TV, Play and
+  soak builds do not gain external phone APK updates.
+- Compare full testing versions numerically, including date and iteration;
+  preserve exact release tags in download URLs and isolate their cache entries.
+- Select only recognized phone APK names compatible with the reported ABI;
+  reject drafts, TV releases and incomplete uploads. Verify the downloaded APK
+  version against the selected release before the existing signature, package
+  and increasing Android versionCode installation guards.
+- Recheck on foreground resume at most once per six monotonic hours, share
+  concurrent lookups and notify once per available version. No background update
+  timer, silent download or unattended installer is added.
+- Bootstrap requires one manual installation of this build: earlier clients
+  cannot discover testing releases through their stable-only updater.
+  Existing protocol readiness failures remain under investigation.
+
+## 1.0.128-test.20261007.9 (Prerelease) - 2026-10-08
+
+- Published an opt-in ARM64 phone test build, not a replacement for stable
+  1.0.127 or the separate TV preview. See the release notes for known failures:
+  27/32 profile switches and 8/8 Chrome checks passed on the final candidate.
+  Hysteria2/Reality readiness failures and two unexplained SIGKILL exits remain
+  under investigation; this is not a 24/7 stability certification.
+
+- Align rapid Hysteria2 readiness with the existing 40-second cold-start window,
+  rather than aborting before the native 30-second startup grace. Retain two
+  bounded attempts within the existing 65-second budget and confirmed cleanup.
+- Isolate manual config switches into or out of a Hysteria2-used native process.
+  Repeated LTE tests reproduced stalled QUIC startup; isolation alone did not
+  eliminate it. Other same-core switches retain the existing in-process path.
+- Reset sing-box/UID traffic baselines on explicit reload, not on duplicate
+  Started callbacks. Normalize provider counter resets and reject stale sing-box
+  samples during startup or Xray sessions; display totals are not billing data.
+- Discard queued traffic from a previous connection when startup begins; ignore
+  counter events during Starting so stale totals do not flash after a profile switch.
+- Confirm the previous VPN PID has exited before starting a clean replacement,
+  instead of sleeping a fixed 1.8 seconds. Bound the wait and reject missing or
+  same-process PIDs; external HTTPS readiness and recovery backoff are unchanged.
+- Clear stale unexpected-stop text after confirmed native recovery, including
+  status polling on resume. Preserve unrelated settings and alert messages.
+- Persist config-bound watchdog recovery pressure in a VPN-only preference file.
+  Repeated automatic process restarts back off from 90 seconds to 15 minutes;
+  only ten minutes of observed healthy checks reset the pressure. Physical
+  network changes retain bounded early recovery, and manual reconnect remains
+  available. A runtime's initial network callback no longer bypasses backoff.
+- Distinguish recovery requests, actual process recycling and deferred recovery
+  in opt-in diagnostics. Show recording start time, early stop and read errors
+  explicitly instead of presenting an unavailable recorder as never started.
 - Added opt-in on-device 7-day diagnostics with private bounded SQLite storage,
   existing native health observations, resource samples and Android exit-info.
   Passwords, subscription URLs, endpoints and raw exception messages are excluded.

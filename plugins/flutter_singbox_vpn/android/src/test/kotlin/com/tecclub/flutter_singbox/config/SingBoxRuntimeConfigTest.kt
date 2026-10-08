@@ -6,6 +6,34 @@ import kotlin.test.assertTrue
 
 internal class SingBoxRuntimeConfigTest {
     @Test
+    fun detectsHysteria2ByOutboundType() {
+        assertTrue(SingBoxRuntimeConfig.usesHysteria2(
+            """{"outbounds":[{"type":"direct"},{"type":"hysteria2","tag":"proxy"}]}""",
+        ))
+    }
+
+    @Test
+    fun namesAndNestedStringsDoNotTriggerHysteria2Policy() {
+        assertFalse(SingBoxRuntimeConfig.usesHysteria2(
+            """{"outbounds":[{"type":"vless","tag":"hysteria2"}],"remark":"hysteria2"}""",
+        ))
+    }
+
+    @Test
+    fun malformedHysteria2ConfigDoesNotCrashClassifier() {
+        for (config in listOf("not-json", "[]", "{}", """{"outbounds":{}}""")) {
+            assertFalse(SingBoxRuntimeConfig.usesHysteria2(config))
+        }
+    }
+
+    @Test
+    fun unexpectedOutboundElementsAreIgnored() {
+        assertFalse(SingBoxRuntimeConfig.usesHysteria2(
+            """{"outbounds":[null,"hysteria2",{"type":{}},{"type":true}]}""",
+        ))
+    }
+
+    @Test
     fun detectsConfiguredMixedProxyPort() {
         val config =
             """

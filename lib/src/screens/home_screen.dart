@@ -248,7 +248,10 @@ class _HomeScreenState extends State<HomeScreen>
   String? _updateMessage;
   AppUpdateInfo? _availableUpdate;
   double? _updateProgress;
-  bool _updateNoticeShown = false;
+  String? _updateNoticeShownForVersion;
+  bool _updateNoticeCheckInFlight = false;
+  final _updateNoticeClock = Stopwatch()..start();
+  Duration? _lastUpdateNoticeAttempt;
   bool _batteryOptimizationIgnored = true;
   bool _batteryOptimizationCheckInFlight = false;
   bool _batteryOptimizationPromptShown = false;
@@ -722,6 +725,7 @@ class _HomeScreenState extends State<HomeScreen>
     _manualController.dispose();
     _sessionController.dispose();
     _glowController.dispose();
+    _updateNoticeClock.stop();
     unawaited(_vpnEngine.dispose());
     super.dispose();
   }
@@ -738,6 +742,7 @@ class _HomeScreenState extends State<HomeScreen>
       unawaited(_refreshBatteryOptimizationStatus());
       unawaited(_refreshNetworkSnapshot('app-resume'));
       unawaited(_handleResumeRecovery());
+      unawaited(_checkLatestUpdateNotice());
     } else {
       _uptimeTimer?.cancel();
       _uptimeTimer = null;
@@ -1051,8 +1056,22 @@ class _HomeScreenState extends State<HomeScreen>
               unawaited(_store.saveManualDisconnectRequested(nativeManualStop));
             }
             var recoverUnexpectedStop = false;
+            if (status == AurumVpnStatus.starting) {
+              _trafficFlushTimer?.cancel();
+              _trafficFlushTimer = null;
+              _latestTrafficEvent = null;
+            }
             setState(() {
               _status = status;
+              if (status == AurumVpnStatus.starting) {
+                _uplink = '0 B/s';
+                _downlink = '0 B/s';
+                _sessionTotal = '0 B';
+                _nativeUplinkSpeedBytes = 0;
+                _nativeDownlinkSpeedBytes = 0;
+                _nativeSessionTotalBytes = 0;
+                _lastSessionTrafficBytes = 0;
+              }
               if (nativeManualStop) {
                 _manualDisconnectRequested = true;
                 _autoRecoveryArmed = false;
@@ -1069,9 +1088,9 @@ class _HomeScreenState extends State<HomeScreen>
               } else if (nativeManualStart) {
                 _manualDisconnectRequested = false;
                 _lastError = null;
-                _lastRecoverySource = null;
               }
               if (status == AurumVpnStatus.started) {
+                _clearRecoveredStopMessage();
                 _lastError = null;
                 if (_nativeOwnsTunnelHealth) {
                   _tunnelHealthFailures = 0;
@@ -1126,7 +1145,7 @@ class _HomeScreenState extends State<HomeScreen>
     _trafficSubscription = _vpnEngine.onTrafficUpdate.listen(
       (event) {
         try {
-          if (!mounted) {
+          if (!mounted || _status == AurumVpnStatus.starting) {
             return;
           }
           _latestTrafficEvent = event;
@@ -1252,6 +1271,7 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() {
           _status = status;
           if (status == AurumVpnStatus.started) {
+            _clearRecoveredStopMessage();
             if (!_manualDisconnectRequested) {
               _autoRecoveryArmed = true;
             }
@@ -2884,8 +2904,16 @@ class _HomeScreenState extends State<HomeScreen>
         }
         return AurumVpnStatus.stopping;
       }
-      if (mounted && _status != status) {
-        setState(() => _status = status);
+      if (mounted &&
+          (_status != status ||
+              (status == AurumVpnStatus.started &&
+                  _lastRecoverySource != null))) {
+        setState(() {
+          _status = status;
+          if (status == AurumVpnStatus.started) {
+            _clearRecoveredStopMessage();
+          }
+        });
       }
       return status;
     } on VpnSessionCancelled {
@@ -3031,6 +3059,20 @@ class _HomeScreenState extends State<HomeScreen>
     } finally {
       _statusWatchdogInFlight = false;
     }
+  }
+
+  void _clearRecoveredStopMessage() {
+    if (_lastRecoverySource == null ||
+        _manualDisconnectRequested ||
+        _stoppingByUser) {
+      return;
+    }
+    final profile = _selectedProfile;
+    _message = profile == null
+        ? s.connected
+        : s.connectionProfile(profile.name);
+    _lastError = null;
+    _lastRecoverySource = null;
   }
 
   void _markUnexpectedStop(String source) {
@@ -3992,6 +4034,7 @@ class _HomeScreenState extends State<HomeScreen>
       _updateProgress = null;
       _updateMessage = s.updateChecking;
     });
+    _lastUpdateNoticeAttempt = _updateNoticeClock.elapsed;
 
     try {
       final abis = await _updateService.supportedAbis().timeout(
@@ -4042,6 +4085,7 @@ class _HomeScreenState extends State<HomeScreen>
       await _updateService.installApk(
         file,
         currentBuildNumber: int.tryParse(_appBuildNumber),
+        expectedVersion: update.version,
       );
       if (mounted) {
         setState(() => _updateMessage = s.updateInstallerOpened);
@@ -4079,7 +4123,7 @@ class _HomeScreenState extends State<HomeScreen>
             onPressed: () => unawaited(
               _openUrl(
                 (_availableUpdate?.downloadUrl ??
-                        AppUpdateService.latestApkDownloadUri)
+                        AppUpdateService.manualDownloadUri(_appVersion))
                     .toString(),
               ),
             ),
@@ -4094,10 +4138,18 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _checkLatestUpdateNotice() async {
-    if (_updateBusy) {
+    if (_updateBusy ||
+        !_distributionChannel.externalUpdatesEnabled ||
+        !AppUpdateNoticePolicy.shouldCheck(
+          elapsed: _updateNoticeClock.elapsed,
+          lastAttempt: _lastUpdateNoticeAttempt,
+          inFlight: _updateNoticeCheckInFlight,
+          foreground: _uiForeground,
+        )) {
       return;
     }
-
+    _updateNoticeCheckInFlight = true;
+    _lastUpdateNoticeAttempt = _updateNoticeClock.elapsed;
     try {
       if (!(await _updateService.distributionChannel())
           .externalUpdatesEnabled) {
@@ -4110,7 +4162,7 @@ class _HomeScreenState extends State<HomeScreen>
       final update = await _updateService
           .findLatest(currentVersion: _appVersion, supportedAbis: abis)
           .timeout(const Duration(seconds: 26));
-      if (!mounted) {
+      if (!mounted || _updateBusy) {
         return;
       }
 
@@ -4126,10 +4178,10 @@ class _HomeScreenState extends State<HomeScreen>
         _updateMessage = s.updateAvailable(update.version);
       });
 
-      if (_updateNoticeShown) {
+      if (_updateNoticeShownForVersion == update.version) {
         return;
       }
-      _updateNoticeShown = true;
+      _updateNoticeShownForVersion = update.version;
       _showSnack(
         s.updateAvailableSnack(update.version),
         action: SnackBarAction(
@@ -4149,6 +4201,8 @@ class _HomeScreenState extends State<HomeScreen>
       );
     } on Object catch (error) {
       _queueLog('Update notice check skipped: ${_redactSensitive('$error')}');
+    } finally {
+      _updateNoticeCheckInFlight = false;
     }
   }
 
@@ -4651,8 +4705,8 @@ class _HomeScreenState extends State<HomeScreen>
               group: switch (profile.kind) {
                 VpnProfileKind.vlessXhttp => TvProtocolGroup.xhttp,
                 VpnProfileKind.naive => TvProtocolGroup.naive,
-                VpnProfileKind.hysteria || VpnProfileKind.hysteria2 =>
-                  TvProtocolGroup.hysteria,
+                VpnProfileKind.hysteria ||
+                VpnProfileKind.hysteria2 => TvProtocolGroup.hysteria,
                 _ => TvProtocolGroup.vless,
               },
               selected: profile.id == selectedProfileId,

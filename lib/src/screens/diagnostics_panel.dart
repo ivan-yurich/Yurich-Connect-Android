@@ -19,6 +19,8 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
   final _service = OnDeviceDiagnosticsService();
   var _run = const DiagnosticRun();
   var _busy = false;
+  var _loaded = false;
+  var _unavailable = false;
   bool get ru => widget.russian;
 
   @override
@@ -42,11 +44,18 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
   Future<void> _refresh() async {
     try {
       final run = await _service.status();
-      if (mounted) setState(() => _run = run);
+      if (mounted) {
+        setState(() {
+          _run = run;
+          _loaded = true;
+          _unavailable = false;
+        });
+      }
     } on MissingPluginException {
-      // Other platforms and older native implementations have no recorder.
+      if (mounted) setState(() => _unavailable = true);
     } on Object {
       if (mounted) {
+        setState(() => _unavailable = true);
         _notify(
           ru ? 'Не удалось прочитать диагностику' : 'Diagnostics unavailable',
         );
@@ -89,7 +98,13 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
     setState(() => _busy = true);
     try {
       final run = enabled ? await _service.start() : await _service.stop();
-      if (mounted) setState(() => _run = run);
+      if (mounted) {
+        setState(() {
+          _run = run;
+          _loaded = true;
+          _unavailable = false;
+        });
+      }
     } on Object {
       if (mounted) {
         _notify(
@@ -137,11 +152,13 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
             ),
             Switch(
               value: _run.active,
-              onChanged: _busy ? null : (value) => unawaited(_toggle(value)),
+              onChanged: _busy || !_loaded || _unavailable
+                  ? null
+                  : (value) => unawaited(_toggle(value)),
             ),
             IconButton(
               tooltip: ru ? 'Экспортировать ZIP' : 'Export ZIP',
-              onPressed: !_busy && _run.available
+              onPressed: !_busy && !_unavailable && _run.available
                   ? () => unawaited(_export())
                   : null,
               icon: const Icon(Icons.save_alt),
@@ -149,12 +166,29 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
           ],
         ),
         Text(
-          _run.active
+          _unavailable
+              ? (ru ? 'Диагностика недоступна' : 'Diagnostics unavailable')
+              : !_loaded
+              ? (ru ? 'Проверка...' : 'Checking...')
+              : _run.active
               ? '${ru ? 'До' : 'Until'} $deadline'
               : _run.available
-              ? (ru ? 'Завершена' : 'Completed')
+              ? (_run.stoppedEarly
+                    ? (ru ? 'Остановлена досрочно' : 'Stopped early')
+                    : (ru ? 'Завершена' : 'Completed'))
               : (ru ? 'Не запущена' : 'Not started'),
         ),
+        if (_unavailable)
+          IconButton(
+            tooltip: ru ? 'Повторить проверку' : 'Retry',
+            onPressed: _busy ? null : () => unawaited(_refresh()),
+            icon: const Icon(Icons.refresh),
+          ),
+        if (_run.startedAt != null)
+          Text(
+            '${ru ? 'Начало' : 'Started'}: ${localizations.formatShortDate(_run.startedAt!)} '
+            '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(_run.startedAt!), alwaysUse24HourFormat: true)}',
+          ),
         if (_run.available)
           Text(
             '${ru ? 'Событий' : 'Events'}: ${_run.events}'

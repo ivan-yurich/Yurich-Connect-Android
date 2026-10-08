@@ -3,12 +3,23 @@ package com.tecclub.flutter_singbox.config
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 internal object SingBoxRuntimeConfig {
+    fun usesHysteria2(content: String): Boolean {
+        val root = runCatching { Json.parseToJsonElement(content) as? JsonObject }
+            .getOrNull() ?: return false
+        val outbounds = root["outbounds"] as? JsonArray ?: return false
+        return outbounds.any { element ->
+            val outbound = element as? JsonObject ?: return@any false
+            (outbound["type"] as? JsonPrimitive)?.contentOrNull == "hysteria2"
+        }
+    }
+
     fun exposesMixedProxy(content: String, port: Int): Boolean {
         if (content.isBlank() || port !in 1..65535) {
             return false

@@ -68,7 +68,6 @@ class BoxService(
         private const val WATCHDOG_INITIAL_GRACE_MS = 30_000L
         private const val WATCHDOG_INTERVAL_MS = 60_000L
         private const val WATCHDOG_IDLE_INTERVAL_MS = 90_000L
-        private const val WATCHDOG_RESTART_COOLDOWN_MS = 90_000L
         private const val WATCHDOG_FLAP_WINDOW_MS = 5 * 60 * 1000L
         private const val WATCHDOG_FLAP_RESTART_THRESHOLD = 4
         // Both embedded runtimes expose the mixed proxy in well under 500 ms on
@@ -96,6 +95,7 @@ class BoxService(
         private const val LIFECYCLE_RECOVERY_TIMEOUT_MS = 30_000L
         private const val CORE_PROCESS_EXIT_DELAY_MS = 600L
         @Volatile private var processRuntimeCore: VpnRuntimeCore? = null
+        @Volatile private var processUsedHysteria2 = false
 
         fun start() {
             val intent = Intent(Application.application, Settings.serviceClass()).apply {
@@ -147,6 +147,7 @@ class BoxService(
         }
     }
     private val lifecycleMutex = Mutex()
+    private val recoveryBudgetMutex = Mutex()
     private var lifecycleJob: Job? = null
     private var watchdogJob: Job? = null
     private var networkResetJob: Job? = null
@@ -382,6 +383,7 @@ class BoxService(
             val fingerprint = configFingerprint(content)
             lastConfigFingerprint = fingerprint
             nativeConfigBinding = NativeConfigBinding(generation, fingerprint)
+            networkResetTracker.markCurrent(physicalDefaultNetwork())
             
             if (content.isBlank() || content == "{}") {
                 android.util.Log.e("BoxService", "Empty configuration detected")
@@ -396,6 +398,7 @@ class BoxService(
             }
             activeRuntimeCore = VpnRuntimeCore.SingBox
             processRuntimeCore = VpnRuntimeCore.SingBox
+            processUsedHysteria2 = processUsedHysteria2 || SingBoxRuntimeConfig.usesHysteria2(content)
 
             Application.ensureLibboxInitialized(service.applicationContext)
             verifyNativeRuntimeIsolation(VpnRuntimeCore.SingBox)
@@ -533,20 +536,24 @@ class BoxService(
         incomingRuntimeCore: VpnRuntimeCore? = null,
     ) {
         ensureCurrentSession(generation)
-        val targetRuntimeCore = incomingRuntimeCore ?: VpnRuntimeCorePolicy.classify(
-            runCatching { SimpleConfigManager.getConfig() }.getOrDefault("{}"),
-        )
+        val incomingConfig = runCatching { SimpleConfigManager.getConfig() }.getOrDefault("{}")
+        val targetRuntimeCore = incomingRuntimeCore ?: VpnRuntimeCorePolicy.classify(incomingConfig)
         val previousRuntimeCore = processRuntimeCore ?: activeRuntimeCore
         val watchdogRecovery = reason.startsWith("watchdog:")
         if (
             watchdogRecovery ||
-            VpnRuntimeCorePolicy.requiresCleanProcess(previousRuntimeCore, targetRuntimeCore)
+            VpnRuntimeCorePolicy.requiresCleanProcess(
+                previousRuntimeCore, targetRuntimeCore,
+                previousUsedHysteria2 = processUsedHysteria2,
+                incomingUsesHysteria2 = SingBoxRuntimeConfig.usesHysteria2(incomingConfig),
+            )
         ) {
             // A watchdog can be recovering a blocked Go/JNI runtime. Graceful
             // in-process teardown is not cancellable once JNI blocks and would
             // hold lifecycleMutex forever, so use the isolated-process escape
             // hatch for confirmed health recovery. Routine same-core config
-            // switches still recycle in-process without an exit_self event.
+            // switches without Hysteria2 still recycle in-process. QUIC config
+            // switches use a fresh process after reproduced same-process stalls.
             withContext(Dispatchers.Main) {
                 restartInCleanProcess(
                     "$reason:${previousRuntimeCore?.name}->${targetRuntimeCore.name}",
@@ -868,6 +875,8 @@ class BoxService(
             VpnRuntimeCorePolicy.requiresCleanProcess(
                 previous = processRuntimeCore,
                 incoming = incomingRuntimeCore,
+                previousUsedHysteria2 = processUsedHysteria2,
+                incomingUsesHysteria2 = SingBoxRuntimeConfig.usesHysteria2(incomingConfig),
             )
         ) {
             restartInCleanProcess(
@@ -977,7 +986,8 @@ class BoxService(
             return
         }
         cleanProcessRestartScheduled = true
-        recordDiagnostic("restart", labels = mapOf("cause" to "core_switch"))
+        recordDiagnostic("recycle", labels = mapOf("cause" to
+            if (reason.startsWith("watchdog:")) "other" else "core_switch"))
         android.util.Log.w(
             "BoxService",
             "Restarting the VPN process cleanly after $reason",
@@ -993,6 +1003,7 @@ class BoxService(
         service.sendBroadcast(
             Intent(service, VpnProcessRestartReceiver::class.java).apply {
                 action = VpnProcessRestartReceiver.ACTION_RESTART_CLEAN_PROCESS
+                putExtra(VpnProcessRestartReceiver.EXTRA_PREVIOUS_VPN_PID, android.os.Process.myPid())
             }
         )
         closeTunFileDescriptor()
@@ -1250,7 +1261,7 @@ class BoxService(
                         startReadinessValidation(
                             generation = generation,
                             reason = "retry:$reason",
-                            initialDelayMs = READINESS_BACKGROUND_RETRY_MS,
+                            initialDelayMs = readinessRetryDelayMs(),
                             demoteUntilReady = true,
                             probeAttempts = probeAttempts,
                         )
@@ -1475,35 +1486,33 @@ class BoxService(
 
     private suspend fun restartFromWatchdog(reason: String): Boolean {
         val now = SystemClock.elapsedRealtime()
-        val lastRestartAt = SimpleConfigManager.getLastWatchdogRestartAt()
         val networkRecoveryAllowance =
             reason.contains("default-network", ignoreCase = true) &&
                 networkResetTracker.hasRecoveryAllowance()
-        val restartAllowed = TunnelReadinessPolicy.canRestart(
-            nowMs = now,
-            lastRestartAtMs = lastRestartAt,
-            cooldownMs = WATCHDOG_RESTART_COOLDOWN_MS,
-            allowCooldownBypass = networkRecoveryAllowance,
-        )
-        if (watchdogRestarting ||
-            !restartAllowed
-        ) {
-            android.util.Log.w("BoxService", "Watchdog: restart skipped by cooldown")
-            return false
-        }
-
-        watchdogRestarting = true
-        if (!SimpleConfigManager.setLastWatchdogRestartAt(now)) {
-            watchdogRestarting = false
-            android.util.Log.e("BoxService", "Watchdog: unable to persist restart cooldown")
-            return false
-        }
-        val reconnect = sessionState.requestReconnect("watchdog:$reason") ?: run {
-            SimpleConfigManager.setLastWatchdogRestartAt(lastRestartAt)
-            watchdogRestarting = false
-            android.util.Log.w("BoxService", "Watchdog: restart rejected by session state")
-            return false
-        }
+        val reconnect = recoveryBudgetMutex.withLock {
+            if (watchdogRestarting) return@withLock null
+            val fingerprint = nativeConfigBinding?.forGeneration(sessionState.snapshot().generation)
+                ?: return@withLock null
+            val previous = WatchdogRecoveryStore.read(service, fingerprint) ?: return@withLock null
+            if (reason != "notification-action" &&
+                !WatchdogRecoveryPolicy.canRestart(previous, now, networkRecoveryAllowance)) {
+                recordDiagnostic("recovery_deferred", mapOf("attempt" to previous.attempts.toLong(),
+                    "cooldownMs" to WatchdogRecoveryPolicy.cooldownMs(previous.attempts)))
+                android.util.Log.w("BoxService", "Watchdog: recovery deferred by persistent backoff")
+                return@withLock null
+            }
+            watchdogRestarting = true
+            val next = WatchdogRecoveryPolicy.restarted(previous, now)
+            if (!WatchdogRecoveryStore.write(service, fingerprint, next)) {
+                watchdogRestarting = false
+                return@withLock null
+            }
+            sessionState.requestReconnect("watchdog:$reason") ?: run {
+                WatchdogRecoveryStore.write(service, fingerprint, previous)
+                watchdogRestarting = false
+                null
+            }
+        } ?: return false
         if (networkRecoveryAllowance) {
             networkResetTracker.consumeRecoveryAllowance()
         }
@@ -1539,6 +1548,13 @@ class BoxService(
         return true
     }
 
+    private fun readinessRetryDelayMs(): Long {
+        val fingerprint = nativeConfigBinding?.forGeneration(sessionState.snapshot().generation)
+            ?: return READINESS_BACKGROUND_RETRY_MS
+        val state = WatchdogRecoveryStore.read(service, fingerprint) ?: return WATCHDOG_IDLE_INTERVAL_MS
+        return WatchdogRecoveryPolicy.retryDelayMs(state, SystemClock.elapsedRealtime(), isDeviceIdleMode())
+    }
+
     private data class TunnelProbeResult(
         val successfulEndpoints: Int,
         val totalEndpoints: Int,
@@ -1569,6 +1585,11 @@ class BoxService(
             successfulEndpoints = successfulEndpoints,
             totalEndpoints = targets.size,
         )
+        if (isReadinessCurrent(diagnosticGeneration, diagnosticRevision)) {
+            nativeConfigBinding?.forGeneration(diagnosticGeneration)?.let { fingerprint ->
+                WatchdogRecoveryStore.observe(service, fingerprint, SystemClock.elapsedRealtime(), result.healthy)
+            }
+        }
         recordDiagnostic("quorum", mapOf("success" to successfulEndpoints.toLong(),
             "total" to targets.size.toLong(), "durationMs" to SystemClock.elapsedRealtime() - probeStarted,
             "generation" to diagnosticGeneration, "revision" to diagnosticRevision,
