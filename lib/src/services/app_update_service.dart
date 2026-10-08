@@ -5,11 +5,16 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
+import 'app_release_version.dart';
+
 const _releaseApiUrls = [
   'https://api.github.com/repos/ivan-yurich/Yurich-Connect-Android/releases/latest',
   'https://ivan-it.net/yurich-connect/android/latest.json',
 ];
 const _githubRepository = 'ivan-yurich/Yurich-Connect-Android';
+final _testingReleaseApiUri = Uri.parse(
+  'https://api.github.com/repos/$_githubRepository/releases?per_page=20',
+);
 const _githubReleaseAssetName = 'YurichConnect-android-release.apk';
 const _updaterUserAgent = 'YurichConnect-Updater';
 const _updateConnectTimeout = Duration(seconds: 30);
@@ -118,13 +123,29 @@ class AppUpdateIdentityException implements Exception {
   String toString() => message;
 }
 
+abstract final class AppUpdateNoticePolicy {
+  static const interval = Duration(hours: 6);
+
+  static bool shouldCheck({
+    required Duration elapsed,
+    required Duration? lastAttempt,
+    required bool inFlight,
+    required bool foreground,
+  }) =>
+      foreground &&
+      !inFlight &&
+      (lastAttempt == null || elapsed - lastAttempt >= interval);
+}
+
 class AppUpdateService {
   AppUpdateService({
     HttpClient? client,
     List<Uri>? releaseApiUris,
+    Uri? testingReleaseApiUri,
     Duration downloadIdleTimeout = _updateDownloadIdleTimeout,
   }) : _client = client ?? HttpClient(),
        _downloadIdleTimeout = downloadIdleTimeout,
+       _testingReleaseUri = testingReleaseApiUri ?? _testingReleaseApiUri,
        _releaseApiUris =
            releaseApiUris ??
            _releaseApiUrls.map(Uri.parse).toList(growable: false) {
@@ -141,6 +162,16 @@ class AppUpdateService {
   final HttpClient _client;
   final Duration _downloadIdleTimeout;
   final List<Uri> _releaseApiUris;
+  final Uri _testingReleaseUri;
+  Future<AppUpdateInfo?>? _pendingLookup;
+  String? _pendingLookupKey;
+
+  static bool usesTestingChannel(String version) =>
+      AppReleaseVersion.tryParse(version)?.isTesting == true;
+
+  static Uri manualDownloadUri(String version) => usesTestingChannel(version)
+      ? Uri.parse('https://github.com/$_githubRepository/releases')
+      : latestApkDownloadUri;
 
   Future<List<String>> supportedAbis() async {
     if (!Platform.isAndroid) {
@@ -166,7 +197,30 @@ class AppUpdateService {
   Future<AppUpdateInfo?> findLatest({
     required String currentVersion,
     required List<String> supportedAbis,
-  }) async {
+  }) {
+    final key = jsonEncode([currentVersion, supportedAbis]);
+    if (_pendingLookupKey == key && _pendingLookup != null) {
+      return _pendingLookup!;
+    }
+    late final Future<AppUpdateInfo?> lookup;
+    lookup = _findLatest(currentVersion, supportedAbis).whenComplete(() {
+      if (identical(_pendingLookup, lookup)) {
+        _pendingLookup = null;
+        _pendingLookupKey = null;
+      }
+    });
+    _pendingLookup = lookup;
+    _pendingLookupKey = key;
+    return lookup;
+  }
+
+  Future<AppUpdateInfo?> _findLatest(
+    String currentVersion,
+    List<String> supportedAbis,
+  ) async {
+    if (usesTestingChannel(currentVersion)) {
+      return _findTestingUpdate(currentVersion, supportedAbis);
+    }
     Object? lastError;
     var sawEmptyEndpoint = false;
     var sawNotNewerRelease = false;
@@ -214,7 +268,7 @@ class AppUpdateService {
       throw StateError('Invalid update APK filename.');
     }
     final version = _normalizeVersion(update.version);
-    if (!RegExp(r'^\d+(?:\.\d+)*$').hasMatch(version)) {
+    if (AppReleaseVersion.tryParse(version) == null) {
       throw StateError('Invalid update version.');
     }
     final tempDir = Directory(
@@ -397,9 +451,17 @@ class AppUpdateService {
     );
   }
 
-  Future<void> installApk(File file, {int? currentBuildNumber}) async {
+  Future<void> installApk(
+    File file, {
+    int? currentBuildNumber,
+    String? expectedVersion,
+  }) async {
     final apkInfo = await inspectApk(file);
-    validateInspectedApk(apkInfo, currentBuildNumber: currentBuildNumber);
+    validateInspectedApk(
+      apkInfo,
+      currentBuildNumber: currentBuildNumber,
+      expectedVersion: expectedVersion,
+    );
     try {
       await _channel.invokeMethod<void>('installApk', {'path': file.path});
     } on PlatformException catch (error) {
@@ -413,6 +475,7 @@ class AppUpdateService {
   void validateInspectedApk(
     AppUpdateApkInfo apkInfo, {
     int? currentBuildNumber,
+    String? expectedVersion,
   }) {
     if (apkInfo.packageName != 'online.dnsai.ivanvpn') {
       throw AppUpdateIdentityException(
@@ -424,6 +487,17 @@ class AppUpdateService {
       throw const AppUpdateIdentityException(
         'Update signing certificate does not match installed app.',
       );
+    }
+    if (expectedVersion != null) {
+      final expected = AppReleaseVersion.tryParse(expectedVersion);
+      final actual = AppReleaseVersion.tryParse(apkInfo.version);
+      if (expected == null ||
+          actual == null ||
+          expected.value != actual.value) {
+        throw const AppUpdateIdentityException(
+          'Update APK version does not match selected release.',
+        );
+      }
     }
     if (currentBuildNumber != null &&
         currentBuildNumber > 0 &&
@@ -454,21 +528,62 @@ class AppUpdateService {
     Uri uri,
     List<String> supportedAbis,
   ) async {
-    final json = await _fetchReleaseJson(uri);
-    if (json == null) {
-      return null;
+    final metadata = await _fetchReleaseMetadata(uri);
+    if (metadata != null && metadata is! Map<String, dynamic>) {
+      throw StateError('Stable update metadata must be an object.');
     }
+    return metadata == null
+        ? null
+        : _updateFromMetadata(metadata as Map<String, dynamic>, supportedAbis);
+  }
+
+  Future<AppUpdateInfo?> _findTestingUpdate(
+    String currentVersion,
+    List<String> supportedAbis,
+  ) async {
+    final metadata = await _fetchReleaseMetadata(_testingReleaseUri);
+    if (metadata == null) return null;
+    if (metadata is! List) {
+      throw StateError('Testing update metadata must be a release list.');
+    }
+    AppUpdateInfo? newest;
+    for (final entry in metadata.take(20).whereType<Map<String, dynamic>>()) {
+      final update = _updateFromMetadata(
+        entry,
+        supportedAbis,
+        allowTesting: true,
+      );
+      if (update != null &&
+          _isVersionNewer(update.version, currentVersion) &&
+          (newest == null || _isVersionNewer(update.version, newest.version))) {
+        newest = update;
+      }
+    }
+    return newest;
+  }
+
+  AppUpdateInfo? _updateFromMetadata(
+    Map<String, dynamic> json,
+    List<String> supportedAbis, {
+    bool allowTesting = false,
+  }) {
+    if (json['draft'] == true) return null;
     final version = (json['version'] ?? json['tag_name'] ?? json['name'] ?? '')
         .toString();
-    if (version.trim().isEmpty) {
-      throw StateError('Update endpoint has no version.');
+    final parsedVersion = AppReleaseVersion.tryParse(version);
+    if (parsedVersion == null ||
+        (parsedVersion.isTesting && json['prerelease'] != true) ||
+        (!parsedVersion.isTesting && json['prerelease'] == true) ||
+        (!allowTesting &&
+            (parsedVersion.isTesting || json['prerelease'] == true))) {
+      return null;
     }
 
     final assets = (json['assets'] as List? ?? const [])
         .whereType<Map>()
         .map((item) => item.cast<String, dynamic>())
         .toList(growable: false);
-    final selected = _selectAsset(assets, supportedAbis);
+    final selected = _selectAsset(assets, supportedAbis, parsedVersion.value);
     if (selected == null) {
       return null;
     }
@@ -492,7 +607,7 @@ class AppUpdateService {
     );
   }
 
-  Future<Map<String, dynamic>?> _fetchReleaseJson(Uri uri) async {
+  Future<Object?> _fetchReleaseMetadata(Uri uri) async {
     _validateRemoteUpdateUri(uri);
     Object? lastError;
     for (var attempt = 0; attempt < _updateRetryDelays.length; attempt += 1) {
@@ -515,7 +630,7 @@ class AppUpdateService {
         }
 
         final raw = await _readLimitedMetadata(response);
-        return jsonDecode(raw) as Map<String, dynamic>;
+        return jsonDecode(raw);
       } on Object catch (error) {
         lastError = error;
         if (!_shouldRetryUpdateError(error) ||
@@ -550,7 +665,9 @@ class AppUpdateService {
     List<String> supportedAbis,
   ) async {
     final tag = await _fetchLatestGitHubTag();
-    if (tag == null || tag.trim().isEmpty) {
+    if (tag == null) return null;
+    final parsedVersion = AppReleaseVersion.tryParse(tag);
+    if (parsedVersion == null || parsedVersion.isTesting) {
       return null;
     }
 
@@ -643,9 +760,6 @@ class AppUpdateService {
       Uri.parse(
         'https://github.com/$_githubRepository/releases/download/$tag/$assetName',
       ),
-      Uri.parse(
-        'https://github.com/$_githubRepository/releases/latest/download/$assetName',
-      ),
     ];
   }
 
@@ -661,8 +775,10 @@ class AppUpdateService {
         'YurichConnect-android-armeabi-v7a-v$normalized.apk',
       if (supportedAbis.contains('x86_64'))
         'YurichConnect-android-x86_64-v$normalized.apk',
-      'Yurich-Connect-Android-v$normalized.apk',
-      _githubReleaseAssetName,
+      if (supportedAbis.contains('arm64-v8a')) ...[
+        'Yurich-Connect-Android-v$normalized.apk',
+        _githubReleaseAssetName,
+      ],
     ];
   }
 
@@ -684,59 +800,29 @@ class AppUpdateService {
   Map<String, dynamic>? _selectAsset(
     List<Map<String, dynamic>> assets,
     List<String> supportedAbis,
+    String version,
   ) {
-    final apks = assets
-        .where((asset) {
-          final name = asset['name']?.toString().toLowerCase() ?? '';
-          return name.endsWith('.apk');
-        })
-        .toList(growable: false);
-    if (apks.isEmpty) {
-      return null;
-    }
-
-    final priorities = <String>[
-      if (supportedAbis.contains('arm64-v8a')) 'arm64-v8a',
-      if (supportedAbis.contains('armeabi-v7a')) 'armeabi-v7a',
-      if (supportedAbis.contains('x86_64')) 'x86_64',
-      'universal',
-      'release',
-    ];
-
-    for (final priority in priorities) {
-      for (final asset in apks) {
-        final name = asset['name']?.toString().toLowerCase() ?? '';
-        if (name.contains(priority)) {
+    for (final name in _githubAssetNameCandidates(version, supportedAbis)) {
+      for (final asset in assets) {
+        final state = asset['state'];
+        if (asset['name'] == name && (state == null || state == 'uploaded')) {
           return asset;
         }
       }
     }
 
-    return apks.first;
+    return null;
   }
 
   bool _isVersionNewer(String remote, String current) {
-    final remoteParts = _versionParts(remote);
-    final currentParts = _versionParts(current);
-    final maxLength = remoteParts.length > currentParts.length
-        ? remoteParts.length
-        : currentParts.length;
-    for (var i = 0; i < maxLength; i += 1) {
-      final remotePart = i < remoteParts.length ? remoteParts[i] : 0;
-      final currentPart = i < currentParts.length ? currentParts[i] : 0;
-      if (remotePart != currentPart) {
-        return remotePart > currentPart;
-      }
-    }
-    return false;
+    final remoteVersion = AppReleaseVersion.tryParse(remote);
+    final currentVersion = AppReleaseVersion.tryParse(current);
+    return remoteVersion != null &&
+        currentVersion != null &&
+        remoteVersion.compareTo(currentVersion) > 0;
   }
 
-  List<int> _versionParts(String value) => _normalizeVersion(
-    value,
-  ).split('.').map((part) => int.tryParse(part) ?? 0).toList(growable: false);
-
   String _normalizeVersion(String value) {
-    final match = RegExp(r'\d+(?:\.\d+)*').firstMatch(value);
-    return match?.group(0) ?? value.replaceFirst(RegExp(r'^[vV]'), '');
+    return AppReleaseVersion.tryParse(value)?.value ?? value;
   }
 }

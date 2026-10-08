@@ -248,7 +248,10 @@ class _HomeScreenState extends State<HomeScreen>
   String? _updateMessage;
   AppUpdateInfo? _availableUpdate;
   double? _updateProgress;
-  bool _updateNoticeShown = false;
+  String? _updateNoticeShownForVersion;
+  bool _updateNoticeCheckInFlight = false;
+  final _updateNoticeClock = Stopwatch()..start();
+  Duration? _lastUpdateNoticeAttempt;
   bool _batteryOptimizationIgnored = true;
   bool _batteryOptimizationCheckInFlight = false;
   bool _batteryOptimizationPromptShown = false;
@@ -722,6 +725,7 @@ class _HomeScreenState extends State<HomeScreen>
     _manualController.dispose();
     _sessionController.dispose();
     _glowController.dispose();
+    _updateNoticeClock.stop();
     unawaited(_vpnEngine.dispose());
     super.dispose();
   }
@@ -738,6 +742,7 @@ class _HomeScreenState extends State<HomeScreen>
       unawaited(_refreshBatteryOptimizationStatus());
       unawaited(_refreshNetworkSnapshot('app-resume'));
       unawaited(_handleResumeRecovery());
+      unawaited(_checkLatestUpdateNotice());
     } else {
       _uptimeTimer?.cancel();
       _uptimeTimer = null;
@@ -4029,6 +4034,7 @@ class _HomeScreenState extends State<HomeScreen>
       _updateProgress = null;
       _updateMessage = s.updateChecking;
     });
+    _lastUpdateNoticeAttempt = _updateNoticeClock.elapsed;
 
     try {
       final abis = await _updateService.supportedAbis().timeout(
@@ -4079,6 +4085,7 @@ class _HomeScreenState extends State<HomeScreen>
       await _updateService.installApk(
         file,
         currentBuildNumber: int.tryParse(_appBuildNumber),
+        expectedVersion: update.version,
       );
       if (mounted) {
         setState(() => _updateMessage = s.updateInstallerOpened);
@@ -4116,7 +4123,7 @@ class _HomeScreenState extends State<HomeScreen>
             onPressed: () => unawaited(
               _openUrl(
                 (_availableUpdate?.downloadUrl ??
-                        AppUpdateService.latestApkDownloadUri)
+                        AppUpdateService.manualDownloadUri(_appVersion))
                     .toString(),
               ),
             ),
@@ -4131,10 +4138,18 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _checkLatestUpdateNotice() async {
-    if (_updateBusy) {
+    if (_updateBusy ||
+        !_distributionChannel.externalUpdatesEnabled ||
+        !AppUpdateNoticePolicy.shouldCheck(
+          elapsed: _updateNoticeClock.elapsed,
+          lastAttempt: _lastUpdateNoticeAttempt,
+          inFlight: _updateNoticeCheckInFlight,
+          foreground: _uiForeground,
+        )) {
       return;
     }
-
+    _updateNoticeCheckInFlight = true;
+    _lastUpdateNoticeAttempt = _updateNoticeClock.elapsed;
     try {
       if (!(await _updateService.distributionChannel())
           .externalUpdatesEnabled) {
@@ -4147,7 +4162,7 @@ class _HomeScreenState extends State<HomeScreen>
       final update = await _updateService
           .findLatest(currentVersion: _appVersion, supportedAbis: abis)
           .timeout(const Duration(seconds: 26));
-      if (!mounted) {
+      if (!mounted || _updateBusy) {
         return;
       }
 
@@ -4163,10 +4178,10 @@ class _HomeScreenState extends State<HomeScreen>
         _updateMessage = s.updateAvailable(update.version);
       });
 
-      if (_updateNoticeShown) {
+      if (_updateNoticeShownForVersion == update.version) {
         return;
       }
-      _updateNoticeShown = true;
+      _updateNoticeShownForVersion = update.version;
       _showSnack(
         s.updateAvailableSnack(update.version),
         action: SnackBarAction(
@@ -4186,6 +4201,8 @@ class _HomeScreenState extends State<HomeScreen>
       );
     } on Object catch (error) {
       _queueLog('Update notice check skipped: ${_redactSensitive('$error')}');
+    } finally {
+      _updateNoticeCheckInFlight = false;
     }
   }
 

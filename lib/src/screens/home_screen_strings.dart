@@ -602,6 +602,11 @@ class _Strings {
     _ => 'Обновление Yurich Connect',
   };
 
+  String get testingUpdateChannel => switch (this) {
+    _Strings.en => 'Update channel: GitHub / Testing',
+    _ => 'Канал обновлений: GitHub / Тестовый',
+  };
+
   String updateAvailableBody(String version) => switch (this) {
     _Strings.en => 'Version $version is ready. Open Updates to install it.',
     _ => 'Версия $version готова. Открой обновления и установи её.',

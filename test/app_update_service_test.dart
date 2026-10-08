@@ -5,6 +5,297 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aurum_vpn/src/services/app_update_service.dart';
 
 void main() {
+  Future<AppUpdateService> testingService(Object payload) async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      expect(request.uri.path, '/releases');
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode(payload));
+      await request.response.close();
+    });
+    return AppUpdateService(
+      testingReleaseApiUri: Uri.parse(
+        'http://127.0.0.1:${server.port}/releases',
+      ),
+    );
+  }
+
+  Map<String, Object> release(
+    String version, {
+    bool draft = false,
+    bool prerelease = true,
+    String? assetName,
+    String state = 'uploaded',
+  }) => {
+    'tag_name': 'v$version',
+    'draft': draft,
+    'prerelease': prerelease,
+    'assets': [
+      {
+        'name': assetName ?? 'YurichConnect-android-arm64-v8a-v$version.apk',
+        'browser_download_url':
+            'https://github.com/ivan-yurich/Yurich-Connect-Android/releases/download/v$version/${assetName ?? 'YurichConnect-android-arm64-v8a-v$version.apk'}',
+        'state': state,
+        'size': 4,
+      },
+    ],
+  };
+
+  const currentTest = '1.0.128-test.20261007.9';
+  const nextTest = '1.0.128-test.20261008.10';
+
+  test(
+    'manual and automatic lookups share only an in-flight request',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var requests = 0;
+      server.listen((request) async {
+        requests += 1;
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode([release(nextTest)]));
+        await request.response.close();
+      });
+      final service = AppUpdateService(
+        testingReleaseApiUri: Uri.parse(
+          'http://127.0.0.1:${server.port}/releases',
+        ),
+      );
+      Future<AppUpdateInfo?> lookup() => service.findLatest(
+        currentVersion: currentTest,
+        supportedAbis: const ['arm64-v8a'],
+      );
+      final first = lookup();
+      final second = lookup();
+      expect(identical(first, second), isTrue);
+      final result = await Future.wait([first, second]);
+      expect(result.map((update) => update!.version), [nextTest, nextTest]);
+      expect(requests, 1);
+      expect((await lookup())!.version, nextTest);
+      expect(requests, 2);
+    },
+  );
+
+  test('testing channel selects a newer published phone prerelease', () async {
+    final service = await testingService([
+      release(nextTest),
+      release(currentTest),
+      release('1.0.127', prerelease: false),
+    ]);
+    final update = await service.findLatest(
+      currentVersion: currentTest,
+      supportedAbis: const ['arm64-v8a'],
+    );
+    expect(update!.version, nextTest);
+    expect(update.downloadUrl.path, contains('/v$nextTest/'));
+    expect(update.fallbackDownloadUrls, isNotEmpty);
+    expect(
+      update.fallbackDownloadUrls.every(
+        (uri) =>
+            uri.path.contains('/v$nextTest/') && !uri.path.contains('/latest/'),
+      ),
+      isTrue,
+    );
+  });
+
+  test('selects newest testing iteration from an unordered list', () async {
+    final service = await testingService([
+      release('1.0.128-test.20261008.9'),
+      release(nextTest),
+      release('1.0.128-test.20261008.2'),
+    ]);
+    final update = await service.findLatest(
+      currentVersion: currentTest,
+      supportedAbis: const ['arm64-v8a'],
+    );
+    expect(update!.version, nextTest);
+  });
+
+  test('ignores draft, TV, arbitrary APK and incomplete upload', () async {
+    final service = await testingService([
+      release('9.0.0-test.20261008.1', draft: true),
+      release('9.0.0-tv.20261008.1', assetName: 'YurichConnect-TV-arm.apk'),
+      release('9.0.0-test.20261008.2', assetName: 'unrelated-arm64-v8a.apk'),
+      release('9.0.0-test.20261008.3', state: 'new'),
+      release(nextTest),
+    ]);
+    final update = await service.findLatest(
+      currentVersion: currentTest,
+      supportedAbis: const ['arm64-v8a'],
+    );
+    expect(update!.version, nextTest);
+  });
+
+  test(
+    'does not select an incompatible APK or guess when ABI is unknown',
+    () async {
+      final service = await testingService([release(nextTest)]);
+      for (final abis in [
+        <String>[],
+        ['armeabi-v7a'],
+        ['x86_64'],
+      ]) {
+        expect(
+          await service.findLatest(
+            currentVersion: currentTest,
+            supportedAbis: abis,
+          ),
+          isNull,
+        );
+      }
+    },
+  );
+
+  test('does not advertise the installed or older testing build', () async {
+    final service = await testingService([
+      release(currentTest),
+      release('1.0.128-test.20261007.8'),
+    ]);
+    expect(
+      await service.findLatest(
+        currentVersion: currentTest,
+        supportedAbis: const ['arm64-v8a'],
+      ),
+      isNull,
+    );
+  });
+
+  test('testing users can move to a newer stable phone release', () async {
+    final service = await testingService([
+      release(nextTest),
+      release('1.0.129', prerelease: false),
+    ]);
+    final update = await service.findLatest(
+      currentVersion: currentTest,
+      supportedAbis: const ['arm64-v8a'],
+    );
+    expect(update!.version, '1.0.129');
+  });
+
+  test(
+    'rejects malformed testing feed instead of treating it as no updates',
+    () async {
+      final service = await testingService({'tag_name': 'v$nextTest'});
+      await expectLater(
+        service.findLatest(
+          currentVersion: currentTest,
+          supportedAbis: const ['arm64-v8a'],
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
+  test('test tag and prerelease flag must agree', () async {
+    final service = await testingService([
+      release('1.0.999', prerelease: true),
+      release('1.0.999-test.20261008.1', prerelease: false),
+      release(nextTest),
+    ]);
+    final update = await service.findLatest(
+      currentVersion: currentTest,
+      supportedAbis: const ['arm64-v8a'],
+    );
+    expect(update!.version, nextTest);
+  });
+
+  test('stable channel skips prerelease and draft metadata', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final requested = <String>[];
+    server.listen((request) async {
+      requested.add(request.uri.path);
+      final payload = switch (request.uri.path) {
+        '/test' => release('9.0.0-test.20261008.1'),
+        '/draft' => release('9.0.0', draft: true, prerelease: false),
+        '/tv' => release('9.0.0-tv.20261008.1'),
+        _ => release('1.0.129', prerelease: false),
+      };
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode(payload));
+      await request.response.close();
+    });
+    final service = AppUpdateService(
+      releaseApiUris: [
+        for (final path in ['/test', '/draft', '/tv', '/stable'])
+          Uri.parse('http://127.0.0.1:${server.port}$path'),
+      ],
+    );
+    final update = await service.findLatest(
+      currentVersion: '1.0.127',
+      supportedAbis: const ['arm64-v8a'],
+    );
+    expect(update!.version, '1.0.129');
+    expect(requested, ['/test', '/draft', '/tv', '/stable']);
+  });
+
+  test('verifies complete APK version identity before installation', () {
+    final service = AppUpdateService();
+    const apk = AppUpdateApkInfo(
+      packageName: 'online.dnsai.ivanvpn',
+      version: currentTest,
+      buildNumber: 43151,
+      signatureMatchesInstalled: true,
+      signingCertificateSha256: ['abc123'],
+    );
+    expect(
+      () => service.validateInspectedApk(
+        apk,
+        currentBuildNumber: 43150,
+        expectedVersion: currentTest,
+      ),
+      returnsNormally,
+    );
+    expect(
+      () => service.validateInspectedApk(apk, expectedVersion: nextTest),
+      throwsA(isA<AppUpdateIdentityException>()),
+    );
+  });
+
+  test(
+    'testing cache is isolated between iterations with the same APK name',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var requests = 0;
+      server.listen((request) async {
+        requests += 1;
+        request.response.add([0x50, 0x4B, 0x03, 0x04, requests]);
+        await request.response.close();
+      });
+      final name = 'testing-${DateTime.now().microsecondsSinceEpoch}.apk';
+      final files = <File>[];
+      addTearDown(() async {
+        for (final file in files) {
+          if (await file.exists()) await file.delete();
+        }
+      });
+      final service = AppUpdateService();
+      for (final version in [currentTest, nextTest]) {
+        files.add(
+          await service.download(
+            AppUpdateInfo(
+              version: version,
+              assetName: name,
+              downloadUrl: Uri.parse(
+                'http://127.0.0.1:${server.port}/update.apk',
+              ),
+              size: 5,
+            ),
+            onProgress: (_) {},
+          ),
+        );
+      }
+      expect(requests, 2);
+      expect(files.first.path, isNot(files.last.path));
+      expect(files.last.path, contains(nextTest));
+    },
+  );
+
   test('parses every supported app distribution channel', () {
     expect(
       AppDistributionChannel.fromWireValue('github'),
