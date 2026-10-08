@@ -4,25 +4,40 @@ class DiagnosticRun {
   const DiagnosticRun({
     this.active = false,
     this.available = false,
+    this.startedAt,
     this.endsAt,
+    this.endedAt,
     this.events = 0,
     this.rotatedEvents = 0,
   });
 
   final bool active;
   final bool available;
+  final DateTime? startedAt;
   final DateTime? endsAt;
+  final DateTime? endedAt;
   final int events;
   final int rotatedEvents;
 
+  bool get stoppedEarly =>
+      endedAt != null && endsAt != null && endedAt!.isBefore(endsAt!);
+
   factory DiagnosticRun.fromMap(Map<dynamic, dynamic> value) {
-    final end = value['endsAtMs'];
+    DateTime? date(String key) {
+      final milliseconds = value[key];
+      return milliseconds is int &&
+              milliseconds > 0 &&
+              milliseconds <= 8640000000000000
+          ? DateTime.fromMillisecondsSinceEpoch(milliseconds)
+          : null;
+    }
+
     return DiagnosticRun(
       active: value['active'] == true,
       available: value['available'] == true,
-      endsAt: end is int && end > 0
-          ? DateTime.fromMillisecondsSinceEpoch(end)
-          : null,
+      startedAt: date('startedAtMs'),
+      endsAt: date('endsAtMs'),
+      endedAt: date('endedAtMs'),
       events: value['events'] is int ? value['events'] as int : 0,
       rotatedEvents: value['rotatedEvents'] is int
           ? value['rotatedEvents'] as int

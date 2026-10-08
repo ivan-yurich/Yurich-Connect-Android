@@ -55,7 +55,7 @@ void main() {
       crossEngineRestart: false,
     );
 
-    expect(quic.statusTimeout, const Duration(seconds: 24));
+    expect(quic.statusTimeout, const Duration(seconds: 40));
     expect(quic.maxAttemptsPerPlan, 2);
     expect(quic.retryDelay, const Duration(milliseconds: 500));
     expect(quic.attemptBudget, const Duration(seconds: 65));
@@ -107,6 +107,37 @@ void main() {
         policy.isAttemptBudgetExpired(const Duration(seconds: 65)),
         isTrue,
       );
+    }
+  });
+
+  test('QUIC switch matches cold-start grace but retains bounded retry', () {
+    for (final crossEngine in [false, true]) {
+      final policy = VpnReconnectPolicy.resolve(
+        kind: VpnProfileKind.hysteria2,
+        engine: VpnCoreEngine.singBox,
+        rapidRestart: true,
+        crossEngineRestart: crossEngine,
+      );
+      expect(policy.maxAttemptsPerPlan, 2);
+      expect(policy.retryDelay, const Duration(milliseconds: 500));
+      expect(
+        policy.timeoutWithinAttemptBudget(
+          policy.statusTimeout,
+          elapsed: const Duration(seconds: 24),
+        ),
+        const Duration(seconds: 40),
+      );
+      expect(
+        policy.isAttemptBudgetExpired(const Duration(seconds: 50)),
+        isFalse,
+      );
+      final cold = VpnReconnectPolicy.resolve(
+        kind: VpnProfileKind.hysteria2,
+        engine: VpnCoreEngine.singBox,
+        rapidRestart: false,
+        crossEngineRestart: false,
+      );
+      expect(policy.statusTimeout, cold.statusTimeout);
     }
   });
 

@@ -14,12 +14,14 @@ internal object DiagnosticPolicy {
     private val codes = setOf(
         "process", "session", "network", "quorum", "probe_failure", "restart",
         "alert", "sample", "exit", "flutter_error", "ui", "task_removed", "destroy",
+        "recycle", "recovery_deferred",
     )
     private val numericFields = setOf(
         "pid", "generation", "desired", "tun", "activeNet", "trackedNet", "sameNet",
         "success", "total", "durationMs", "screen", "idle", "pssKb", "heapKb",
         "txBytes", "rxBytes", "battery", "tempTenthsC", "charging", "reason",
         "status", "exitAtMs", "rssKb", "droppedQueue", "line", "api", "instanceMs", "current", "revision",
+        "attempt", "cooldownMs",
     )
     private val labelValues = mapOf(
         "phase" to setOf("Stopped", "Starting", "Connected", "Reconnecting", "Stopping", "Failed"),

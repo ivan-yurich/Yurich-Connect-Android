@@ -17,5 +17,10 @@ internal object VpnRuntimeCorePolicy {
     fun requiresCleanProcess(
         previous: VpnRuntimeCore?,
         incoming: VpnRuntimeCore,
-    ): Boolean = previous != null && previous != incoming
+        previousUsedHysteria2: Boolean = false,
+        incomingUsesHysteria2: Boolean = false,
+    ): Boolean = previous != null && (
+        previous != incoming || previousUsedHysteria2 ||
+            (incoming == VpnRuntimeCore.SingBox && incomingUsesHysteria2)
+        )
 }

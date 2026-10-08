@@ -76,13 +76,12 @@ final class VpnReconnectPolicy {
     final isNaive = kind == VpnProfileKind.naive;
     final isHysteria2 = kind == VpnProfileKind.hysteria2;
 
-    // Android native startup may need about 14 seconds before Started becomes
-    // observable on LTE. Keep the readiness window independent from config
-    // persistence and the asynchronous start command.
-    final statusTimeout = Duration(seconds: isHysteria2 ? 24 : 16);
+    // QUIC readiness can outlive the native 30-second startup grace. Match the
+    // cold-start window, retaining a bounded clean retry if readiness still fails.
+    final statusTimeout = Duration(seconds: isHysteria2 ? 40 : 16);
     final extendedStart = crossEngineRestart || isXray;
-    // LTE may fail the first QUIC session but recover after a clean retry.
-    // Include cleanup between attempts in the budget; final cleanup may exceed it.
+    // Cleanup between attempts consumes this budget. Final cleanup may exceed
+    // it so the next profile cannot overlap a stopping service.
     final attemptBudget = isHysteria2
         ? const Duration(seconds: 65)
         : extendedStart

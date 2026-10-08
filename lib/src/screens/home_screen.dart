@@ -1051,8 +1051,22 @@ class _HomeScreenState extends State<HomeScreen>
               unawaited(_store.saveManualDisconnectRequested(nativeManualStop));
             }
             var recoverUnexpectedStop = false;
+            if (status == AurumVpnStatus.starting) {
+              _trafficFlushTimer?.cancel();
+              _trafficFlushTimer = null;
+              _latestTrafficEvent = null;
+            }
             setState(() {
               _status = status;
+              if (status == AurumVpnStatus.starting) {
+                _uplink = '0 B/s';
+                _downlink = '0 B/s';
+                _sessionTotal = '0 B';
+                _nativeUplinkSpeedBytes = 0;
+                _nativeDownlinkSpeedBytes = 0;
+                _nativeSessionTotalBytes = 0;
+                _lastSessionTrafficBytes = 0;
+              }
               if (nativeManualStop) {
                 _manualDisconnectRequested = true;
                 _autoRecoveryArmed = false;
@@ -1069,9 +1083,9 @@ class _HomeScreenState extends State<HomeScreen>
               } else if (nativeManualStart) {
                 _manualDisconnectRequested = false;
                 _lastError = null;
-                _lastRecoverySource = null;
               }
               if (status == AurumVpnStatus.started) {
+                _clearRecoveredStopMessage();
                 _lastError = null;
                 if (_nativeOwnsTunnelHealth) {
                   _tunnelHealthFailures = 0;
@@ -1126,7 +1140,7 @@ class _HomeScreenState extends State<HomeScreen>
     _trafficSubscription = _vpnEngine.onTrafficUpdate.listen(
       (event) {
         try {
-          if (!mounted) {
+          if (!mounted || _status == AurumVpnStatus.starting) {
             return;
           }
           _latestTrafficEvent = event;
@@ -1252,6 +1266,7 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() {
           _status = status;
           if (status == AurumVpnStatus.started) {
+            _clearRecoveredStopMessage();
             if (!_manualDisconnectRequested) {
               _autoRecoveryArmed = true;
             }
@@ -2884,8 +2899,16 @@ class _HomeScreenState extends State<HomeScreen>
         }
         return AurumVpnStatus.stopping;
       }
-      if (mounted && _status != status) {
-        setState(() => _status = status);
+      if (mounted &&
+          (_status != status ||
+              (status == AurumVpnStatus.started &&
+                  _lastRecoverySource != null))) {
+        setState(() {
+          _status = status;
+          if (status == AurumVpnStatus.started) {
+            _clearRecoveredStopMessage();
+          }
+        });
       }
       return status;
     } on VpnSessionCancelled {
@@ -3031,6 +3054,20 @@ class _HomeScreenState extends State<HomeScreen>
     } finally {
       _statusWatchdogInFlight = false;
     }
+  }
+
+  void _clearRecoveredStopMessage() {
+    if (_lastRecoverySource == null ||
+        _manualDisconnectRequested ||
+        _stoppingByUser) {
+      return;
+    }
+    final profile = _selectedProfile;
+    _message = profile == null
+        ? s.connected
+        : s.connectionProfile(profile.name);
+    _lastError = null;
+    _lastRecoverySource = null;
   }
 
   void _markUnexpectedStop(String source) {
@@ -4651,8 +4688,8 @@ class _HomeScreenState extends State<HomeScreen>
               group: switch (profile.kind) {
                 VpnProfileKind.vlessXhttp => TvProtocolGroup.xhttp,
                 VpnProfileKind.naive => TvProtocolGroup.naive,
-                VpnProfileKind.hysteria || VpnProfileKind.hysteria2 =>
-                  TvProtocolGroup.hysteria,
+                VpnProfileKind.hysteria ||
+                VpnProfileKind.hysteria2 => TvProtocolGroup.hysteria,
                 _ => TvProtocolGroup.vless,
               },
               selected: profile.id == selectedProfileId,

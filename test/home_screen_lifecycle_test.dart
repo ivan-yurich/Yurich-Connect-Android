@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:aurum_vpn/src/app.dart';
+import 'package:aurum_vpn/src/models/vpn_profile.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -94,6 +96,134 @@ void main() {
     });
     await tester.pump();
   }
+
+  Future<void> launchWithProfile(WidgetTester tester) async {
+    const profile = VpnProfile(
+      id: 'qa-profile',
+      name: 'QA Poland',
+      kind: VpnProfileKind.naive,
+      originalInput: 'naive+https://fixture:fixture@127.0.0.1:0',
+      server: '127.0.0.1',
+      port: 0,
+      countryCode: 'PL',
+      countryName: 'Poland',
+    );
+    SharedPreferences.setMockInitialValues({'selectedProfileId': profile.id});
+    FlutterSecureStorage.setMockInitialValues({
+      'profiles.v1': jsonEncode([profile.toJson()]),
+    });
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 10));
+    });
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpWidget(const YurichConnectApp());
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+    await emitConnected(tester);
+    // The stop guard uses DateTime.now(), not the widget test's frame clock.
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 4300)),
+    );
+    await tester.pump();
+  }
+
+  Future<void> emitUnexpectedStop(WidgetTester tester) async {
+    nativeStatus = 'Stopped';
+    platform.status.add({
+      'status': 'Stopped',
+      'manualDisconnectRequested': false,
+    });
+    await tester.pump();
+    expect(find.textContaining('VPN остановлен неожиданно'), findsOneWidget);
+  }
+
+  testWidgets('new startup discards pending traffic from previous connection', (
+    tester,
+  ) async {
+    await launchWithProfile(tester);
+    await emitTraffic(tester);
+    nativeStatus = 'Starting';
+    platform.status.add({
+      'status': 'Starting',
+      'manualDisconnectRequested': false,
+    });
+    await tester.pump();
+    nativeStatus = 'Started';
+    await emitConnected(tester);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('1 MB'), findsNothing);
+    expect(find.text('0 B'), findsOneWidget);
+    await emitTraffic(tester);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('1 MB'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('traffic received during startup cannot overwrite new counters', (
+    tester,
+  ) async {
+    await launchWithProfile(tester);
+    nativeStatus = 'Starting';
+    platform.status.add({
+      'status': 'Starting',
+      'manualDisconnectRequested': false,
+    });
+    await tester.pump();
+    await emitTraffic(tester);
+    nativeStatus = 'Started';
+    await emitConnected(tester);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('1 MB'), findsNothing);
+    expect(find.textContaining('8 KB/s'), findsNothing);
+    expect(find.text('0 B'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('confirmed native recovery clears stale stop message', (
+    tester,
+  ) async {
+    await launchWithProfile(tester);
+    await emitUnexpectedStop(tester);
+    nativeStatus = 'Starting';
+    platform.status.add({
+      'status': 'Starting',
+      'manualDisconnectRequested': false,
+    });
+    await tester.pump();
+    nativeStatus = 'Started';
+    await emitConnected(tester);
+    expect(find.text('Подключение: QA Poland'), findsOneWidget);
+    expect(find.textContaining('VPN остановлен неожиданно'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('status polling clears recovery message without status event', (
+    tester,
+  ) async {
+    await launchWithProfile(tester);
+    await emitUnexpectedStop(tester);
+    nativeStatus = 'Started';
+    await tester.pump(const Duration(seconds: 20));
+    await tester.pump();
+    expect(find.text('Подключение: QA Poland'), findsOneWidget);
+    expect(find.textContaining('VPN остановлен неожиданно'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('ready status preserves unrelated alert message', (tester) async {
+    await launchWithProfile(tester);
+    platform.status.add({'type': 'alert', 'message': 'QA settings notice'});
+    await tester.pump();
+    await emitConnected(tester);
+    expect(find.text('QA settings notice'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('Android stream errors do not overrule native readiness', (
     tester,

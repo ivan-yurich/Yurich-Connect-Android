@@ -23,7 +23,7 @@ class VpnRuntimeCorePolicyTest {
     }
 
     @Test
-    fun `requires a clean process only when the runtime core changes`() {
+    fun `non QUIC configs require a clean process only when the runtime core changes`() {
         assertFalse(
             VpnRuntimeCorePolicy.requiresCleanProcess(null, VpnRuntimeCore.Xray),
         )
@@ -51,5 +51,25 @@ class VpnRuntimeCorePolicyTest {
                 VpnRuntimeCore.SingBox,
             ),
         )
+    }
+
+    @Test
+    fun `fresh hysteria2 process does not restart itself`() {
+        assertFalse(VpnRuntimeCorePolicy.requiresCleanProcess(
+            null, VpnRuntimeCore.SingBox, incomingUsesHysteria2 = true,
+        ))
+    }
+
+    @Test
+    fun `entering and leaving hysteria2 does not reuse native process state`() {
+        assertTrue(VpnRuntimeCorePolicy.requiresCleanProcess(
+            VpnRuntimeCore.SingBox, VpnRuntimeCore.SingBox, incomingUsesHysteria2 = true,
+        ))
+        assertTrue(VpnRuntimeCorePolicy.requiresCleanProcess(
+            VpnRuntimeCore.SingBox, VpnRuntimeCore.SingBox, previousUsedHysteria2 = true,
+        ))
+        assertFalse(VpnRuntimeCorePolicy.requiresCleanProcess(
+            VpnRuntimeCore.Xray, VpnRuntimeCore.Xray, incomingUsesHysteria2 = true,
+        ))
     }
 }

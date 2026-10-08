@@ -216,6 +216,7 @@ class FlutterSingboxPlugin :
     // Session data tracking
     private var sessionStartUplinkTotal = 0L
     private var sessionStartDownlinkTotal = 0L
+    private val singBoxSessionTraffic = SessionTrafficAccumulator()
     private var sessionStartUidTxBytes = -1L
     private var sessionStartUidRxBytes = -1L
     private var lastUidTxBytes = -1L
@@ -1276,9 +1277,7 @@ class FlutterSingboxPlugin :
             sendStatusUpdate(Status.Starting)
             
             // Reset session traffic counters
-            sessionStartUplinkTotal = 0
-            sessionStartDownlinkTotal = 0
-            resetUidTrafficSession()
+            resetSessionTrafficCounters()
             
             // Start the service using proper method
             android.util.Log.e("FlutterSingboxPlugin", "Calling startService method")
@@ -1425,6 +1424,7 @@ class FlutterSingboxPlugin :
                 SimpleConfigManager.setManualDisconnectRequested(false)
                 isStarting = true
                 hasStartupError = false
+                resetSessionTrafficCounters()
                 _vpnStatus.value = Status.Starting
                 sendStatusUpdate(Status.Starting)
                 context.sendBroadcast(reloadIntent)
@@ -1601,6 +1601,7 @@ class FlutterSingboxPlugin :
             "formattedSessionTotal" to "0 B"
         )
         resetUidTrafficSession()
+        singBoxSessionTraffic.reset()
         _vpnStatus.value = Status.Stopped
         sendStatusUpdate(Status.Stopped)
         isShuttingDown = false
@@ -1752,7 +1753,9 @@ class FlutterSingboxPlugin :
         when (status) {
             Status.Started -> {
                 android.util.Log.e("FlutterSingboxPlugin", "Service started, connecting status client")
-                sessionStartedAt = System.currentTimeMillis()
+                if (sessionStartedAt == 0L) {
+                    sessionStartedAt = System.currentTimeMillis()
+                }
                 connectionUiState = connectionUiState.copy(
                     status = ConnectionStatus.Connected,
                     uploadSpeed = "0 B/s",
@@ -1772,10 +1775,6 @@ class FlutterSingboxPlugin :
                     logClient.connect()
                 }
                 
-                // Reset session traffic counters when connection starts
-                sessionStartUplinkTotal = 0
-                sessionStartDownlinkTotal = 0
-                resetUidTrafficSession()
             }
             Status.Stopped -> {
                 android.util.Log.e("FlutterSingboxPlugin", "Service stopped, disconnecting status client")
@@ -1804,6 +1803,7 @@ class FlutterSingboxPlugin :
                     "formattedSessionTotal" to "0 B"
                 )
                 resetUidTrafficSession()
+                singBoxSessionTraffic.reset()
             }
             else -> {
                 // Starting or Stopping - no action needed
@@ -1823,6 +1823,9 @@ class FlutterSingboxPlugin :
     
     // StatusClient.Handler implementation
     override fun onStatusUpdate(status: StatusMessage) {
+        if (!SessionTrafficAccumulator.shouldCollect(_vpnStatus.value, isCurrentXrayRuntime())) {
+            return
+        }
         val uidSample = sampleUidTraffic()
 
         // When first status update comes, set session start values
@@ -1848,6 +1851,7 @@ class FlutterSingboxPlugin :
         val downlinkSpeed = if (status.downlink > 0L) status.downlink else uidSample.rxSpeed
         val uplinkTotal = if (status.uplinkTotal > 0L) status.uplinkTotal else uidSample.txTotal
         val downlinkTotal = if (status.downlinkTotal > 0L) status.downlinkTotal else uidSample.rxTotal
+        val session = singBoxSessionTraffic.observe(sessionUplink, sessionDownlink)
         
         // Update traffic stats
         val stats = currentNetworkSnapshot().toMutableMap()
@@ -1858,16 +1862,16 @@ class FlutterSingboxPlugin :
             "downlinkTotal" to downlinkTotal,
             "connectionsIn" to status.connectionsIn,
             "connectionsOut" to status.connectionsOut,
-            "sessionUplink" to sessionUplink,
-            "sessionDownlink" to sessionDownlink,
-            "sessionTotal" to (sessionUplink + sessionDownlink),
+            "sessionUplink" to session.uplink,
+            "sessionDownlink" to session.downlink,
+            "sessionTotal" to session.total,
             "formattedUplinkSpeed" to TrafficStats.formatBytes(uplinkSpeed) + "/s",
             "formattedDownlinkSpeed" to TrafficStats.formatBytes(downlinkSpeed) + "/s",
             "formattedUplinkTotal" to TrafficStats.formatBytes(uplinkTotal),
             "formattedDownlinkTotal" to TrafficStats.formatBytes(downlinkTotal),
-            "formattedSessionUplink" to TrafficStats.formatBytes(sessionUplink),
-            "formattedSessionDownlink" to TrafficStats.formatBytes(sessionDownlink),
-            "formattedSessionTotal" to TrafficStats.formatBytes(sessionUplink + sessionDownlink)
+            "formattedSessionUplink" to TrafficStats.formatBytes(session.uplink),
+            "formattedSessionDownlink" to TrafficStats.formatBytes(session.downlink),
+            "formattedSessionTotal" to TrafficStats.formatBytes(session.total)
         ))
         
         publishTrafficStats(stats)
@@ -1953,6 +1957,25 @@ class FlutterSingboxPlugin :
         lastUidTxBytes = tx
         lastUidRxBytes = rx
         lastUidTrafficSampleAt = System.currentTimeMillis()
+    }
+
+    private fun resetSessionTrafficCounters() {
+        sessionStartUplinkTotal = 0L
+        sessionStartDownlinkTotal = 0L
+        sessionStartedAt = 0L
+        singBoxSessionTraffic.reset()
+        resetUidTrafficSession()
+        _trafficStats.value = _trafficStats.value.mapValues { (key, value) ->
+            when (key) {
+                "uplinkSpeed", "downlinkSpeed", "uplinkTotal", "downlinkTotal",
+                "sessionUplink", "sessionDownlink", "sessionTotal" -> 0L
+                "connectionsIn", "connectionsOut" -> 0
+                "formattedUplinkSpeed", "formattedDownlinkSpeed" -> "0 B/s"
+                "formattedUplinkTotal", "formattedDownlinkTotal", "formattedSessionUplink",
+                "formattedSessionDownlink", "formattedSessionTotal" -> "0 B"
+                else -> value
+            }
+        }
     }
 
     private fun sampleUidTraffic(): XrayUidTrafficSample {
