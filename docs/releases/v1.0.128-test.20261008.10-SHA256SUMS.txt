@@ -1,0 +1,1 @@
+0c348b56e645e4ab359a77ad9e66cfe49266ca6c7695b7b9924dc3697b712948  YurichConnect-android-arm64-v8a-v1.0.128-test.20261008.10.apk

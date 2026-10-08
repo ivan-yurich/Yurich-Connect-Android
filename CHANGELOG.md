@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.128-test.20261008.10 (Prerelease) - 2026-10-08
+
+- Testing phone builds now discover published Android prereleases from a bounded
+  GitHub release list. Stable builds keep the stable latest feed; TV, Play and
+  soak builds do not gain external phone APK updates.
+- Compare full testing versions numerically, including date and iteration;
+  preserve exact release tags in download URLs and isolate their cache entries.
+- Select only recognized phone APK names compatible with the reported ABI;
+  reject drafts, TV releases and incomplete uploads. Verify the downloaded APK
+  version against the selected release before the existing signature, package
+  and increasing Android versionCode installation guards.
+- Recheck on foreground resume at most once per six monotonic hours, share
+  concurrent lookups and notify once per available version. No background update
+  timer, silent download or unattended installer is added.
+- Bootstrap requires one manual installation of this build: earlier clients
+  cannot discover testing releases through their stable-only updater.
+  Existing protocol readiness failures remain under investigation.
+
 ## 1.0.128-test.20261007.9 (Prerelease) - 2026-10-08
 
 - Published an opt-in ARM64 phone test build, not a replacement for stable
