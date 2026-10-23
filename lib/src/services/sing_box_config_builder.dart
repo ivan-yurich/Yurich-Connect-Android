@@ -13,6 +13,8 @@ enum NaiveOutboundMode { auto, native, httpConnect }
 
 class SingBoxConfigBuilder {
   static const localMixedProxyPort = 20808;
+  static const _encryptedVlessRequiredMessage =
+      'VLESS без TLS/Reality не поддерживается.';
   static const _remoteDnsTag = 'remote-dns-primary';
   static const _localDnsTag = 'local-dns';
   static const _tunIpv4Address = '172.19.0.1/30';
@@ -46,6 +48,10 @@ class SingBoxConfigBuilder {
 
     final proxyOutbound =
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
+    if (profile.kind == VpnProfileKind.vlessTls &&
+        !VlessProfileValidator.hasEnabledTls(proxyOutbound)) {
+      throw UnsupportedError(_encryptedVlessRequiredMessage);
+    }
     proxyOutbound['tag'] = 'proxy';
     final useRemoteDns = _usesRemoteDns(profile, dnsProtectionMode);
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
@@ -104,6 +110,7 @@ class SingBoxConfigBuilder {
 
   String _withHealthProxy(String raw) {
     final config = jsonDecode(raw) as Map<String, dynamic>;
+    _validateRawVlessOutbounds(config);
     final inbounds = (config['inbounds'] as List? ?? const []).toList();
     final existing = inbounds.whereType<Map>().where(
       (inbound) => inbound['listen_port'] == localMixedProxyPort,
@@ -132,6 +139,36 @@ class SingBoxConfigBuilder {
     inbounds.add({..._mixedInbound(), 'tag': tag});
     config['inbounds'] = inbounds;
     return jsonEncode(config);
+  }
+
+  void _validateRawVlessOutbounds(Map<String, dynamic> config) {
+    final outbounds = config['outbounds'];
+    if (outbounds is! List) {
+      return;
+    }
+
+    for (final item in outbounds.whereType<Map>()) {
+      final outbound = item.cast<String, dynamic>();
+      final type = outbound['type']?.toString().trim().toLowerCase();
+      if (type == 'vless') {
+        if (!VlessProfileValidator.hasEnabledTls(outbound)) {
+          throw UnsupportedError(_encryptedVlessRequiredMessage);
+        }
+        continue;
+      }
+
+      final protocol = outbound['protocol']?.toString().trim().toLowerCase();
+      if (protocol != 'vless') {
+        continue;
+      }
+      final streamSettings = outbound['streamSettings'];
+      final security = streamSettings is Map
+          ? streamSettings['security']?.toString().trim().toLowerCase()
+          : null;
+      if (security != 'tls' && security != 'reality') {
+        throw UnsupportedError(_encryptedVlessRequiredMessage);
+      }
+    }
   }
 
   Map<String, dynamic> _tunInbound({

@@ -34,6 +34,8 @@ class ProfileImporter {
   static const maxImportedProfiles = 1000;
   static const _maxRedirects = 5;
   static const _responseTimeout = Duration(seconds: 20);
+  static const _encryptedVlessRequiredMessage =
+      'VLESS без TLS/Reality не поддерживается.';
 
   static final _linkPattern = RegExp(
     "(?:vless://|naive\\+https://|naive://|hy2://|hysteria2://|hysteria://)[^\\s<>\"']+",
@@ -610,6 +612,7 @@ class ProfileImporter {
         if (decoded.containsKey('inbounds') &&
             decoded.containsKey('outbounds')) {
           final outbounds = decoded['outbounds'];
+          _validateVlessOutbounds(outbounds);
           if (outbounds is List &&
               outbounds.whereType<Map>().any(
                 (outbound) =>
@@ -674,6 +677,9 @@ class ProfileImporter {
     }
 
     if (type == 'vless') {
+      if (!VlessProfileValidator.hasEnabledTls(normalized)) {
+        throw const ProfileImportException(_encryptedVlessRequiredMessage);
+      }
       final tls = _asMap(normalized['tls']);
       final reality = _asMap(tls?['reality']);
       final hasReality =
@@ -748,6 +754,7 @@ class ProfileImporter {
       };
 
       final profiles = <VpnProfile>[];
+      ProfileImportException? firstProfileError;
       for (final config in configs) {
         final outbounds = config['outbounds'];
         if (outbounds is! List) {
@@ -757,14 +764,19 @@ class ProfileImporter {
         for (final item in outbounds.whereType<Map>()) {
           final outbound = item.cast<String, dynamic>();
           if ((outbound['protocol'] as String?)?.toLowerCase() == 'vless') {
-            profiles.add(_profileFromXrayVless(config, outbound));
+            try {
+              profiles.add(_profileFromXrayVless(config, outbound));
+            } on ProfileImportException catch (error) {
+              firstProfileError ??= error;
+            }
           }
         }
       }
+      if (profiles.isEmpty && firstProfileError != null) {
+        throw firstProfileError;
+      }
       return profiles;
     } on FormatException {
-      return const [];
-    } on ProfileImportException {
       return const [];
     }
   }
@@ -797,6 +809,7 @@ class ProfileImporter {
     final stream = _asMap(outbound['streamSettings']) ?? const {};
     final network = (stream['network'] as String?) ?? 'tcp';
     final security = (stream['security'] as String?) ?? 'none';
+    _requireEncryptedVlessSecurity(security);
     final reality = _asMap(stream['realitySettings']);
     final tls = _asMap(stream['tlsSettings']);
     final name = (config['remarks'] as String?) ?? address;
@@ -885,7 +898,8 @@ class ProfileImporter {
     final profiles = <VpnProfile>[];
     final errors = <String>[];
 
-    for (final link in links) {
+    for (var index = 0; index < links.length; index += 1) {
+      final link = links[index];
       try {
         final lower = link.toLowerCase();
         if (lower.startsWith('vless://')) {
@@ -900,7 +914,7 @@ class ProfileImporter {
           profiles.add(_parseHysteria(link));
         }
       } on Object catch (error) {
-        errors.add('$link: $error');
+        errors.add('Профиль ${index + 1}: $error');
       }
     }
 
@@ -919,6 +933,7 @@ class ProfileImporter {
 
     final query = _query(uri);
     final security = (query['security'] ?? '').toLowerCase();
+    _requireEncryptedVlessSecurity(security);
     final transportType = _vlessTransportType(query);
     final port = uri.hasPort ? uri.port : 443;
     final name = _displayName(uri.fragment, fallback: uri.host);
@@ -1248,6 +1263,7 @@ class ProfileImporter {
     required String security,
     required String? transportType,
   }) {
+    _requireEncryptedVlessSecurity(security);
     final type = (transportType ?? 'tcp').toLowerCase();
     if (type == 'xhttp' || type == 'splithttp') {
       return VpnProfileKind.vlessXhttp;
@@ -1269,6 +1285,35 @@ class ProfileImporter {
       return 'mkcp';
     }
     return null;
+  }
+
+  void _validateVlessOutbounds(Object? value) {
+    if (value is! List) {
+      return;
+    }
+    for (final item in value.whereType<Map>()) {
+      final outbound = item.cast<String, dynamic>();
+      final type = outbound['type']?.toString().trim().toLowerCase();
+      if (type == 'vless') {
+        if (!VlessProfileValidator.hasEnabledTls(outbound)) {
+          throw const ProfileImportException(_encryptedVlessRequiredMessage);
+        }
+        continue;
+      }
+
+      final protocol = outbound['protocol']?.toString().trim().toLowerCase();
+      if (protocol == 'vless') {
+        final stream = _asMap(outbound['streamSettings']);
+        _requireEncryptedVlessSecurity(stream?['security']?.toString());
+      }
+    }
+  }
+
+  void _requireEncryptedVlessSecurity(String? value) {
+    final security = value?.trim().toLowerCase() ?? '';
+    if (security != 'tls' && security != 'reality') {
+      throw const ProfileImportException(_encryptedVlessRequiredMessage);
+    }
   }
 
   Map<String, dynamic> _unsupportedTransportOptions(Map<String, String> query) {

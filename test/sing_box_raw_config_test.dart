@@ -15,6 +15,69 @@ String buildRaw(Map<String, dynamic> config) => SingBoxConfigBuilder().build(
 );
 
 void main() {
+  test('rejects legacy raw sing-box VLESS without enabled TLS', () {
+    for (final outbound in [
+      {'type': 'vless', 'tag': 'proxy'},
+      {
+        'type': 'vless',
+        'tag': 'proxy',
+        'tls': {'enabled': false},
+      },
+    ]) {
+      expect(
+        () => buildRaw({
+          'inbounds': const [],
+          'outbounds': [outbound],
+        }),
+        throwsA(
+          isA<UnsupportedError>().having(
+            (error) => error.toString(),
+            'message',
+            contains('TLS/Reality'),
+          ),
+        ),
+      );
+    }
+  });
+
+  test('accepts legacy raw sing-box VLESS with enabled TLS', () {
+    final original = {
+      'inbounds': <Object>[],
+      'outbounds': [
+        {
+          'type': 'vless',
+          'tag': 'proxy',
+          'tls': {'enabled': true},
+        },
+      ],
+    };
+
+    final config = jsonDecode(buildRaw(original)) as Map<String, dynamic>;
+    expect(config['outbounds'], original['outbounds']);
+    expect(config['inbounds'], hasLength(1));
+  });
+
+  test('rejects legacy raw Xray VLESS without TLS or Reality', () {
+    expect(
+      () => buildRaw({
+        'inbounds': const [],
+        'outbounds': [
+          {
+            'protocol': 'vless',
+            'streamSettings': {'security': 'none'},
+          },
+        ],
+      }),
+      throwsA(
+        isA<UnsupportedError>().having(
+          (error) => error.toString(),
+          'message',
+          contains('TLS/Reality'),
+        ),
+      ),
+    );
+  });
+
   test('adds loopback readiness inbound without changing user routes', () {
     final original = {
       'inbounds': [

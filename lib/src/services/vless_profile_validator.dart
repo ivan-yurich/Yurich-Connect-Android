@@ -17,6 +17,19 @@ class VlessProfileValidator {
 
   static bool get isSupportedRealityTcpOnly => true;
 
+  static bool hasEnabledTls(Map<String, dynamic>? outbound) {
+    final tls = _map(outbound?['tls']);
+    final enabled = tls?['enabled'];
+    return enabled == true ||
+        (enabled is String &&
+            const {
+              '1',
+              'true',
+              'yes',
+              'on',
+            }.contains(enabled.trim().toLowerCase()));
+  }
+
   static VlessValidationResult validate(VpnProfile profile) {
     if (profile.kind != VpnProfileKind.vlessReality) {
       return const VlessValidationResult(ok: true);

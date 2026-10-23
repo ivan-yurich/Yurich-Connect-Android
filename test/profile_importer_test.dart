@@ -48,6 +48,41 @@ void main() {
     expect(proxy['tls']['server_name'], 'www.example.com');
   });
 
+  test(
+    'rejects plain VLESS links without exposing profile credentials',
+    () async {
+      const credential = '22222222-2222-4222-8222-222222222222';
+      for (final link in [
+        'vless://$credential@example.com:443?type=tcp#MissingSecurity',
+        'vless://$credential@example.com:443?security=none&type=tcp#Plain',
+        'vless://$credential@example.com:443?security=none&type=xhttp#PlainXhttp',
+        'vless://$credential@example.com:443?security=none&type=mkcp#PlainMkcp',
+      ]) {
+        await expectLater(
+          ProfileImporter().importFromText(link),
+          throwsA(
+            isA<ProfileImportException>()
+                .having(
+                  (error) => error.message,
+                  'message',
+                  contains('TLS/Reality'),
+                )
+                .having(
+                  (error) => error.message,
+                  'credential',
+                  isNot(contains(credential)),
+                )
+                .having(
+                  (error) => error.message,
+                  'endpoint',
+                  isNot(contains('example.com')),
+                ),
+          ),
+        );
+      }
+    },
+  );
+
   test('normalizes VLESS Reality defaults for stable Android config', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&pbk=abc123#Reality';
@@ -106,7 +141,7 @@ void main() {
 
   test('imports VLESS mKCP link as unsupported legacy profile', () async {
     const link =
-        'vless://11111111-1111-4111-8111-111111111111@example.com:8446?security=none&type=mkcp&headerType=wechat-video#MKCP';
+        'vless://11111111-1111-4111-8111-111111111111@example.com:8446?security=tls&type=mkcp&headerType=wechat-video#MKCP';
 
     final profile = (await ProfileImporter().importFromText(link)).first;
 
@@ -937,6 +972,128 @@ void main() {
     },
   );
 
+  test('imports encrypted standalone sing-box VLESS outbound', () async {
+    final payload = jsonEncode({
+      'type': 'vless',
+      'tag': 'proxy',
+      'server': 'example.com',
+      'server_port': 443,
+      'uuid': '11111111-1111-4111-8111-111111111111',
+      'tls': {'enabled': true, 'server_name': 'example.com'},
+    });
+
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+    final config =
+        jsonDecode(SingBoxConfigBuilder().build(profile))
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(proxy['tls']['enabled'], isTrue);
+  });
+
+  test('rejects plain VLESS in sing-box JSON forms', () async {
+    const plainOutbound = {
+      'type': 'vless',
+      'tag': 'proxy',
+      'server': 'example.com',
+      'server_port': 443,
+      'uuid': '22222222-2222-4222-8222-222222222222',
+    };
+    for (final config in [
+      plainOutbound,
+      {
+        ...plainOutbound,
+        'tls': {'enabled': false},
+      },
+      {
+        'inbounds': [],
+        'outbounds': [plainOutbound],
+      },
+    ]) {
+      await expectLater(
+        ProfileImporter().importFromText(jsonEncode(config)),
+        throwsA(
+          isA<ProfileImportException>().having(
+            (error) => error.message,
+            'message',
+            contains('TLS/Reality'),
+          ),
+        ),
+      );
+    }
+  });
+
+  test('rejects plain VLESS in Xray JSON forms', () async {
+    for (final security in <String?>[null, 'none']) {
+      final streamSettings = <String, dynamic>{'network': 'tcp'};
+      if (security != null) {
+        streamSettings['security'] = security;
+      }
+      final payload = jsonEncode([
+        {
+          'remarks': 'Plain VLESS',
+          'outbounds': [
+            {
+              'protocol': 'vless',
+              'settings': {
+                'vnext': [
+                  {
+                    'address': 'example.com',
+                    'port': 443,
+                    'users': [
+                      {'id': '22222222-2222-4222-8222-222222222222'},
+                    ],
+                  },
+                ],
+              },
+              'streamSettings': streamSettings,
+            },
+          ],
+        },
+      ]);
+
+      await expectLater(
+        ProfileImporter().importFromText(payload),
+        throwsA(
+          isA<ProfileImportException>().having(
+            (error) => error.message,
+            'message',
+            contains('TLS/Reality'),
+          ),
+        ),
+      );
+    }
+  });
+
+  test('builder rejects a legacy plain VLESS TLS profile', () {
+    const profile = VpnProfile(
+      id: 'legacy-plain-vless',
+      name: 'Legacy plain VLESS',
+      kind: VpnProfileKind.vlessTls,
+      originalInput: '',
+      server: 'example.com',
+      port: 443,
+      outbound: {
+        'type': 'vless',
+        'server': 'example.com',
+        'server_port': 443,
+        'uuid': '22222222-2222-4222-8222-222222222222',
+      },
+    );
+
+    expect(
+      () => SingBoxConfigBuilder().build(profile),
+      throwsA(
+        isA<UnsupportedError>().having(
+          (error) => '$error',
+          'message',
+          contains('TLS/Reality'),
+        ),
+      ),
+    );
+  });
+
   test('rejects legacy VLESS Reality outbounds without Reality fields', () {
     const profile = VpnProfile(
       id: 'legacy-vless',
@@ -1194,7 +1351,7 @@ void main() {
     <a href="naive+https://user:pass@net-it.pro:443#naive">naive</a>
     <a href="hy2://secret@net-it.pro:8443/?sni=net-it.pro&amp;obfs=salamander&amp;obfs-password=obfs-secret#ivan-hy2">hy2</a>
     <a href="vless://11111111-1111-4111-8111-111111111111@net-it.pro:8444?security=reality&amp;type=tcp&amp;flow=xtls-rprx-vision&amp;sni=www.microsoft.com&amp;fp=chrome&amp;pbk=abc123&amp;sid=01#ivan-reality">reality</a>
-    <a href="vless://11111111-1111-4111-8111-111111111111@net-it.pro:8446?security=none&amp;type=mkcp#ivan-mkcp">mkcp</a>
+    <a href="vless://11111111-1111-4111-8111-111111111111@net-it.pro:8446?security=tls&amp;type=mkcp#ivan-mkcp">mkcp</a>
     <a href="vless://11111111-1111-4111-8111-111111111111@net-it.pro:8447?security=tls&amp;type=grpc&amp;serviceName=vless-grpc&amp;sni=net-it.pro&amp;fp=chrome#ivan-grpc">grpc</a>
   </body>
 </html>
