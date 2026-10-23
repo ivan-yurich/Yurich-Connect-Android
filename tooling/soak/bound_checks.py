@@ -39,6 +39,34 @@ class BoundChecks:
             time.sleep(min(2, max(0, deadline - time.monotonic())))
         raise ControlQueueNotQuiescent()
 
+    def wait_for_native_quiescence(self, *, expected_network, timeout_s=150):
+        if expected_network not in {"wifi", "cellular"}:
+            raise ValueError("invalid_network")
+        deadline = time.monotonic() + timeout_s
+        transport_bit = 8 if expected_network == "wifi" else 16
+        while time.monotonic() < deadline:
+            status, error = self.runner.query_status(timeout_s=5)
+            native, native_error = read_native_snapshot(self.runner, version=3)
+            idle = bool(not error and isinstance(status, dict) and status.get("ok") is True
+                        and status.get("busy") is False and status.get("queueActive") is False)
+            settled = bool(native and not native_error and native.phase in {"Stopped", "Failed"})
+            if native and native.ready and not native_error:
+                settled = (native.same_net == 1 and native.active_net >= 0
+                           and native.active_net & transport_bit != 0)
+            if (not native and native_error in {"vpn_process_absent", "native_snapshot_invalid_or_absent"}
+                    and isinstance(status, dict) and status.get("vpnStatus") == "Stopped"):
+                system = self.runner.vpn_state()
+                settled = (system.observed and system.runtime == "unknown" and not system.validated)
+            self.runner.append_jsonl("native-quiescence.jsonl", {
+                "idle": idle, "settled": settled, "expected_network": expected_network,
+                "phase": native.phase if native else None, "native_error": native_error,
+                "elapsed_s": self.runner.elapsed_s(),
+            })
+            if idle and settled and time.monotonic() <= deadline:
+                return True
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        return False
+
     def command(self, profile, command="activate", timeout_s=90):
         r = self.runner
         self.control_verified = False
@@ -58,8 +86,8 @@ class BoundChecks:
             # Only control boundaries may bootstrap Flutter. Never do this in sample().
             r.shell("input", "keyevent", "KEYCODE_HOME")
             r.shell("input", "keyevent", "KEYCODE_SLEEP")
-        binding_error = "command_failed"
         command_ok = not error and payload is not None and payload.get("ok") is True
+        binding_error = "native_readiness_timeout" if command_ok else "command_failed"
         if command_ok:
             deadline = started + timeout_s
             while time.monotonic() < deadline:

@@ -19,6 +19,18 @@ import kotlin.concurrent.thread
 
 class SoakControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val command = intent.getStringExtra(SoakControlCommandHandler.EXTRA_COMMAND)
+            ?.trim()?.lowercase()
+        if (command == PassiveSoakController.COMMAND_EXPORT) {
+            // A started service owns the bounded export lifecycle; do not keep
+            // a BroadcastReceiver pending while ZIP I/O is in progress.
+            runCatching {
+                context.startService(Intent(intent).setClass(context, SoakControlService::class.java))
+            }.onFailure { error ->
+                Log.e(TAG, "QA export dispatch failed type=${error.javaClass.simpleName}")
+            }
+            return
+        }
         val pendingResult = goAsync()
         val appContext = context.applicationContext
         thread(name = "yurich-soak-control") {
@@ -39,8 +51,15 @@ class SoakControlReceiver : BroadcastReceiver() {
 
 internal object SoakControlCommandHandler {
     fun handle(context: Context, intent: Intent) {
+        val command = intent.getStringExtra(EXTRA_COMMAND)?.trim()?.lowercase()
+        if (PassiveSoakController.supports(command)) {
+            // Passive diagnostics must not initialize Flutter or keep the main
+            // process resident; the existing VPN process samples opportunistically.
+            PassiveSoakController.handle(context, intent)
+            return
+        }
         Application.initializeBaseIfNeeded(context)
-        when (intent.getStringExtra(EXTRA_COMMAND)?.trim()?.lowercase()) {
+        when (command) {
             COMMAND_ACTIVATE -> activate(context, intent)
             COMMAND_STOP -> {
                 // Keep QA-initiated stops semantically identical to a user stop.
@@ -128,15 +147,15 @@ internal object SoakControlCommandHandler {
     }
 
     private const val TAG = "SoakControlCommandHandler"
-        private const val EXTRA_COMMAND = "command"
-        private const val EXTRA_CONFIG_GZIP_BASE64 = "configGzipB64"
-        private const val EXTRA_PROFILE_LABEL = "profileLabel"
-        private const val COMMAND_ACTIVATE = "activate"
-        private const val COMMAND_STOP = "stop"
-        private const val COMMAND_RESTART = "restart"
-        private const val COMMAND_STATUS = "status"
-        private const val MAX_COMPRESSED_BYTES = 256 * 1024
-        private const val MAX_CONFIG_BYTES = 1024 * 1024
-        private const val MAX_LABEL_LENGTH = 96
-        private const val BUFFER_SIZE = 8192
+    internal const val EXTRA_COMMAND = "command"
+    private const val EXTRA_CONFIG_GZIP_BASE64 = "configGzipB64"
+    private const val EXTRA_PROFILE_LABEL = "profileLabel"
+    private const val COMMAND_ACTIVATE = "activate"
+    private const val COMMAND_STOP = "stop"
+    private const val COMMAND_RESTART = "restart"
+    private const val COMMAND_STATUS = "status"
+    private const val MAX_COMPRESSED_BYTES = 256 * 1024
+    private const val MAX_CONFIG_BYTES = 1024 * 1024
+    private const val MAX_LABEL_LENGTH = 96
+    private const val BUFFER_SIZE = 8192
 }

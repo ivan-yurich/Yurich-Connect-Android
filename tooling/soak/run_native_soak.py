@@ -425,14 +425,37 @@ class NativeSoak:
         self.wait(30)
         self.sample("preflight_final")
 
+    def wait_restore_quiescent(self, timeout_s=150):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            status, status_error = self.r.query_status(timeout_s=8)
+            native, native_error = read_native_snapshot(self.r, version=3)
+            idle = bool(not status_error and status and status.get("ok") is True
+                        and status.get("busy") is False and status.get("queueActive") is False)
+            settled = bool((not native_error and native and native.phase in {"Connected", "Stopped", "Failed"})
+                           or (native_error == "vpn_process_absent" and idle
+                               and status.get("vpnStatus") == "Stopped"))
+            self.r.append_jsonl("restore-readiness.jsonl", {
+                "timestamp_utc": utc_now(), "idle": idle, "settled": settled,
+                "native_phase": native.phase if native else None,
+            })
+            if idle and settled and time.monotonic() < deadline:
+                return True
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        return False
+
     def restore(self):
         if not self.r.radio_baseline_observed:
             return
         self.r.restore_device_state()
         if self.initial_profile is not None and self.r.device_available():
             self.r.current_network = "wifi" if self.r.initial_wifi_enabled else "cellular"
+            # Radio flags change before the VPN finishes its network handover.
+            # Do not dispatch profile control into that still-running transition.
+            if not self.wait_restore_quiescent():
+                self.report["restore_wait_timed_out"] = True
+                return
             control = self.checks.command(self.initial_profile)
-            self.r.restore_device_state()
             self.report["restore_payload"] = self.checks.sample("restore_verification")
             self.report["profile_restored"] = control["binding_verified"]
             self.report["radios_restored"] = (self.r.detect_wifi_enabled() == self.r.initial_wifi_enabled

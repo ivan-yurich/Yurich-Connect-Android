@@ -52,6 +52,8 @@ def main():
                 raise RuntimeError("radio_switch_failed")
             runner.current_network = network
             time.sleep(5)
+            if not checks.wait_for_native_quiescence(expected_network=network):
+                raise RuntimeError("network_transition_not_quiescent")
             for profile in profiles:
                 runner.current_profile = profile
                 for command in ("activate", "reconnect"):
@@ -74,12 +76,15 @@ def main():
         runner.shell("svc", "data", "enable" if baseline_data else "disable")
         runner.shell("svc", "wifi", "enable" if baseline_wifi else "disable")
         time.sleep(5)
+        runner.current_network = "wifi" if baseline_wifi else "cellular"
         status, error = runner.query_status(timeout_s=8)
-        if not error and status and not status.get("busy") and not status.get("queueActive"):
+        if (not error and status and not status.get("busy") and not status.get("queueActive")
+                and checks.wait_for_native_quiescence(expected_network=runner.current_network)):
             restore_profile = next(p for p in inventory if p.token == args.restore_profile)
-            runner.current_network = "wifi" if baseline_wifi else "cellular"
             restored = checks.command(restore_profile)
-            report["profile_restored"] = restored["binding_verified"]
+            restore_probe = checks.sample("focused_restore")
+            report["restore_probe"] = restore_probe
+            report["profile_restored"] = restored["binding_verified"] and restore_probe["pass"]
         else:
             report["profile_restored"] = False
         report["radios_restored"] = (runner.detect_wifi_enabled() == baseline_wifi

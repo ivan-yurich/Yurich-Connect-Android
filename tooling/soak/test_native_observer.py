@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from tooling.soak.native_observer import counter_delta, native_payload_probe, parse_snapshot, read_native_snapshot
-from tooling.soak.run_24h_matrix import ProbeResult
+from tooling.soak.native_profile_binding import NativeProfileBinding
+from tooling.soak.run_24h_matrix import ProbeResult, Profile
 from tooling.soak.run_network_recovery_checks import result_exit_code, wait_for_payload
 
 
@@ -94,6 +95,35 @@ class NativeObserverTests(unittest.TestCase):
             with patch("tooling.soak.native_observer.read_native_snapshot",
                        side_effect=[(before, ""), (post, "")]):
                 self.assertEqual(native_payload_probe(runner, "test")["pass"], expected)
+
+    def test_successful_https_with_wrong_runtime_is_not_a_network_failure(self):
+        native = parse_snapshot(broadcast(), "q1", "42")
+        before = replace(native, runtime="singbox")
+        after = replace(before, tx=2048, rx=4096, elapsed=200)
+        runner = SimpleNamespace(current_profile=SimpleNamespace(runtime="xray"),
+                                 last_probe_had_traffic=False,
+                                 probe_tick=Mock(return_value=(ProbeResult(True, True), ProbeResult(True, True))))
+        with patch("tooling.soak.native_observer.read_native_snapshot", side_effect=[(before, ""), (after, "")]):
+            row = native_payload_probe(runner, "test")
+        self.assertTrue(row["https_ok"])
+        self.assertFalse(row["pass"])
+        self.assertEqual(row["error"], "unexpected_runtime")
+
+    def test_wrong_config_and_changing_session_have_explicit_diagnostics(self):
+        native = parse_snapshot(broadcast(), "q1", "42")
+        profile = Profile("p0001", "vlessXhttp", "xray")
+        binding = NativeProfileBinding(profile, "a" * 64)
+        before = replace(native, format_version=3, config_fingerprint="b" * 64)
+        for after, expected in ((replace(before, elapsed=200, tx=2048, rx=4096), "unexpected_profile_config"),
+                                (replace(before, generation=4), "native_session_changed"),
+                                (replace(before, config_fingerprint="c" * 64), "config_changed_during_probe"),
+                                (replace(before, phase="Reconnecting"), "tunnel_not_ready")):
+            runner = SimpleNamespace(current_profile=profile, last_probe_had_traffic=True,
+                                     probe_tick=Mock(return_value=(ProbeResult(True, True), ProbeResult(True, True))))
+            with patch("tooling.soak.native_observer.read_native_snapshot", side_effect=[(before, ""), (after, "")]):
+                row = native_payload_probe(runner, "test", binding=binding)
+            self.assertFalse(row["pass"])
+            self.assertEqual(row["error"], expected)
 
     def test_one_good_probe_cannot_hide_failure_inside_sustained_window(self):
         clock = [0.0]

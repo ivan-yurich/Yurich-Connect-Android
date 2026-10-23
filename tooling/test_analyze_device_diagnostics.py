@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from zipfile import ZipFile
 
-from tooling.analyze_device_diagnostics import analyze
+from tooling.analyze_device_diagnostics import analyze, network_transport
 
 
 class DiagnosticsAnalysisTest(unittest.TestCase):
@@ -69,6 +69,105 @@ class DiagnosticsAnalysisTest(unittest.TestCase):
         self.assertEqual(report["profile_quorums"]["opaque_first"]["passed"], 1)
         self.assertEqual(report["profile_quorums"]["opaque_second"]["failed"], 1)
         self.assertEqual(set(report["profile_protocols"].values()), {"hysteria2"})
+
+    def test_network_transport_is_reported_without_network_identity(self):
+        cellular, wifi = self.quorum(0), self.quorum(3)
+        cellular["data"]["trackedNet"] = 1 | 2 | 16 | 32 | 64
+        wifi["data"]["trackedNet"] = 1 | 2 | 8 | 32 | 64
+        report = analyze(self.archive([cellular, wifi]))
+        self.assertEqual(report["quorum_transports"]["cellular"]["failed"], 1)
+        self.assertEqual(report["quorum_transports"]["wifi"]["passed"], 1)
+
+    def test_network_transport_handles_absent_unknown_and_multiple(self):
+        self.assertEqual(network_transport(-1), "unknown")
+        self.assertEqual(network_transport(0), "none")
+        self.assertEqual(network_transport(1), "unknown")
+        self.assertEqual(network_transport(1 | 2 | 8 | 16), "multiple")
+
+    def test_probe_failures_correlate_by_process_instance_and_probe_id(self):
+        quorum = self.quorum(2)
+        quorum["data"]["probeId"] = 7
+        failures = [
+            {"wallMs": 1900 + index, "elapsedMs": 900 + index,
+             "event": "probe_failure", "data": {
+                 "pid": 10, "instanceMs": 10, "probeId": probe_id, "stage": "tls",
+                 "failure": "cancelled" if index == 0 else "tls",
+             }}
+            for index, probe_id in enumerate([7, 7, 8])
+        ]
+        uncorrelated = {"wallMs": 1903, "elapsedMs": 903,
+                        "event": "probe_failure", "data": {"stage": "http"}}
+        report = analyze(self.archive(failures + [uncorrelated, quorum]))
+        self.assertEqual(report["probe_attempts_with_id"], 1)
+        self.assertEqual(report["probe_failures_for_completed_attempts"], 2)
+        self.assertEqual(report["probe_failures_without_completed_attempt"], 1)
+        self.assertEqual(report["uncorrelated_probe_failures"], 1)
+        self.assertEqual(report["probe_failure_reasons"], {
+            "cancelled": 1, "tls": 2, "unknown": 1,
+        })
+        self.assertEqual(report["endpoint_failures_excluding_cancellation"], 3)
+
+    def test_counter_integrity_does_not_confuse_new_generation_with_reset(self):
+        def counter(native, display, generation, elapsed, instance=100):
+            return {"wallMs": 2000 + elapsed, "elapsedMs": elapsed, "event": "counter",
+                    "data": {"pid": 10, "nativeSessionBytes": native,
+                             "displayBytes": display, "uiGeneration": generation,
+                             "instanceMs": instance}}
+
+        report = analyze(self.archive([
+            counter(100, 100, 1, 1000),
+            counter(200, 190, 1, 1001),
+            counter(150, 150, 1, 1002),
+            counter(0, 0, 2, 1003),
+        ]))
+        self.assertEqual(report["counter_integrity"], {
+            "events": 4,
+            "status": "mismatch",
+            "native_display_mismatches": 1,
+            "same_generation_resets": 1,
+            "stable_identity_events": 4,
+            "reset_tracking_complete": True,
+        })
+
+    def test_counter_integrity_does_not_merge_reused_pid_and_generation(self):
+        def counter(native, instance, elapsed):
+            return {"wallMs": 2000 + elapsed, "elapsedMs": elapsed, "event": "counter",
+                    "data": {"pid": 10, "instanceMs": instance,
+                             "nativeSessionBytes": native, "displayBytes": native,
+                             "uiGeneration": 1}}
+
+        report = analyze(self.archive([
+            counter(200, 100, 1000),
+            counter(0, 200, 1001),
+            counter(50, 200, 1002),
+        ]))
+        self.assertEqual(report["counter_integrity"], {
+            "events": 3,
+            "status": "matched",
+            "native_display_mismatches": 0,
+            "same_generation_resets": 0,
+            "stable_identity_events": 3,
+            "reset_tracking_complete": True,
+        })
+
+    def test_legacy_counter_identity_does_not_claim_a_reset(self):
+        def counter(native, elapsed):
+            return {"wallMs": 2000 + elapsed, "elapsedMs": elapsed, "event": "counter",
+                    "data": {"pid": 10, "nativeSessionBytes": native,
+                             "displayBytes": native, "uiGeneration": 1}}
+
+        report = analyze(self.archive([
+            counter(200, 1000),
+            counter(0, 1001),
+        ]))
+        self.assertEqual(report["counter_integrity"], {
+            "events": 2,
+            "status": "matched_legacy_identity_unverified",
+            "native_display_mismatches": 0,
+            "same_generation_resets": 0,
+            "stable_identity_events": 0,
+            "reset_tracking_complete": False,
+        })
 
 
 if __name__ == "__main__":

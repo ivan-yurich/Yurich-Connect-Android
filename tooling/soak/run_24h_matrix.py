@@ -4951,11 +4951,13 @@ class SoakRunner:
         result, error = self.shell("dumpsys", "package", PACKAGE, timeout=45)
         if error or result is None:
             return {"version_name": "unknown", "version_code": -1}
-        name_match = re.search(r"\bversionName=([A-Za-z0-9_.-]+)", result.stdout)
+        name_match = re.search(r"\bversionName=([^\s]+)", result.stdout)
         code_match = re.search(r"\bversionCode=(\d+)", result.stdout)
         return {
             "version_name": (
-                safe_enum(name_match.group(1)) if name_match else "unknown"
+                name_match.group(1)
+                if name_match and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}", name_match.group(1))
+                else "unknown"
             ),
             "version_code": int(code_match.group(1)) if code_match else -1,
         }

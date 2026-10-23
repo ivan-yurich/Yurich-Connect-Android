@@ -84,6 +84,17 @@ samples. Probes that finish after the scenario deadline cannot turn it into PASS
 
 ## HTTP diagnostics
 
+For one profile's screen-off Wi-Fi/LTE handovers and 30s outage, use
+`run_protocol_recovery`. Start from a healthy, config-bound VPN with the screen
+off. This bounded run restores the initial profile/radios and preserves failures.
+It also records sequential curl measurements of the native watchdog's exact
+endpoints through its loopback proxy. These are diagnostics, not recovery PASS
+and not proof of a TLS/DNS cause. The result is `preflight_pass`, never 24h PASS.
+
+```powershell
+python -m tooling.soak.run_protocol_recovery --adb adb --serial $env:ANDROID_SERIAL --profile p0006 --out 'build/qa/protocol-recovery-new'
+```
+
 `http_diagnostics.py` preserves only allowlisted curl exit/status/size/TLS-result
 and timing fields. It never stores response bodies, headers, URLs, IP addresses,
 certificate contents or stderr. Curl must support `--write-out %{json}`; missing
@@ -161,6 +172,19 @@ control boundaries can bootstrap a missing Flutter control receiver; fallback
 counts are recorded. Screen-off is not proof of frozen Flutter or battery-only
 Doze, especially with ADB and charging attached. A v2 snapshot cannot qualify
 profile ownership. Missing GUI counters do not fail native connectivity.
+
+Focused matrix setup waits read-only for an idle Flutter queue and a settled
+native lifecycle on the requested transport before dispatching profile controls.
+`native-quiescence.jsonl` records this separately from measured recovery: it is
+not handover coverage or proof of an external payload. A stopped resident process
+may no longer have a snapshot receiver; require an observed Stopped status and
+absence of a recognized validated VPN before accepting that setup boundary.
+
+HTTPS success alone does not qualify the scheduled profile. Native samples now
+distinguish `unexpected_runtime`, `unexpected_profile_config`,
+`native_session_changed`, `config_changed_during_probe`, and `tunnel_not_ready`.
+Treat profile/config drift as invalid protocol coverage, not automatically as an
+internet outage. Do not change the old run's verdict or raw evidence retroactively.
 
 After a dispatched control request, `BoundChecks` requires an observed idle
 Flutter control queue before sending another command. A host timeout does not
@@ -247,3 +271,59 @@ No profile data migration is introduced. Do not uninstall or clear app data.
 For APK rollback, rebuild the intended prior source with the same signing key
 and a higher versionCode, then `adb install -r`. Preserve the working diff and
 test evidence. Do not revert unrelated work or publish a soak APK as a release.
+
+## Passive 24-hour phone run
+
+`passive_soak.py` controls a device-resident diagnostic run without UI
+automation, profile selection, radio changes, VPN restarts, a new service,
+alarms, or wakelocks. The DUMP-protected control components are present only in
+the `soak` flavor. Host commands use the existing short-lived soak control
+service because some OEM power managers drop explicit manifest broadcasts while
+the app is idle. The existing VPN service records an allowlisted sample at most
+every five minutes when its normal watchdog/lifecycle work runs. Starting the
+run also requests one best-effort sample from the short-lived control process.
+
+Build and review the soak APK before installing it. Installation must preserve
+the current app data and use the same signing identity:
+
+```powershell
+flutter build apk --flavor soak --release
+adb install -r 'build/app/outputs/flutter-apk/app-soak-release.apk'
+python -m tooling.soak.passive_soak --adb adb start
+python -m tooling.soak.passive_soak --adb adb status
+python -m tooling.soak.passive_soak --adb adb export --out 'build/qa/passive-24h.zip'
+python -m tooling.soak.passive_soak --adb adb stop
+```
+
+These commands deliberately require exactly one authorized `device`. With zero
+or multiple authorized targets the helper stops with a fixed error code. An
+explicit `--serial` remains available for controlled multi-device labs, but the
+auto-discovery path keeps the identifier out of the host command and report.
+
+`stop` stops only diagnostic recording; it never stops the VPN. Export is a
+consistent snapshot and does not stop recording. The host accepts only fixed
+fields, streams the pull to a temporary host file, and verifies the byte count
+and SHA-256 before publishing the ZIP. Export runs in the existing on-demand
+soak control service, which stops itself afterward; sampling does not use that
+service. A single fixed device ZIP is atomically replaced and capped at 24 MiB,
+so repeated exports cannot accumulate unbounded files. The device copy remains
+in app-specific external storage for manual retention or removal. The default
+export timeout is 180 seconds and cannot be configured below 120 seconds. Never
+publish either artifact without a separate privacy review.
+
+The run state is in the existing no-backup SQLite journal and survives process
+death/reboot. Its schema version remains `1`; two additive columns have defaults,
+so an older APK ignores them after an in-place rollback. The 24-hour deadline is
+enforced on the next normal observation, status request, or export. There is no
+alarm at the deadline and no guarantee of a sample while Android fully suspends
+the app. Therefore this is low-impact lifecycle/resource evidence, not proof of
+continuous internet reachability, every packet, battery-only Doze, or every
+profile/protocol. UID traffic counters are aggregate app counters. PSS/native
+PSS, current-process CPU time, own thread/FD counts, battery and Android thermal
+status are sampled without inspecting another process.
+
+While a passive run is active, the in-app diagnostics panel labels it as a
+read-only 24-hour run and disables its 7-day switch. Native 7-day start/stop
+commands also leave the active passive run unchanged. After it ends, starting a
+new 7-day run remains an explicit, consented replacement. Use the host helper to
+stop the passive run deliberately.

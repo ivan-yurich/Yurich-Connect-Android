@@ -123,6 +123,53 @@ class BoundChecksTests(unittest.TestCase):
         self.assertFalse(row["binding_verified"])
         self.assertEqual(row["error"], "reconnect_session_unchanged")
 
+    def test_successful_callback_without_native_readiness_is_a_readiness_timeout(self):
+        runner = Mock(bridge_foreground_fallbacks=0)
+        runner.bridge_request.return_value = ({"ok": True}, "")
+        checks = BoundChecks(runner)
+        starting = replace(self.native, phase="Starting")
+        with patch("tooling.soak.bound_checks.read_native_snapshot", return_value=(starting, "")), \
+             patch("tooling.soak.bound_checks.time.monotonic", side_effect=[0, 0, 2, 3]), \
+             patch("tooling.soak.bound_checks.time.sleep"):
+            row = checks.command(self.profile, timeout_s=1)
+        self.assertFalse(row["binding_verified"])
+        self.assertTrue(row["command_ok"])
+        self.assertEqual(row["error"], "native_readiness_timeout")
+
+    def test_quiescence_waits_for_handover_and_expected_transport(self):
+        runner = Mock()
+        runner.query_status.return_value = (self.status, "")
+        checks = BoundChecks(runner)
+        cellular = replace(self.native, active_net=115, tracked_net=115)
+        transitioning = replace(cellular, phase="Reconnecting")
+        with patch("tooling.soak.bound_checks.read_native_snapshot",
+                   side_effect=[(transitioning, ""), (cellular, ""), (self.native, "")]), \
+             patch("tooling.soak.bound_checks.time.sleep") as sleep:
+            self.assertTrue(checks.wait_for_native_quiescence(expected_network="wifi"))
+        self.assertEqual(sleep.call_count, 2)
+        runner.bridge_request.assert_not_called()
+
+    def test_stopped_resident_process_without_receiver_can_be_quiescent(self):
+        runner = Mock()
+        runner.query_status.return_value = ({**self.status, "vpnStatus": "Stopped"}, "")
+        runner.vpn_state.return_value = SimpleNamespace(observed=True, runtime="unknown", validated=False)
+        checks = BoundChecks(runner)
+        with patch("tooling.soak.bound_checks.read_native_snapshot",
+                   return_value=(None, "native_snapshot_invalid_or_absent")):
+            self.assertTrue(checks.wait_for_native_quiescence(expected_network="wifi"))
+        runner.bridge_request.assert_not_called()
+
+    def test_observer_failure_cannot_be_accepted_as_stopped(self):
+        runner = Mock()
+        runner.query_status.return_value = ({**self.status, "vpnStatus": "Stopped"}, "")
+        checks = BoundChecks(runner)
+        with patch("tooling.soak.bound_checks.read_native_snapshot", return_value=(None, "observer_unavailable")), \
+             patch("tooling.soak.bound_checks.time.monotonic", side_effect=[0, 0, 2, 2]), \
+             patch("tooling.soak.bound_checks.time.sleep"):
+            self.assertFalse(checks.wait_for_native_quiescence(expected_network="wifi", timeout_s=1))
+        runner.vpn_state.assert_not_called()
+        runner.bridge_request.assert_not_called()
+
     def test_plan_has_every_profile_and_transport(self):
         other = Profile("p0006", "hysteria2", "singBox")
         pairs = matrix_pairs([self.profile, other])
@@ -156,6 +203,31 @@ class BoundChecksTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):
             soak.outage()
         runner.set_radios.assert_called_once_with("wifi")
+
+    def test_restore_waits_for_native_handover_even_when_flutter_is_idle(self):
+        runner = Mock()
+        runner.query_status.return_value = ({"ok": True, "busy": False,
+                                           "queueActive": False, "vpnStatus": "Started"}, "")
+        soak = NativeSoak(runner)
+        transitioning = replace(self.native, phase="Reconnecting")
+        with patch("tooling.soak.run_native_soak.read_native_snapshot",
+                   side_effect=[(transitioning, ""), (self.native, "")]), \
+             patch("tooling.soak.run_native_soak.time.sleep") as sleep:
+            self.assertTrue(soak.wait_restore_quiescent())
+        sleep.assert_called_once()
+        self.assertEqual(runner.query_status.call_count, 2)
+
+    def test_restore_wait_timeout_does_not_dispatch_profile_control(self):
+        runner = Mock(radio_baseline_observed=True, initial_wifi_enabled=False)
+        runner.device_available.return_value = True
+        soak = NativeSoak(runner)
+        soak.initial_profile = self.profile
+        soak.wait_restore_quiescent = Mock(return_value=False)
+        soak.checks.command = Mock()
+        soak.restore()
+        soak.checks.command.assert_not_called()
+        self.assertTrue(soak.report["restore_wait_timed_out"])
+        self.assertFalse(soak.report["restored"])
 
     def test_failed_baseline_never_injects_outage_or_claims_recovery_failure(self):
         runner = Mock(current_network="wifi", current_profile=self.profile)

@@ -146,10 +146,23 @@ def native_payload_probe(runner, source, *, binding=None):
                             and binding.matches(before) and binding.matches(after))
     if binding is not None:
         session_verified = session_verified and binding_verified
+    session_error = ""
+    if before and after:
+        if before.runtime != runner.current_profile.runtime or after.runtime != runner.current_profile.runtime:
+            session_error = "unexpected_runtime"
+        elif not before.ready or not after.ready:
+            session_error = "tunnel_not_ready"
+        elif before.identity != after.identity:
+            session_error = "native_session_changed"
+        elif before.config_fingerprint != after.config_fingerprint:
+            session_error = "config_changed_during_probe"
+        elif binding is not None and not binding_verified:
+            session_error = "unexpected_profile_config"
     return {
         "before": asdict(before) if before else None,
         "after": asdict(after) if after else None,
-        "error": before_error or after_error,
+        "error": before_error or after_error or session_error,
+        "session_error": session_error,
         "uid_delta": delta, "session_verified": session_verified,
         "config_binding_required": binding is not None, "config_binding_verified": binding_verified,
         "tcp_ok": tcp.observed and tcp.ok, "https_ok": https.observed and https.ok,
