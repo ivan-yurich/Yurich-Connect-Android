@@ -1,0 +1,2 @@
+8718ca2b347a78cdc383bb2e72673863d50e6f964217072e3e1de43483616d6d  YurichConnect-android-arm64-v8a-v1.0.131.apk
+8718ca2b347a78cdc383bb2e72673863d50e6f964217072e3e1de43483616d6d  YurichConnect-android-release.apk
