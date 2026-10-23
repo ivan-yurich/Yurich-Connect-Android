@@ -43,4 +43,23 @@ class NativeNetworkSnapshotTest {
         `when`(connectivity.getNetworkCapabilities(network)).thenReturn(null)
         assertEquals(NativeNetworkSnapshot(0, 1, 0), NativeNetworkSnapshot.capture(connectivity, network))
     }
+
+    @Test
+    fun `physical transport is sanitized and deterministic`() {
+        assertEquals("unknown", NativeNetworkSnapshot.transport(-1))
+        assertEquals("none", NativeNetworkSnapshot.transport(0))
+        assertEquals("unknown", NativeNetworkSnapshot.transport(NativeNetworkSnapshot.PRESENT))
+        assertEquals("wifi", NativeNetworkSnapshot.transport(
+            NativeNetworkSnapshot.PRESENT or NativeNetworkSnapshot.CAPABILITIES_OBSERVED or
+                NativeNetworkSnapshot.WIFI,
+        ))
+        assertEquals("cellular", NativeNetworkSnapshot.transport(
+            NativeNetworkSnapshot.PRESENT or NativeNetworkSnapshot.CAPABILITIES_OBSERVED or
+                NativeNetworkSnapshot.CELLULAR,
+        ))
+        assertEquals("multiple", NativeNetworkSnapshot.transport(
+            NativeNetworkSnapshot.PRESENT or NativeNetworkSnapshot.CAPABILITIES_OBSERVED or
+                NativeNetworkSnapshot.WIFI or NativeNetworkSnapshot.CELLULAR,
+        ))
+    }
 }

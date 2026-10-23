@@ -10,6 +10,8 @@ internal data class NativeNetworkSnapshot(
     val trackedFlags: Int = -1,
     val sameNetwork: Int = -1,
 ) {
+    fun physicalTransport(): String = transport(trackedFlags)
+
     companion object {
         const val PRESENT = 1
         const val CAPABILITIES_OBSERVED = 2
@@ -18,6 +20,21 @@ internal data class NativeNetworkSnapshot(
         const val CELLULAR = 16
         const val INTERNET = 32
         const val VALIDATED = 64
+
+        internal fun transport(flags: Int): String {
+            if (flags < 0 || flags and PRESENT == 0) {
+                return if (flags == 0) "none" else "unknown"
+            }
+            if (flags and CAPABILITIES_OBSERVED == 0) return "unknown"
+            val wifi = flags and WIFI != 0
+            val cellular = flags and CELLULAR != 0
+            return when {
+                wifi && cellular -> "multiple"
+                wifi -> "wifi"
+                cellular -> "cellular"
+                else -> "other"
+            }
+        }
 
         @RequiresApi(23)
         fun capture(connectivity: ConnectivityManager, tracked: Network?): NativeNetworkSnapshot {

@@ -58,6 +58,7 @@ const _surfaceMetric = YurichColors.surfaceMetric;
 const _mutedGold = YurichColors.textSecondary;
 const _cyanGlow = YurichColors.accentCyan;
 const _deepGlow = YurichColors.backgroundDeep;
+const Animation<double> _staticGlowPulse = AlwaysStoppedAnimation<double>(0);
 const _appName = 'Yurich Connect';
 const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
@@ -162,8 +163,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _vpnEngine = createVpnEngine();
   final _store = ProfileStore();
   final _importer = ProfileImporter();
@@ -238,6 +238,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _countryResolveInFlight = false;
   bool _runtimeReconcileInFlight = false;
   bool _runtimeReconciled = false;
+  bool _nativeRecoveryStarting = false;
   bool _soakProfilesLoaded = false;
   bool _soakVpnInitialized = false;
   bool _soakReadyAnnounced = false;
@@ -279,9 +280,6 @@ class _HomeScreenState extends State<HomeScreen>
   final _logs = <String>[];
   final _pendingLogs = <String>[];
   final _stabilityEvents = <String>[];
-  late final AnimationController _glowController;
-  late final Animation<double> _glowPulse;
-
   _Strings get s => _Strings.forLanguage(_language);
 
   Duration? get _connectedDuration {
@@ -648,19 +646,10 @@ class _HomeScreenState extends State<HomeScreen>
     super.initState();
     _soakBridgeChannel.setMethodCallHandler(_handleSoakBridgeCall);
     WidgetsBinding.instance.addObserver(this);
-    _glowController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2400),
-    );
-    _glowPulse = CurvedAnimation(
-      parent: _glowController,
-      curve: Curves.easeInOut,
-    );
     _uiForeground =
         WidgetsBinding.instance.lifecycleState == null ||
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     if (_uiForeground) {
-      if (!widget.tvMode) _glowController.repeat(reverse: true);
       _startUptimeTimer();
     }
     _startBootTask('load', _load, timeout: const Duration(seconds: 12));
@@ -724,7 +713,6 @@ class _HomeScreenState extends State<HomeScreen>
     _subscriptionReminderTimer?.cancel();
     _manualController.dispose();
     _sessionController.dispose();
-    _glowController.dispose();
     _updateNoticeClock.stop();
     unawaited(_vpnEngine.dispose());
     super.dispose();
@@ -734,7 +722,6 @@ class _HomeScreenState extends State<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _uiForeground = state == AppLifecycleState.resumed;
     if (_uiForeground) {
-      if (!widget.tvMode) _glowController.repeat(reverse: true);
       _startUptimeTimer();
       _startStatusWatchdog();
       setState(() => _clockNow = DateTime.now());
@@ -748,7 +735,6 @@ class _HomeScreenState extends State<HomeScreen>
       _uptimeTimer = null;
       _statusWatchdogTimer?.cancel();
       _statusWatchdogTimer = null;
-      _glowController.stop();
     }
   }
 
@@ -1052,6 +1038,19 @@ class _HomeScreenState extends State<HomeScreen>
                 nativeManualState == false &&
                 (status == AurumVpnStatus.starting ||
                     status == AurumVpnStatus.started);
+            final rawSessionReason = event['sessionReason'];
+            final sessionReason = rawSessionReason is String
+                ? rawSessionReason
+                : null;
+            final isNativeRecoveryStart =
+                status == AurumVpnStatus.starting &&
+                (sessionReason?.startsWith('watchdog:') == true ||
+                    sessionReason?.startsWith('readiness:') == true);
+            if (isNativeRecoveryStart) {
+              _nativeRecoveryStarting = true;
+            }
+            final preserveRecoveryCounters =
+                status == AurumVpnStatus.starting && _nativeRecoveryStarting;
             if (nativeManualStop || nativeManualStart) {
               unawaited(_store.saveManualDisconnectRequested(nativeManualStop));
             }
@@ -1066,13 +1065,16 @@ class _HomeScreenState extends State<HomeScreen>
               if (status == AurumVpnStatus.starting) {
                 _uplink = '0 B/s';
                 _downlink = '0 B/s';
-                _sessionTotal = '0 B';
                 _nativeUplinkSpeedBytes = 0;
                 _nativeDownlinkSpeedBytes = 0;
-                _nativeSessionTotalBytes = 0;
-                _lastSessionTrafficBytes = 0;
+                if (!preserveRecoveryCounters) {
+                  _sessionTotal = '0 B';
+                  _nativeSessionTotalBytes = 0;
+                  _lastSessionTrafficBytes = 0;
+                }
               }
               if (nativeManualStop) {
+                _nativeRecoveryStarting = false;
                 _manualDisconnectRequested = true;
                 _autoRecoveryArmed = false;
                 _lastError = null;
@@ -1090,6 +1092,7 @@ class _HomeScreenState extends State<HomeScreen>
                 _lastError = null;
               }
               if (status == AurumVpnStatus.started) {
+                _nativeRecoveryStarting = false;
                 _clearRecoveredStopMessage();
                 _lastError = null;
                 if (_nativeOwnsTunnelHealth) {
@@ -2494,6 +2497,7 @@ class _HomeScreenState extends State<HomeScreen>
     _lastIdleHealthCheckAt = null;
     _lastRecoverySource = null;
     _lastNetworkEvent = 'manual-start';
+    _nativeRecoveryStarting = false;
     _lastSessionTrafficBytes = 0;
     _nativeSessionTotalBytes = 0;
     _nativeUplinkSpeedBytes = 0;
@@ -2848,6 +2852,7 @@ class _HomeScreenState extends State<HomeScreen>
           _uplink = '0 B/s';
           _downlink = '0 B/s';
           if (updateMessage) {
+            _nativeRecoveryStarting = false;
             _autoRecoveryArmed = false;
             _connectedSince = null;
             _lastTrafficAt = null;
@@ -4041,9 +4046,11 @@ class _HomeScreenState extends State<HomeScreen>
         const Duration(seconds: 4),
         onTimeout: () => const <String>[],
       );
-      final update = await _updateService
-          .findLatest(currentVersion: _appVersion, supportedAbis: abis)
-          .timeout(_manualUpdateCheckTimeout);
+      final update = await _updateService.findLatest(
+        currentVersion: _appVersion,
+        supportedAbis: abis,
+        timeout: _manualUpdateCheckTimeout,
+      );
       if (update == null) {
         if (mounted) {
           setState(() {
@@ -4100,6 +4107,11 @@ class _HomeScreenState extends State<HomeScreen>
             onPressed: () => unawaited(_checkAndInstallUpdate()),
           ),
         );
+      }
+    } on AppUpdateArchitectureException {
+      if (mounted) {
+        setState(() => _updateMessage = s.updateArchitectureUnavailable);
+        _showSnack(s.updateArchitectureUnavailable);
       }
     } on AppUpdatePermissionException {
       if (mounted) {
@@ -4159,9 +4171,11 @@ class _HomeScreenState extends State<HomeScreen>
         const Duration(seconds: 4),
         onTimeout: () => const <String>[],
       );
-      final update = await _updateService
-          .findLatest(currentVersion: _appVersion, supportedAbis: abis)
-          .timeout(const Duration(seconds: 26));
+      final update = await _updateService.findLatest(
+        currentVersion: _appVersion,
+        supportedAbis: abis,
+        timeout: const Duration(seconds: 26),
+      );
       if (!mounted || _updateBusy) {
         return;
       }
@@ -4767,7 +4781,7 @@ class _HomeScreenState extends State<HomeScreen>
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                 child: _StatusPanel(
-                  pulse: _glowPulse,
+                  pulse: _staticGlowPulse,
                   strings: s,
                   status: _status,
                   connectionState: _connectionUiState,
@@ -4786,7 +4800,7 @@ class _HomeScreenState extends State<HomeScreen>
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                   children: [
                     _ProfilePanel(
-                      pulse: _glowPulse,
+                      pulse: _staticGlowPulse,
                       strings: s,
                       profiles: _profiles,
                       selectedProfile: panelProfile,

@@ -57,8 +57,11 @@ object DefaultNetworkListener {
     }
 
     private const val TAG = "DefaultNetworkListener"
+    private const val MAX_PENDING_MESSAGES = 64
     private val listenerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val networkMessages = Channel<NetworkMessage>(Channel.UNLIMITED)
+    // Lifecycle commands use suspending send(), while callback bursts use
+    // trySend() and are safely dropped once the bounded queue is saturated.
+    private val networkMessages = Channel<NetworkMessage>(MAX_PENDING_MESSAGES)
 
     init {
         listenerScope.launch {

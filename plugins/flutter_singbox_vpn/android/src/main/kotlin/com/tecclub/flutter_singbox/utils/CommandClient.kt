@@ -1,7 +1,6 @@
 package com.tecclub.flutter_singbox.utils
 
 import go.Seq
-import io.nekohasekai.libbox.CommandClient
 import io.nekohasekai.libbox.CommandClient as LibboxCommandClient
 import io.nekohasekai.libbox.CommandClientHandler
 import io.nekohasekai.libbox.CommandClientOptions
@@ -12,18 +11,124 @@ import io.nekohasekai.libbox.OutboundGroup
 import io.nekohasekai.libbox.OutboundGroupIterator
 import io.nekohasekai.libbox.StatusMessage
 import io.nekohasekai.libbox.StringIterator
-import com.tecclub.flutter_singbox.ktx.toList
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-open class CommandClient(
+internal interface NativeCommandClient {
+    val refnum: Int
+
+    fun connect()
+
+    fun disconnect()
+}
+
+internal fun interface NativeCommandClientFactory {
+    fun create(
+        handler: CommandClientHandler,
+        connectionType: CommandClient.ConnectionType
+    ): NativeCommandClient
+}
+
+internal fun interface NativeReferenceDestroyer {
+    fun destroy(refnum: Int)
+}
+
+private class LibboxNativeCommandClient(
+    private val delegate: LibboxCommandClient
+) : NativeCommandClient {
+    override val refnum: Int
+        get() = delegate.refnum
+
+    override fun connect() {
+        delegate.connect()
+    }
+
+    override fun disconnect() {
+        delegate.disconnect()
+    }
+}
+
+private object LibboxNativeCommandClientFactory : NativeCommandClientFactory {
+    override fun create(
+        handler: CommandClientHandler,
+        connectionType: CommandClient.ConnectionType
+    ): NativeCommandClient {
+        val options = CommandClientOptions()
+        try {
+            val command = when (connectionType) {
+                CommandClient.ConnectionType.Status -> Libbox.CommandStatus
+                CommandClient.ConnectionType.Groups -> Libbox.CommandGroup
+                CommandClient.ConnectionType.Log -> Libbox.CommandLog
+                CommandClient.ConnectionType.ClashMode -> Libbox.CommandClashMode
+                CommandClient.ConnectionType.GroupOnly -> Libbox.CommandGroup
+            }
+            options.addCommand(command)
+            options.statusInterval = STATUS_INTERVAL_NANOS
+            return LibboxNativeCommandClient(LibboxCommandClient(handler, options))
+        } finally {
+            runCatching { Seq.destroyRef(options.refnum) }
+        }
+    }
+
+    private const val STATUS_INTERVAL_NANOS = 2_000_000_000L
+}
+
+private object SeqNativeReferenceDestroyer : NativeReferenceDestroyer {
+    override fun destroy(refnum: Int) {
+        Seq.destroyRef(refnum)
+    }
+}
+
+open class CommandClient private constructor(
     private val scope: CoroutineScope,
     private val connectionType: ConnectionType,
-    private val handler: Handler
+    private val handler: Handler,
+    private val clientFactory: NativeCommandClientFactory,
+    private val referenceDestroyer: NativeReferenceDestroyer,
+    private val ioDispatcher: CoroutineDispatcher,
+    private val retryDelay: suspend (attempt: Int) -> Unit,
+    @Suppress("UNUSED_PARAMETER") constructorMarker: Unit
 ) {
+
+    constructor(
+        scope: CoroutineScope,
+        connectionType: ConnectionType,
+        handler: Handler
+    ) : this(
+        scope = scope,
+        connectionType = connectionType,
+        handler = handler,
+        clientFactory = LibboxNativeCommandClientFactory,
+        referenceDestroyer = SeqNativeReferenceDestroyer,
+        ioDispatcher = Dispatchers.IO,
+        retryDelay = { attempt -> delay(100L + attempt * 50L) },
+        constructorMarker = Unit
+    )
+
+    internal constructor(
+        scope: CoroutineScope,
+        connectionType: ConnectionType,
+        handler: Handler,
+        clientFactory: NativeCommandClientFactory,
+        referenceDestroyer: NativeReferenceDestroyer,
+        ioDispatcher: CoroutineDispatcher,
+        retryDelay: suspend (attempt: Int) -> Unit
+    ) : this(
+        scope = scope,
+        connectionType = connectionType,
+        handler = handler,
+        clientFactory = clientFactory,
+        referenceDestroyer = referenceDestroyer,
+        ioDispatcher = ioDispatcher,
+        retryDelay = retryDelay,
+        constructorMarker = Unit
+    )
 
     enum class ConnectionType {
         Status, Groups, Log, ClashMode, GroupOnly
@@ -43,164 +148,258 @@ open class CommandClient(
     }
 
 
-    private var commandClient: LibboxCommandClient? = null
-    private val clientHandler = ClientHandler()
     private val lock = Object()
-    @Volatile private var isConnecting = false
+    private var commandClient: ClientLease? = null
+    private var currentGeneration = 0L
+    private var isConnecting = false
+
+    private class ClientLease(
+        val generation: Long,
+        private val client: NativeCommandClient,
+        private val referenceDestroyer: NativeReferenceDestroyer
+    ) {
+        private val closed = AtomicBoolean(false)
+
+        fun connect() {
+            client.connect()
+        }
+
+        fun close() {
+            if (!closed.compareAndSet(false, true)) {
+                return
+            }
+            runCatching { client.disconnect() }
+            runCatching { referenceDestroyer.destroy(client.refnum) }
+        }
+    }
     
     fun connect() {
-        synchronized(lock) {
-            // If already connecting or connected, don't try again
+        val generation = synchronized(lock) {
             if (isConnecting || commandClient != null) {
                 return
             }
             isConnecting = true
+            ++currentGeneration
         }
-        
-        // Disconnect any existing client first
-        disconnectInternal()
-        
-        scope.launch(Dispatchers.IO) {
-            val options = CommandClientOptions()
-            val command = when (connectionType) {
-                ConnectionType.Status -> Libbox.CommandStatus
-                ConnectionType.Groups -> Libbox.CommandGroup
-                ConnectionType.Log -> Libbox.CommandLog
-                ConnectionType.ClashMode -> Libbox.CommandClashMode
-                ConnectionType.GroupOnly -> Libbox.CommandGroup
-            }
-            options.addCommand(command)
-            options.statusInterval = 2 * 1000 * 1000 * 1000
-            val newCommandClient = CommandClient(clientHandler, options)
+
+        val job = scope.launch(ioDispatcher) {
+            var connected = false
             try {
-                for (i in 1..10) {
-                    delay(100 + i.toLong() * 50)
-                    synchronized(lock) {
-                        if (!isConnecting) {
-                            runCatching {
-                                newCommandClient.disconnect()
-                            }
-                            return@launch
-                        }
+                if (!isGenerationConnecting(generation)) {
+                    return@launch
+                }
+
+                val newCommandClient = ClientLease(
+                    generation = generation,
+                    client = clientFactory.create(ClientHandler(generation), connectionType),
+                    referenceDestroyer = referenceDestroyer
+                )
+                if (!installClient(generation, newCommandClient)) {
+                    newCommandClient.close()
+                    return@launch
+                }
+
+                for (attempt in 1..MAX_CONNECT_ATTEMPTS) {
+                    retryDelay(attempt)
+                    if (!coroutineContext.isActive || !isCurrentConnectingClient(generation, newCommandClient)) {
+                        return@launch
                     }
                     try {
                         newCommandClient.connect()
                     } catch (ignored: Exception) {
                         continue
                     }
-                    if (!isActive) {
-                        runCatching {
-                            newCommandClient.disconnect()
-                        }
-                        synchronized(lock) {
-                            isConnecting = false
-                        }
+
+                    if (!coroutineContext.isActive) {
                         return@launch
                     }
-                    synchronized(lock) {
-                        if (!isConnecting) {
-                            runCatching {
-                                newCommandClient.disconnect()
-                            }
-                            return@launch
+
+                    connected = synchronized(lock) {
+                        if (isCurrentConnectingClientLocked(generation, newCommandClient)) {
+                            isConnecting = false
+                            true
+                        } else {
+                            false
                         }
-                        this@CommandClient.commandClient = newCommandClient
-                        isConnecting = false
                     }
-                    return@launch
-                }
-                runCatching {
-                    newCommandClient.disconnect()
+                    if (connected) {
+                        return@launch
+                    }
                 }
             } finally {
-                synchronized(lock) {
-                    isConnecting = false
+                if (!connected) {
+                    closeConnectingGeneration(generation)
                 }
             }
         }
-    }
-    
-    private fun disconnectInternal() {
-        val client = synchronized(lock) {
-            val c = commandClient
-            commandClient = null
-            c
-        }
-        client?.apply {
-            runCatching {
-                disconnect()
-            }
-            runCatching {
-                Seq.destroyRef(refnum)
-            }
+        job.invokeOnCompletion {
+            closeConnectingGeneration(generation)
         }
     }
 
-    fun disconnect() {
-        synchronized(lock) {
-            isConnecting = false
-        }
-        disconnectInternal()
+    private fun isGenerationConnecting(generation: Long): Boolean = synchronized(lock) {
+        currentGeneration == generation && isConnecting
     }
-    
+
+    private fun installClient(generation: Long, client: ClientLease): Boolean = synchronized(lock) {
+        if (currentGeneration != generation || !isConnecting || commandClient != null) {
+            false
+        } else {
+            commandClient = client
+            true
+        }
+    }
+
+    private fun isCurrentConnectingClient(
+        generation: Long,
+        client: ClientLease
+    ): Boolean = synchronized(lock) {
+        isCurrentConnectingClientLocked(generation, client)
+    }
+
+    private fun isCurrentConnectingClientLocked(
+        generation: Long,
+        client: ClientLease
+    ): Boolean = currentGeneration == generation &&
+        isConnecting &&
+        commandClient === client
+
+    private fun closeConnectingGeneration(generation: Long) {
+        val client = synchronized(lock) {
+            if (currentGeneration != generation || !isConnecting) {
+                return
+            }
+            currentGeneration++
+            isConnecting = false
+            val current = commandClient
+            commandClient = null
+            current
+        }
+        client?.close()
+    }
+
+    fun disconnect() {
+        val disconnected = synchronized(lock) {
+            val wasActive = isConnecting || commandClient != null
+            currentGeneration++
+            isConnecting = false
+            val current = commandClient
+            commandClient = null
+            DisconnectResult(current, currentGeneration, wasActive)
+        }
+        disconnected.client?.close()
+        notifyDisconnectedIfStillIdle(disconnected)
+    }
+
     fun isConnected(): Boolean {
         synchronized(lock) {
             return commandClient != null && !isConnecting
         }
     }
 
-    private inner class ClientHandler : CommandClientHandler {
+    private data class DisconnectResult(
+        val client: ClientLease?,
+        val terminalGeneration: Long,
+        val shouldNotify: Boolean
+    )
+
+    private fun notifyDisconnectedIfStillIdle(result: DisconnectResult) {
+        if (!result.shouldNotify) {
+            return
+        }
+        synchronized(lock) {
+            if (currentGeneration == result.terminalGeneration &&
+                commandClient == null &&
+                !isConnecting
+            ) {
+                handler.onDisconnected()
+            }
+        }
+    }
+
+    private fun disconnectGeneration(generation: Long) {
+        val disconnected = synchronized(lock) {
+            val current = commandClient
+            if (currentGeneration != generation || current?.generation != generation) {
+                return
+            }
+            currentGeneration++
+            isConnecting = false
+            commandClient = null
+            DisconnectResult(current, currentGeneration, shouldNotify = true)
+        }
+        disconnected.client?.close()
+        notifyDisconnectedIfStillIdle(disconnected)
+    }
+
+    private inline fun dispatchForGeneration(generation: Long, action: Handler.() -> Unit) {
+        synchronized(lock) {
+            if (currentGeneration == generation && commandClient?.generation == generation) {
+                handler.action()
+            }
+        }
+    }
+
+    private inner class ClientHandler(
+        private val generation: Long
+    ) : CommandClientHandler {
 
         override fun connected() {
-            handler.onConnected()
+            dispatchForGeneration(generation) { onConnected() }
         }
 
         override fun disconnected(message: String?) {
-            synchronized(lock) {
-                commandClient = null
-                isConnecting = false
-            }
-            handler.onDisconnected()
+            disconnectGeneration(generation)
         }
 
         override fun writeGroups(message: OutboundGroupIterator?) {
-            if (message == null) {
-                return
+            dispatchForGeneration(generation) {
+                if (message == null) {
+                    return@dispatchForGeneration
+                }
+                val groups = mutableListOf<OutboundGroup>()
+                while (message.hasNext()) {
+                    groups.add(message.next())
+                }
+                updateGroups(groups)
             }
-            val groups = mutableListOf<OutboundGroup>()
-            while (message.hasNext()) {
-                groups.add(message.next())
-            }
-            handler.updateGroups(groups)
         }
 
         override fun clearLogs() {
-            handler.clearLog()
+            dispatchForGeneration(generation) { clearLog() }
         }
 
         override fun writeLogs(messageList: LogIterator?) {
-            if (messageList == null) {
-                return
-            }
-            while (messageList.hasNext()) {
-                val message = messageList.next().message
-                handler.appendLog(message)
+            dispatchForGeneration(generation) {
+                if (messageList == null) {
+                    return@dispatchForGeneration
+                }
+                while (messageList.hasNext()) {
+                    appendLog(messageList.next().message)
+                }
             }
         }
 
         override fun writeStatus(message: StatusMessage?) {
-            if (message == null) {
-                return
+            dispatchForGeneration(generation) {
+                if (message != null) {
+                    updateStatus(message)
+                }
             }
-            handler.updateStatus(message)
         }
 
         override fun initializeClashMode(modeList: StringIterator, currentMode: String) {
-            handler.initializeClashMode(modeList.toList(), currentMode)
+            dispatchForGeneration(generation) {
+                val modes = mutableListOf<String>()
+                while (modeList.hasNext()) {
+                    modes.add(modeList.next())
+                }
+                initializeClashMode(modes, currentMode)
+            }
         }
 
         override fun updateClashMode(newMode: String) {
-            handler.updateClashMode(newMode)
+            dispatchForGeneration(generation) { updateClashMode(newMode) }
         }
         
         override fun writeConnectionEvents(events: ConnectionEvents?) {
@@ -211,5 +410,9 @@ open class CommandClient(
             // The Flutter UI displays log entries as they arrive.
         }
 
+    }
+
+    private companion object {
+        const val MAX_CONNECT_ATTEMPTS = 10
     }
 }

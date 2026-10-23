@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.app.PendingIntent
+import android.app.ActivityOptions
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
@@ -19,6 +20,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -267,6 +269,18 @@ class MainActivity : FlutterActivity() {
             SOAK_TAG,
             "SOAK_QA_COUNTER token=$safeToken generation=$safeGeneration " +
                 "native=$safeNativeTraffic display=$safeTraffic",
+        )
+        OnDeviceDiagnostics.record(
+            applicationContext,
+            "counter",
+            numbers = mapOf(
+                "pid" to android.os.Process.myPid().toLong(),
+                "instanceMs" to SOAK_MAIN_INSTANCE_ELAPSED_MS,
+                "uiGeneration" to safeGeneration,
+                "nativeSessionBytes" to safeNativeTraffic,
+                "displayBytes" to safeTraffic,
+            ),
+            labels = mapOf("role" to "main"),
         )
         result.success(null)
     }
@@ -569,6 +583,7 @@ class MainActivity : FlutterActivity() {
                 sessionId,
                 callbackIntent,
                 pendingIntentFlags(),
+                installCallbackOptions(),
             )
             session.commit(pendingIntent.intentSender)
         } catch (error: Exception) {
@@ -900,6 +915,19 @@ class MainActivity : FlutterActivity() {
                 0
             }
 
+    private fun installCallbackOptions(): Bundle? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return null
+        // Android 15+ requires the creator to opt in for this installer callback.
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
+        } else {
+            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+        }
+        return ActivityOptions.makeBasic()
+            .setPendingIntentCreatorBackgroundActivityStartMode(mode)
+            .toBundle()
+    }
+
     override fun onDestroy() {
         diagnosticExportResult?.error("EXPORT_INTERRUPTED", "Activity closed during export", null)
         diagnosticExportResult = null
@@ -1065,6 +1093,7 @@ class MainActivity : FlutterActivity() {
         const val SOAK_CHANNEL = "online.dnsai.ivanvpn/soak"
         const val SOAK_TAG = "YurichSoakBridge"
         const val MAX_SOAK_RESULT_LENGTH = 16 * 1024
+        val SOAK_MAIN_INSTANCE_ELAPSED_MS = SystemClock.elapsedRealtime()
         val SOAK_COMMANDS = setOf("inventory", "status", "activate", "reconnect", "stop")
         val SOAK_REQUEST_ID = Regex("^[a-zA-Z0-9._-]{1,64}$")
         val SOAK_PROFILE_TOKEN = Regex("^p\\d{4}$")

@@ -4,8 +4,13 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import org.mockito.Mockito
 import kotlin.test.Test
+import kotlin.test.assertEquals
 
 class DiagnosticDatabaseConfigurationTest {
+    @Test fun `additive passive columns keep rollback safe database version`() {
+        assertEquals(1, DIAGNOSTIC_DATABASE_VERSION)
+    }
+
     @Test fun `pragma statements returning rows use query API and close cursors`() {
         for (pageSize in listOf(4096L, 16384L)) {
             val db = Mockito.mock(SQLiteDatabase::class.java)

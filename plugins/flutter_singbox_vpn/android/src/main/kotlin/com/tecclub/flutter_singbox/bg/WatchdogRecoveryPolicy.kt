@@ -13,6 +13,9 @@ internal object WatchdogRecoveryPolicy {
     const val HEALTHY_RESET_MS = 10 * 60_000L
     const val MAX_HEALTHY_GAP_MS = 3 * 60_000L
     const val NETWORK_RECOVERY_MIN_MS = 15_000L
+    const val HYSTERIA2_CELLULAR_CONFIRMATION_CYCLES = 2
+    private val ACTIVE_REPROBE_DELAYS_MS = longArrayOf(12_000L, 20_000L, 30_000L, 60_000L)
+    private val IDLE_REPROBE_DELAYS_MS = longArrayOf(30_000L, 60_000L, 90_000L)
 
     fun cooldownMs(attempts: Int): Long =
         (BASE_COOLDOWN_MS * (1L shl (attempts.coerceIn(1, 5) - 1)))
@@ -39,9 +42,42 @@ internal object WatchdogRecoveryPolicy {
         } else state.copy(lastHealthyAtMs = nowMs)
     }
 
-    fun retryDelayMs(state: WatchdogRecoveryState, nowMs: Long, idle: Boolean): Long {
-        val remaining = if (nowMs < state.lastRestartAtMs) 0L
-            else (cooldownMs(state.attempts) - (nowMs - state.lastRestartAtMs)).coerceAtLeast(0L)
-        return remaining.coerceIn(20_000L, if (idle) 90_000L else 60_000L)
+    fun readinessRetryDelayMs(failedCycles: Int, idle: Boolean): Long {
+        val delays = if (idle) IDLE_REPROBE_DELAYS_MS else ACTIVE_REPROBE_DELAYS_MS
+        val index = if (failedCycles <= 1) 0 else (failedCycles - 1).coerceAtMost(delays.lastIndex)
+        return delays[index]
     }
+
+    fun requiresExtendedReadinessConfirmation(
+        usesHysteria2: Boolean,
+        cellular: Boolean,
+    ): Boolean = usesHysteria2 && cellular
+
+    fun canAttemptReadinessRestart(
+        failedCycles: Int,
+        usesHysteria2: Boolean,
+        cellular: Boolean,
+    ): Boolean {
+        if (failedCycles <= 0) return false
+        val requiredCycles = if (requiresExtendedReadinessConfirmation(usesHysteria2, cellular)) {
+            HYSTERIA2_CELLULAR_CONFIRMATION_CYCLES
+        } else {
+            1
+        }
+        return failedCycles >= requiredCycles
+    }
+
+    fun shouldAttemptHysteria2CellularSoftReset(
+        failedCycles: Int,
+        usesHysteria2: Boolean,
+        cellular: Boolean,
+        periodicHealthCheck: Boolean,
+        sawDefaultNetwork: Boolean,
+        hasDefaultNetwork: Boolean,
+        runtimeWasReady: Boolean,
+        alreadyAttempted: Boolean,
+    ): Boolean = failedCycles == 1 &&
+        requiresExtendedReadinessConfirmation(usesHysteria2, cellular) &&
+        periodicHealthCheck && sawDefaultNetwork && hasDefaultNetwork &&
+        runtimeWasReady && !alreadyAttempted
 }

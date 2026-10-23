@@ -11,12 +11,16 @@ void main() {
   var available = false;
   var fail = false;
   var exportResult = true;
+  var mode = DiagnosticRun.standardMode;
+  var durationHours = 7 * 24;
 
   setUp(() {
     active = false;
     available = false;
     fail = false;
     exportResult = true;
+    mode = DiagnosticRun.standardMode;
+    durationHours = 7 * 24;
     calls.clear();
     binding.defaultBinaryMessenger.setMockMethodCallHandler(
       OnDeviceDiagnosticsService.channel,
@@ -40,6 +44,8 @@ void main() {
               : 0,
           'events': 12,
           'rotatedEvents': 0,
+          'mode': mode,
+          'durationHours': durationHours,
         };
       },
     );
@@ -63,6 +69,17 @@ void main() {
     expect(run.available, isFalse);
     expect(run.endsAt, isNull);
     expect(run.events, 0);
+    expect(run.mode, DiagnosticRun.standardMode);
+    expect(run.durationHours, 7 * 24);
+  });
+
+  test('passive native mode and duration are parsed explicitly', () {
+    final run = DiagnosticRun.fromMap({
+      'mode': DiagnosticRun.passive24hMode,
+      'durationHours': 24,
+    });
+    expect(run.isPassive24h, isTrue);
+    expect(run.durationHours, 24);
   });
 
   test('start and stop preserve availability of the report', () async {
@@ -195,6 +212,43 @@ void main() {
     await showPanel(tester, russian: false);
     expect(find.text('7-day diagnostics'), findsOneWidget);
     expect(find.byTooltip('Export ZIP'), findsOneWidget);
+  });
+
+  testWidgets('passive 24 hour run is visible and read only', (tester) async {
+    active = true;
+    available = true;
+    mode = DiagnosticRun.passive24hMode;
+    durationHours = 24;
+    await showPanel(tester);
+    expect(find.text('Пассивная диагностика · 24 часа'), findsOneWidget);
+    final toggle = tester.widget<Switch>(find.byType(Switch));
+    expect(toggle.value, isTrue);
+    expect(toggle.onChanged, isNull);
+    await tester.tap(find.byType(Switch), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(
+      calls.where((call) => call.method == 'start' || call.method == 'stop'),
+      isEmpty,
+    );
+  });
+
+  testWidgets('ended passive report needs normal consent before replacement', (
+    tester,
+  ) async {
+    available = true;
+    mode = DiagnosticRun.passive24hMode;
+    durationHours = 24;
+    await showPanel(tester);
+    expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Сначала экспортируйте предыдущий'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Отмена'));
+    await tester.pumpAndSettle();
+    expect(calls.where((call) => call.method == 'start'), isEmpty);
   });
 
   testWidgets('failed status read is not presented as a never-started run', (

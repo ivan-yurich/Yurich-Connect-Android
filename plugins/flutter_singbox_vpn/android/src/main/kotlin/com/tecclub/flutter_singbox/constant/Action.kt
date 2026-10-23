@@ -15,6 +15,7 @@ object Action {
     const val EXTRA_STATUS = "status"
     const val EXTRA_CONFIG_FINGERPRINT = "config_fingerprint"
     const val EXTRA_USER_INITIATED = "user_initiated"
+    const val EXTRA_BACKGROUND_RESTORE = "background_restore"
     const val EXTRA_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
     const val EXTRA_SESSION_REASON = "session_reason"
     const val EXTRA_DESIRED_RUNNING = "desired_running"

@@ -36,6 +36,19 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Application.initializeBaseIfNeeded(applicationContext)
         android.util.Log.e("VPNService", "onStartCommand called with intent: ${intent?.action}")
+
+        if (intent?.getBooleanExtra(Action.EXTRA_BACKGROUND_RESTORE, false) == true) {
+            val restoreRequested = PackageReplaceRestorePolicy.restoreRequested(
+                autoStart = SimpleConfigManager.getAutoStart(applicationContext),
+                startedByUser = SimpleConfigManager.getStartedByUser(applicationContext),
+                manualDisconnectRequested = SimpleConfigManager.getManualDisconnectRequested(),
+            )
+            if (!restoreRequested || !SimpleConfigManager.hasValidConfig(applicationContext)) {
+                Log.i(TAG, "Background restore cancelled because persisted intent changed")
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+        }
         
         // Extract config content if available
         if (intent != null && intent.action == BoxService.ACTION_START) {
@@ -175,38 +188,59 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             if (Settings.perAppProxyEnabled) {
                 val appList = Settings.perAppProxyList
                 if (Settings.perAppProxyMode == Settings.PER_APP_PROXY_INCLUDE) {
-                    appList.forEach {
+                    var addedApplications = 0
+                    VpnPackagePolicy.allowedPackages(appList, packageName).forEach {
                         try {
                             builder.addAllowedApplication(it)
+                            addedApplications += 1
                         } catch (_: NameNotFoundException) {
                         }
                     }
-                    builder.addAllowedApplication(packageName)
+                    check(addedApplications > 0) {
+                        "android: per-app include list has no installed external applications"
+                    }
                 } else {
-                    appList.forEach {
-                        try {
+                    VpnPackagePolicy.disallowedPackages(appList, packageName).forEach {
+                        if (it == packageName) {
                             builder.addDisallowedApplication(it)
-                        } catch (_: NameNotFoundException) {
+                        } else {
+                            try {
+                                builder.addDisallowedApplication(it)
+                            } catch (_: NameNotFoundException) {
+                            }
                         }
                     }
                 }
             } else {
                 val includePackage = options.includePackage
-                if (includePackage.hasNext()) {
-                    while (includePackage.hasNext()) {
+                val includedPackages = buildList {
+                    while (includePackage.hasNext()) add(includePackage.next())
+                }
+                if (includedPackages.isNotEmpty()) {
+                    var addedApplications = 0
+                    VpnPackagePolicy.allowedPackages(includedPackages, packageName).forEach {
                         try {
-                            builder.addAllowedApplication(includePackage.next())
+                            builder.addAllowedApplication(it)
+                            addedApplications += 1
                         } catch (_: NameNotFoundException) {
                         }
                     }
-                }
-
-                val excludePackage = options.excludePackage
-                if (excludePackage.hasNext()) {
-                    while (excludePackage.hasNext()) {
-                        try {
-                            builder.addDisallowedApplication(excludePackage.next())
-                        } catch (_: NameNotFoundException) {
+                    check(addedApplications > 0) {
+                        "android: include list has no installed external applications"
+                    }
+                } else {
+                    val excludePackage = options.excludePackage
+                    val excludedPackages = buildList {
+                        while (excludePackage.hasNext()) add(excludePackage.next())
+                    }
+                    VpnPackagePolicy.disallowedPackages(excludedPackages, packageName).forEach {
+                        if (it == packageName) {
+                            builder.addDisallowedApplication(it)
+                        } else {
+                            try {
+                                builder.addDisallowedApplication(it)
+                            } catch (_: NameNotFoundException) {
+                            }
                         }
                     }
                 }

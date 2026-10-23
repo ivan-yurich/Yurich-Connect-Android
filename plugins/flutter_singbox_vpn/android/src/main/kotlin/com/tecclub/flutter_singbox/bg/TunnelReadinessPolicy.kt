@@ -7,8 +7,15 @@ internal data class NetworkReadinessPlan(
     val probeAttempts: Int,
 )
 
+internal data class LifecyclePhaseStamp(
+    val generation: Long,
+    val phase: VpnSessionPhase,
+    val startedAtElapsedMs: Long,
+)
+
 internal object TunnelReadinessPolicy {
     const val REQUIRED_ENDPOINT_SUCCESSES = 2
+    const val MIN_NETWORK_CHANGE_PROBE_ATTEMPTS = 2
 
     fun isHealthy(successfulEndpoints: Int, totalEndpoints: Int): Boolean {
         if (totalEndpoints < REQUIRED_ENDPOINT_SUCCESSES ||
@@ -49,17 +56,44 @@ internal object TunnelReadinessPolicy {
             nowMs - lastRestartAtMs >= cooldownMs
     }
 
-    fun canRestartAfterStartupGrace(
+    fun canRestartAfterPhaseGrace(
         nowMs: Long,
-        startAttemptAtMs: Long,
+        currentGeneration: Long,
+        currentPhase: VpnSessionPhase,
+        phaseStamp: LifecyclePhaseStamp,
         graceMs: Long,
     ): Boolean {
-        if (graceMs < 0L) {
+        if (graceMs < 0L ||
+            phaseStamp.generation != currentGeneration ||
+            phaseStamp.phase != currentPhase ||
+            nowMs < phaseStamp.startedAtElapsedMs
+        ) {
             return false
         }
-        return startAttemptAtMs == 0L ||
-            nowMs < startAttemptAtMs ||
-            nowMs - startAttemptAtMs >= graceMs
+        return nowMs - phaseStamp.startedAtElapsedMs >= graceMs
+    }
+
+    fun isStaleLifecyclePhase(
+        nowMs: Long,
+        currentGeneration: Long,
+        currentPhase: VpnSessionPhase,
+        phaseStamp: LifecyclePhaseStamp,
+        timeoutMs: Long,
+        runtimeActive: Boolean,
+    ): Boolean {
+        if (runtimeActive || timeoutMs < 0L ||
+            currentPhase !in setOf(
+                VpnSessionPhase.Starting,
+                VpnSessionPhase.Reconnecting,
+                VpnSessionPhase.Stopping,
+            ) ||
+            phaseStamp.generation != currentGeneration ||
+            phaseStamp.phase != currentPhase ||
+            nowMs < phaseStamp.startedAtElapsedMs
+        ) {
+            return false
+        }
+        return nowMs - phaseStamp.startedAtElapsedMs >= timeoutMs
     }
 
     fun networkChangePlan(
@@ -74,12 +108,18 @@ internal object TunnelReadinessPolicy {
         return if (runtimeCore == VpnRuntimeCore.Xray) {
             NetworkReadinessPlan(
                 initialDelayMs = xrayInitialDelayMs,
-                probeAttempts = 1,
+                probeAttempts = maxOf(
+                    MIN_NETWORK_CHANGE_PROBE_ATTEMPTS,
+                    defaultProbeAttempts,
+                ),
             )
         } else {
             NetworkReadinessPlan(
                 initialDelayMs = defaultInitialDelayMs,
-                probeAttempts = defaultProbeAttempts,
+                probeAttempts = maxOf(
+                    MIN_NETWORK_CHANGE_PROBE_ATTEMPTS,
+                    defaultProbeAttempts,
+                ),
             )
         }
     }

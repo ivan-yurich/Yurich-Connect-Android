@@ -19,6 +19,7 @@ const _githubReleaseAssetName = 'YurichConnect-android-release.apk';
 const _updaterUserAgent = 'YurichConnect-Updater';
 const _updateConnectTimeout = Duration(seconds: 30);
 const _updateMetadataTimeout = Duration(seconds: 25);
+const _updateMetadataEndpointTimeout = Duration(seconds: 12);
 const _updateDownloadOpenTimeout = Duration(seconds: 60);
 const _updateDownloadIdleTimeout = Duration(seconds: 30);
 const _maxUpdateMetadataBytes = 1024 * 1024;
@@ -99,6 +100,64 @@ class AppUpdatePermissionException implements Exception {
   String toString() => 'Install permission is required.';
 }
 
+class AppUpdateArchitectureException implements Exception {
+  const AppUpdateArchitectureException();
+
+  @override
+  String toString() => 'Unable to determine Android CPU architecture.';
+}
+
+// A UI timeout alone does not cancel HttpClient work or release single-flight.
+class _UpdateLookupScope {
+  final _cancelled = Completer<void>();
+  final _requests = <HttpClientRequest>{};
+
+  void ensureActive() {
+    if (_cancelled.isCompleted) {
+      throw TimeoutException('Update check was cancelled.');
+    }
+  }
+
+  Future<T> wait<T>(Future<T> future) => Future.any([
+    future,
+    _cancelled.future.then<T>((_) {
+      throw TimeoutException('Update check was cancelled.');
+    }),
+  ]);
+
+  Future<HttpClientRequest> open(
+    HttpClient client,
+    Uri uri, {
+    bool head = false,
+  }) {
+    ensureActive();
+    return wait(
+      (head ? client.headUrl(uri) : client.getUrl(uri)).then((request) {
+        if (_cancelled.isCompleted) {
+          request.abort();
+          throw TimeoutException('Update check was cancelled.');
+        }
+        _requests.add(request);
+        return request;
+      }),
+    );
+  }
+
+  void release(HttpClientRequest request) {
+    _requests.remove(request);
+    request.abort();
+  }
+
+  void cancel() {
+    if (_cancelled.isCompleted) return;
+    _cancelled.complete();
+    for (final request in _requests) {
+      request.abort();
+    }
+    _requests.clear();
+  }
+}
+
 class AppUpdateDowngradeException implements Exception {
   const AppUpdateDowngradeException({
     required this.currentBuildNumber,
@@ -142,10 +201,16 @@ class AppUpdateService {
     HttpClient? client,
     List<Uri>? releaseApiUris,
     Uri? testingReleaseApiUri,
+    Uri? githubReleasePageUri,
     Duration downloadIdleTimeout = _updateDownloadIdleTimeout,
+    Duration metadataEndpointTimeout = _updateMetadataEndpointTimeout,
   }) : _client = client ?? HttpClient(),
        _downloadIdleTimeout = downloadIdleTimeout,
+       _metadataEndpointTimeout = metadataEndpointTimeout,
        _testingReleaseUri = testingReleaseApiUri ?? _testingReleaseApiUri,
+       _githubReleasePageUri =
+           githubReleasePageUri ??
+           Uri.parse('https://github.com/$_githubRepository/releases/latest'),
        _releaseApiUris =
            releaseApiUris ??
            _releaseApiUrls.map(Uri.parse).toList(growable: false) {
@@ -161,8 +226,10 @@ class AppUpdateService {
 
   final HttpClient _client;
   final Duration _downloadIdleTimeout;
+  final Duration _metadataEndpointTimeout;
   final List<Uri> _releaseApiUris;
   final Uri _testingReleaseUri;
+  final Uri _githubReleasePageUri;
   Future<AppUpdateInfo?>? _pendingLookup;
   String? _pendingLookupKey;
 
@@ -197,18 +264,38 @@ class AppUpdateService {
   Future<AppUpdateInfo?> findLatest({
     required String currentVersion,
     required List<String> supportedAbis,
+    Duration timeout = const Duration(seconds: 60),
   }) {
+    if (supportedAbis.isEmpty) {
+      return Future.error(const AppUpdateArchitectureException());
+    }
+    if (AppReleaseVersion.tryParse(currentVersion) == null) {
+      return Future.error(StateError('Invalid installed app version.'));
+    }
+    if (timeout <= Duration.zero) {
+      return Future.error(ArgumentError.value(timeout, 'timeout'));
+    }
     final key = jsonEncode([currentVersion, supportedAbis]);
     if (_pendingLookupKey == key && _pendingLookup != null) {
       return _pendingLookup!;
     }
+    final scope = _UpdateLookupScope();
     late final Future<AppUpdateInfo?> lookup;
-    lookup = _findLatest(currentVersion, supportedAbis).whenComplete(() {
-      if (identical(_pendingLookup, lookup)) {
-        _pendingLookup = null;
-        _pendingLookupKey = null;
-      }
-    });
+    lookup = _findLatest(currentVersion, supportedAbis, scope)
+        .timeout(
+          timeout,
+          onTimeout: () {
+            scope.cancel();
+            throw TimeoutException('Update check timed out.', timeout);
+          },
+        )
+        .whenComplete(() {
+          scope.cancel();
+          if (identical(_pendingLookup, lookup)) {
+            _pendingLookup = null;
+            _pendingLookupKey = null;
+          }
+        });
     _pendingLookup = lookup;
     _pendingLookupKey = key;
     return lookup;
@@ -217,18 +304,18 @@ class AppUpdateService {
   Future<AppUpdateInfo?> _findLatest(
     String currentVersion,
     List<String> supportedAbis,
+    _UpdateLookupScope scope,
   ) async {
     if (usesTestingChannel(currentVersion)) {
-      return _findTestingUpdate(currentVersion, supportedAbis);
+      return _findTestingUpdate(currentVersion, supportedAbis, scope);
     }
     Object? lastError;
-    var sawEmptyEndpoint = false;
     var sawNotNewerRelease = false;
     for (final uri in _releaseApiUris) {
+      scope.ensureActive();
       try {
-        final release = await _fetchRelease(uri, supportedAbis);
+        final release = await _fetchRelease(uri, supportedAbis, scope);
         if (release == null) {
-          sawEmptyEndpoint = true;
           continue;
         }
         if (_isVersionNewer(release.version, currentVersion)) {
@@ -236,12 +323,16 @@ class AppUpdateService {
         }
         sawNotNewerRelease = true;
       } on Object catch (error) {
+        scope.ensureActive();
         lastError = error;
       }
     }
 
     try {
-      final release = await _fetchLatestGitHubReleaseViaRedirect(supportedAbis);
+      final release = await _fetchLatestGitHubReleaseViaRedirect(
+        supportedAbis,
+        scope,
+      );
       if (release != null) {
         if (_isVersionNewer(release.version, currentVersion)) {
           return release;
@@ -249,10 +340,11 @@ class AppUpdateService {
         sawNotNewerRelease = true;
       }
     } on Object catch (error) {
+      scope.ensureActive();
       lastError = error;
     }
 
-    if (lastError != null && !sawEmptyEndpoint && !sawNotNewerRelease) {
+    if (lastError != null && !sawNotNewerRelease) {
       throw StateError('$lastError');
     }
     return null;
@@ -527,8 +619,9 @@ class AppUpdateService {
   Future<AppUpdateInfo?> _fetchRelease(
     Uri uri,
     List<String> supportedAbis,
+    _UpdateLookupScope scope,
   ) async {
-    final metadata = await _fetchReleaseMetadata(uri);
+    final metadata = await _fetchReleaseMetadata(uri, scope);
     if (metadata != null && metadata is! Map<String, dynamic>) {
       throw StateError('Stable update metadata must be an object.');
     }
@@ -540,9 +633,12 @@ class AppUpdateService {
   Future<AppUpdateInfo?> _findTestingUpdate(
     String currentVersion,
     List<String> supportedAbis,
+    _UpdateLookupScope scope,
   ) async {
-    final metadata = await _fetchReleaseMetadata(_testingReleaseUri);
-    if (metadata == null) return null;
+    final metadata = await _fetchReleaseMetadata(_testingReleaseUri, scope);
+    if (metadata == null) {
+      throw StateError('Testing release feed is unavailable (HTTP 404).');
+    }
     if (metadata is! List) {
       throw StateError('Testing update metadata must be a release list.');
     }
@@ -607,12 +703,45 @@ class AppUpdateService {
     );
   }
 
-  Future<Object?> _fetchReleaseMetadata(Uri uri) async {
+  Future<T> _readMetadataEndpoint<T>(
+    _UpdateLookupScope parent,
+    Future<T> Function(_UpdateLookupScope scope) read,
+  ) {
+    parent.ensureActive();
+    final scope = _UpdateLookupScope();
+    return parent
+        .wait(
+          read(scope).timeout(
+            _metadataEndpointTimeout,
+            onTimeout: () {
+              scope.cancel();
+              throw TimeoutException(
+                'Update endpoint timed out.',
+                _metadataEndpointTimeout,
+              );
+            },
+          ),
+        )
+        .whenComplete(scope.cancel);
+  }
+
+  Future<Object?> _fetchReleaseMetadata(Uri uri, _UpdateLookupScope scope) =>
+      _readMetadataEndpoint(
+        scope,
+        (child) => _fetchReleaseMetadataRequest(uri, child),
+      );
+
+  Future<Object?> _fetchReleaseMetadataRequest(
+    Uri uri,
+    _UpdateLookupScope scope,
+  ) async {
     _validateRemoteUpdateUri(uri);
     Object? lastError;
     for (var attempt = 0; attempt < _updateRetryDelays.length; attempt += 1) {
+      scope.ensureActive();
+      HttpClientRequest? request;
       try {
-        final request = await _client.getUrl(uri);
+        request = await scope.open(_client, uri);
         request.headers.set(HttpHeaders.acceptHeader, 'application/json');
         request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
         request.followRedirects = true;
@@ -632,13 +761,16 @@ class AppUpdateService {
         final raw = await _readLimitedMetadata(response);
         return jsonDecode(raw);
       } on Object catch (error) {
+        scope.ensureActive();
         lastError = error;
         if (!_shouldRetryUpdateError(error) ||
             attempt == _updateRetryDelays.length - 1) {
           break;
         }
-        await Future<void>.delayed(_updateRetryDelays[attempt]);
+      } finally {
+        if (request != null) scope.release(request);
       }
+      await scope.wait(Future<void>.delayed(_updateRetryDelays[attempt]));
     }
 
     throw StateError('$lastError');
@@ -663,8 +795,9 @@ class AppUpdateService {
 
   Future<AppUpdateInfo?> _fetchLatestGitHubReleaseViaRedirect(
     List<String> supportedAbis,
+    _UpdateLookupScope scope,
   ) async {
-    final tag = await _fetchLatestGitHubTag();
+    final tag = await _fetchLatestGitHubTag(scope);
     if (tag == null) return null;
     final parsedVersion = AppReleaseVersion.tryParse(tag);
     if (parsedVersion == null || parsedVersion.isTesting) {
@@ -673,7 +806,7 @@ class AppUpdateService {
 
     for (final assetName in _githubAssetNameCandidates(tag, supportedAbis)) {
       final urls = _githubDownloadUrls(tag, assetName);
-      final size = await _tryFetchContentLength(urls.first);
+      final size = await _tryFetchContentLength(urls.first, scope);
       if (size == null && assetName != _githubReleaseAssetName) {
         continue;
       }
@@ -689,14 +822,18 @@ class AppUpdateService {
     return null;
   }
 
-  Future<String?> _fetchLatestGitHubTag() async {
+  Future<String?> _fetchLatestGitHubTag(_UpdateLookupScope scope) =>
+      _readMetadataEndpoint(scope, _fetchLatestGitHubTagRequest);
+
+  Future<String?> _fetchLatestGitHubTagRequest(_UpdateLookupScope scope) async {
     Object? lastError;
-    final uri = Uri.parse(
-      'https://github.com/$_githubRepository/releases/latest',
-    );
+    final uri = _githubReleasePageUri;
+    _validateRemoteUpdateUri(uri);
     for (var attempt = 0; attempt < _updateRetryDelays.length; attempt += 1) {
+      scope.ensureActive();
+      HttpClientRequest? request;
       try {
-        final request = await _client.getUrl(uri);
+        request = await scope.open(_client, uri);
         request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
         request.followRedirects = false;
         final response = await request.close().timeout(_updateMetadataTimeout);
@@ -714,13 +851,16 @@ class AppUpdateService {
         }
         return null;
       } on Object catch (error) {
+        scope.ensureActive();
         lastError = error;
         if (!_shouldRetryUpdateError(error) ||
             attempt == _updateRetryDelays.length - 1) {
           break;
         }
-        await Future<void>.delayed(_updateRetryDelays[attempt]);
+      } finally {
+        if (request != null) scope.release(request);
       }
+      await scope.wait(Future<void>.delayed(_updateRetryDelays[attempt]));
     }
 
     throw StateError('$lastError');
@@ -735,9 +875,22 @@ class AppUpdateService {
     return segments[tagIndex + 1];
   }
 
-  Future<int?> _tryFetchContentLength(Uri uri) async {
+  Future<int?> _tryFetchContentLength(Uri uri, _UpdateLookupScope scope) async {
     try {
-      final request = await _client.headUrl(uri);
+      return await _readMetadataEndpoint(
+        scope,
+        (child) => _fetchContentLength(uri, child),
+      );
+    } on Object {
+      scope.ensureActive();
+      return null;
+    }
+  }
+
+  Future<int?> _fetchContentLength(Uri uri, _UpdateLookupScope scope) async {
+    HttpClientRequest? request;
+    try {
+      request = await scope.open(_client, uri, head: true);
       request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
       request.followRedirects = true;
       final response = await request.close().timeout(_updateMetadataTimeout);
@@ -749,7 +902,10 @@ class AppUpdateService {
           ? length
           : null;
     } on Object {
+      scope.ensureActive();
       return null;
+    } finally {
+      if (request != null) scope.release(request);
     }
   }
 

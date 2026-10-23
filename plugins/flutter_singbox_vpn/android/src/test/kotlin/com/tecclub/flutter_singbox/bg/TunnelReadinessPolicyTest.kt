@@ -100,49 +100,101 @@ class TunnelReadinessPolicyTest {
     }
 
     @Test
-    fun `runtime restart is deferred during startup grace`() {
+    fun `runtime restart is deferred during current generation phase grace`() {
         assertFalse(
-            TunnelReadinessPolicy.canRestartAfterStartupGrace(
+            TunnelReadinessPolicy.canRestartAfterPhaseGrace(
                 nowMs = 22_000L,
-                startAttemptAtMs = 10_000L,
+                currentGeneration = 4L,
+                currentPhase = VpnSessionPhase.Reconnecting,
+                phaseStamp = LifecyclePhaseStamp(
+                    generation = 4L,
+                    phase = VpnSessionPhase.Reconnecting,
+                    startedAtElapsedMs = 10_000L,
+                ),
                 graceMs = 30_000L,
             )
         )
     }
 
     @Test
-    fun `runtime restart is allowed after startup grace`() {
+    fun `runtime restart is allowed after current generation phase grace`() {
         assertTrue(
-            TunnelReadinessPolicy.canRestartAfterStartupGrace(
+            TunnelReadinessPolicy.canRestartAfterPhaseGrace(
                 nowMs = 40_000L,
-                startAttemptAtMs = 10_000L,
+                currentGeneration = 4L,
+                currentPhase = VpnSessionPhase.Reconnecting,
+                phaseStamp = LifecyclePhaseStamp(
+                    generation = 4L,
+                    phase = VpnSessionPhase.Reconnecting,
+                    startedAtElapsedMs = 10_000L,
+                ),
                 graceMs = 30_000L,
             )
         )
     }
 
     @Test
-    fun `cleared startup marker allows recovery after confirmed readiness`() {
-        assertTrue(
-            TunnelReadinessPolicy.canRestartAfterStartupGrace(
-                nowMs = 20_000L,
-                startAttemptAtMs = 0L,
+    fun `stale generation cannot authorize runtime restart`() {
+        assertFalse(
+            TunnelReadinessPolicy.canRestartAfterPhaseGrace(
+                nowMs = 50_000L,
+                currentGeneration = 5L,
+                currentPhase = VpnSessionPhase.Reconnecting,
+                phaseStamp = LifecyclePhaseStamp(
+                    generation = 4L,
+                    phase = VpnSessionPhase.Reconnecting,
+                    startedAtElapsedMs = 10_000L,
+                ),
                 graceMs = 30_000L,
             )
         )
     }
 
     @Test
-    fun `xray network changes use one early recovery probe`() {
+    fun `monotonic clock rollback cannot authorize runtime restart`() {
+        assertFalse(
+            TunnelReadinessPolicy.canRestartAfterPhaseGrace(
+                nowMs = 9_000L,
+                currentGeneration = 4L,
+                currentPhase = VpnSessionPhase.Reconnecting,
+                phaseStamp = LifecyclePhaseStamp(
+                    generation = 4L,
+                    phase = VpnSessionPhase.Reconnecting,
+                    startedAtElapsedMs = 10_000L,
+                ),
+                graceMs = 30_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `previous phase timestamp cannot authorize runtime restart`() {
+        assertFalse(
+            TunnelReadinessPolicy.canRestartAfterPhaseGrace(
+                nowMs = 100_000L,
+                currentGeneration = 4L,
+                currentPhase = VpnSessionPhase.Reconnecting,
+                phaseStamp = LifecyclePhaseStamp(
+                    generation = 4L,
+                    phase = VpnSessionPhase.Connected,
+                    startedAtElapsedMs = 10_000L,
+                ),
+                graceMs = 30_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `xray network changes require two quorum failures before restart`() {
         val plan = TunnelReadinessPolicy.networkChangePlan(
             runtimeCore = VpnRuntimeCore.Xray,
             defaultInitialDelayMs = 6_000L,
-            xrayInitialDelayMs = 1_000L,
-            defaultProbeAttempts = 2,
+            xrayInitialDelayMs = 4_000L,
+            defaultProbeAttempts = 1,
         )
 
-        assertEquals(1_000L, plan.initialDelayMs)
-        assertEquals(1, plan.probeAttempts)
+        assertEquals(4_000L, plan.initialDelayMs)
+        assertEquals(2, plan.probeAttempts)
     }
 
     @Test
@@ -176,6 +228,53 @@ class TunnelReadinessPolicyTest {
                 elapsedSinceLastEventMs = 200L,
                 debounceMs = 5_000L,
                 networkChanged = true,
+            )
+        )
+    }
+
+    @Test
+    fun `active runtime cannot be declared stale`() {
+        assertFalse(
+            TunnelReadinessPolicy.isStaleLifecyclePhase(
+                nowMs = 100_000L,
+                currentGeneration = 7L,
+                currentPhase = VpnSessionPhase.Stopping,
+                phaseStamp = LifecyclePhaseStamp(
+                    generation = 7L,
+                    phase = VpnSessionPhase.Stopping,
+                    startedAtElapsedMs = 10_000L,
+                ),
+                timeoutMs = 30_000L,
+                runtimeActive = true,
+            )
+        )
+    }
+
+    @Test
+    fun `inactive current generation phase becomes stale only after monotonic timeout`() {
+        val stamp = LifecyclePhaseStamp(
+            generation = 7L,
+            phase = VpnSessionPhase.Stopping,
+            startedAtElapsedMs = 10_000L,
+        )
+        assertFalse(
+            TunnelReadinessPolicy.isStaleLifecyclePhase(
+                nowMs = 39_999L,
+                currentGeneration = 7L,
+                currentPhase = VpnSessionPhase.Stopping,
+                phaseStamp = stamp,
+                timeoutMs = 30_000L,
+                runtimeActive = false,
+            )
+        )
+        assertTrue(
+            TunnelReadinessPolicy.isStaleLifecyclePhase(
+                nowMs = 40_000L,
+                currentGeneration = 7L,
+                currentPhase = VpnSessionPhase.Stopping,
+                phaseStamp = stamp,
+                timeoutMs = 30_000L,
+                runtimeActive = false,
             )
         )
     }

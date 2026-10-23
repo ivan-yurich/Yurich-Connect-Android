@@ -39,11 +39,18 @@ object DefaultNetworkMonitor {
             null
         }
 
-        DefaultNetworkListener.start(this) {
-            Log.d(TAG, "Network changed callback: $it")
-            defaultNetwork = it
-            scheduleDefaultInterfaceUpdate(it)
-            runCatching { networkChangeObserver?.invoke(it) }
+        var callbackObserved = false
+        DefaultNetworkListener.start(this) callback@{ network ->
+            val previous = defaultNetwork
+            if (callbackObserved && previous == network) {
+                Log.v(TAG, "Ignoring duplicate callback for unchanged default network")
+                return@callback
+            }
+            callbackObserved = true
+            Log.d(TAG, "Network changed callback: $network")
+            defaultNetwork = network
+            scheduleDefaultInterfaceUpdate(network)
+            runCatching { networkChangeObserver?.invoke(network) }
                 .onFailure { error -> Log.e(TAG, "Network change observer failed", error) }
         }
 

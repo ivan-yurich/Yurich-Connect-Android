@@ -68,7 +68,7 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
   ).showSnackBar(SnackBar(content: Text(message)));
 
   Future<void> _toggle(bool enabled) async {
-    if (_busy) return;
+    if (_busy || (_run.isPassive24h && _run.active)) return;
     if (enabled) {
       final accepted = await showDialog<bool>(
         context: context,
@@ -135,6 +135,13 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
   @override
   Widget build(BuildContext context) {
     final localizations = MaterialLocalizations.of(context);
+    final passive = _run.isPassive24h;
+    final passiveActive = passive && _run.active;
+    final title = passive
+        ? (ru
+              ? 'Пассивная диагностика · 24 часа'
+              : 'Passive diagnostics · 24 hours')
+        : (ru ? 'Диагностика на 7 дней' : '7-day diagnostics');
     final end = _run.endsAt;
     final deadline = end == null
         ? ''
@@ -145,14 +152,11 @@ class _DiagnosticsPanelState extends State<DiagnosticsPanel>
         Row(
           children: [
             Expanded(
-              child: Text(
-                ru ? 'Диагностика на 7 дней' : '7-day diagnostics',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
+              child: Text(title, style: Theme.of(context).textTheme.titleSmall),
             ),
             Switch(
               value: _run.active,
-              onChanged: _busy || !_loaded || _unavailable
+              onChanged: _busy || !_loaded || _unavailable || passiveActive
                   ? null
                   : (value) => unawaited(_toggle(value)),
             ),

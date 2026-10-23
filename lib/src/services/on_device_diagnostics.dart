@@ -1,6 +1,9 @@
 import 'package:flutter/services.dart';
 
 class DiagnosticRun {
+  static const standardMode = 'standard';
+  static const passive24hMode = 'passive_24h';
+
   const DiagnosticRun({
     this.active = false,
     this.available = false,
@@ -9,6 +12,8 @@ class DiagnosticRun {
     this.endedAt,
     this.events = 0,
     this.rotatedEvents = 0,
+    this.mode = standardMode,
+    this.durationHours = 7 * 24,
   });
 
   final bool active;
@@ -18,6 +23,10 @@ class DiagnosticRun {
   final DateTime? endedAt;
   final int events;
   final int rotatedEvents;
+  final String mode;
+  final int durationHours;
+
+  bool get isPassive24h => mode == passive24hMode;
 
   bool get stoppedEarly =>
       endedAt != null && endsAt != null && endedAt!.isBefore(endsAt!);
@@ -32,6 +41,16 @@ class DiagnosticRun {
           : null;
     }
 
+    final rawMode = value['mode'];
+    final mode = rawMode == passive24hMode ? passive24hMode : standardMode;
+    final rawDurationHours = value['durationHours'];
+    final durationHours =
+        rawDurationHours is int &&
+            rawDurationHours > 0 &&
+            rawDurationHours <= 7 * 24
+        ? rawDurationHours
+        : (mode == passive24hMode ? 24 : 7 * 24);
+
     return DiagnosticRun(
       active: value['active'] == true,
       available: value['available'] == true,
@@ -42,6 +61,8 @@ class DiagnosticRun {
       rotatedEvents: value['rotatedEvents'] is int
           ? value['rotatedEvents'] as int
           : 0,
+      mode: mode,
+      durationHours: durationHours,
     );
   }
 }

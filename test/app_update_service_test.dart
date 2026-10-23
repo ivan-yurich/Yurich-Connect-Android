@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -45,6 +46,222 @@ void main() {
 
   const currentTest = '1.0.128-test.20261007.9';
   const nextTest = '1.0.128-test.20261008.10';
+
+  test('unknown ABI is an error rather than an up-to-date result', () async {
+    final service = await testingService([release(nextTest)]);
+    await expectLater(
+      service.findLatest(currentVersion: currentTest, supportedAbis: const []),
+      throwsA(isA<Exception>()),
+    );
+  });
+
+  test('missing testing feed is an error rather than no updates', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+    });
+    final service = AppUpdateService(
+      testingReleaseApiUri: Uri.parse(
+        'http://127.0.0.1:${server.port}/missing',
+      ),
+    );
+    await expectLater(
+      service.findLatest(
+        currentVersion: currentTest,
+        supportedAbis: const ['arm64-v8a'],
+      ),
+      throwsStateError,
+    );
+  });
+
+  for (final sendHeaders in [false, true]) {
+    test(
+      'deadline cancels stalled ${sendHeaders ? 'body' : 'headers'} and retry opens a fresh request',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        var requests = 0;
+        server.listen((request) async {
+          requests += 1;
+          if (requests == 1) {
+            if (sendHeaders) {
+              request.response
+                ..headers.contentType = ContentType.json
+                ..write('[');
+              await request.response.flush();
+            }
+            return;
+          }
+          request.response
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode([release(nextTest)]));
+          await request.response.close();
+        });
+        final service = AppUpdateService(
+          testingReleaseApiUri: Uri.parse(
+            'http://127.0.0.1:${server.port}/releases',
+          ),
+        );
+        final first = service.findLatest(
+          currentVersion: currentTest,
+          supportedAbis: const ['arm64-v8a'],
+          timeout: const Duration(milliseconds: 250),
+        );
+        await expectLater(first, throwsA(isA<TimeoutException>()));
+        final retry = service.findLatest(
+          currentVersion: currentTest,
+          supportedAbis: const ['arm64-v8a'],
+          timeout: const Duration(seconds: 3),
+        );
+        expect(identical(first, retry), isFalse);
+        expect((await retry)!.version, nextTest);
+        await Future<void>.delayed(const Duration(milliseconds: 2100));
+        expect(
+          requests,
+          2,
+          reason: 'Cancelled lookup must not retry in the background.',
+        );
+      },
+    );
+  }
+
+  test(
+    'lookup cancellation does not abort an independent APK download',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final started = Completer<void>();
+      server.listen((request) async {
+        if (request.uri.path == '/releases') return;
+        request.response.add([0x50, 0x4B]);
+        await request.response.flush();
+        started.complete();
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        request.response.add([0x03, 0x04]);
+        await request.response.close();
+      });
+      final service = AppUpdateService(
+        testingReleaseApiUri: Uri.parse(
+          'http://127.0.0.1:${server.port}/releases',
+        ),
+      );
+      final download = service.download(
+        AppUpdateInfo(
+          version: nextTest,
+          assetName: 'independent-${DateTime.now().microsecondsSinceEpoch}.apk',
+          downloadUrl: Uri.parse('http://127.0.0.1:${server.port}/update.apk'),
+          size: 4,
+        ),
+        onProgress: (_) {},
+      );
+      await started.future;
+      await expectLater(
+        service.findLatest(
+          currentVersion: currentTest,
+          supportedAbis: const ['arm64-v8a'],
+          timeout: const Duration(milliseconds: 150),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      final file = await download;
+      addTearDown(() => file.delete());
+      expect(await file.readAsBytes(), [0x50, 0x4B, 0x03, 0x04]);
+    },
+  );
+
+  test('invalid installed version cannot report that it is current', () async {
+    await expectLater(
+      AppUpdateService().findLatest(
+        currentVersion: 'unknown',
+        supportedAbis: const ['arm64-v8a'],
+      ),
+      throwsStateError,
+    );
+  });
+
+  test(
+    'stalled primary metadata does not starve the existing mirror',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final requested = <String>[];
+      server.listen((request) async {
+        requested.add(request.uri.path);
+        if (request.uri.path == '/primary') return;
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode(release('1.0.129', prerelease: false)));
+        await request.response.close();
+      });
+      final service = AppUpdateService(
+        metadataEndpointTimeout: const Duration(milliseconds: 250),
+        releaseApiUris: [
+          Uri.parse('http://127.0.0.1:${server.port}/primary'),
+          Uri.parse('http://127.0.0.1:${server.port}/mirror'),
+        ],
+      );
+      final update = await service.findLatest(
+        currentVersion: '1.0.127',
+        supportedAbis: const ['arm64-v8a'],
+        timeout: const Duration(seconds: 3),
+      );
+      expect(update!.version, '1.0.129');
+      expect(requested, ['/primary', '/mirror']);
+    },
+  );
+
+  test('deadline also cancels retry backoff', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var requests = 0;
+    server.listen((request) async {
+      requests += 1;
+      request.response.statusCode = HttpStatus.serviceUnavailable;
+      await request.response.close();
+    });
+    final service = AppUpdateService(
+      testingReleaseApiUri: Uri.parse(
+        'http://127.0.0.1:${server.port}/releases',
+      ),
+    );
+    await expectLater(
+      service.findLatest(
+        currentVersion: currentTest,
+        supportedAbis: const ['arm64-v8a'],
+        timeout: const Duration(milliseconds: 200),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 2100));
+    expect(requests, 1);
+  });
+
+  test('empty mirror cannot hide GitHub API and redirect failures', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      request.response.statusCode = request.uri.path == '/mirror'
+          ? HttpStatus.notFound
+          : HttpStatus.forbidden;
+      await request.response.close();
+    });
+    final service = AppUpdateService(
+      releaseApiUris: [
+        Uri.parse('http://127.0.0.1:${server.port}/api'),
+        Uri.parse('http://127.0.0.1:${server.port}/mirror'),
+      ],
+      githubReleasePageUri: Uri.parse('http://127.0.0.1:${server.port}/latest'),
+    );
+    await expectLater(
+      service.findLatest(
+        currentVersion: '1.0.127',
+        supportedAbis: const ['arm64-v8a'],
+      ),
+      throwsStateError,
+    );
+  });
 
   test(
     'manual and automatic lookups share only an in-flight request',
@@ -129,25 +346,21 @@ void main() {
     expect(update!.version, nextTest);
   });
 
-  test(
-    'does not select an incompatible APK or guess when ABI is unknown',
-    () async {
-      final service = await testingService([release(nextTest)]);
-      for (final abis in [
-        <String>[],
-        ['armeabi-v7a'],
-        ['x86_64'],
-      ]) {
-        expect(
-          await service.findLatest(
-            currentVersion: currentTest,
-            supportedAbis: abis,
-          ),
-          isNull,
-        );
-      }
-    },
-  );
+  test('does not select an incompatible APK', () async {
+    final service = await testingService([release(nextTest)]);
+    for (final abis in [
+      ['armeabi-v7a'],
+      ['x86_64'],
+    ]) {
+      expect(
+        await service.findLatest(
+          currentVersion: currentTest,
+          supportedAbis: abis,
+        ),
+        isNull,
+      );
+    }
+  });
 
   test('does not advertise the installed or older testing build', () async {
     final service = await testingService([

@@ -571,10 +571,15 @@ class _Strings {
   };
 
   String get updateCheckTimedOut => switch (this) {
+    _Strings.en => 'The update request timed out. Check the network and retry.',
+    _ => 'Превышено время ожидания обновления. Проверь сеть и повтори попытку.',
+  };
+
+  String get updateArchitectureUnavailable => switch (this) {
     _Strings.en =>
-      'The update server did not respond within 60 seconds. Check the network and retry.',
+      'Unable to determine the phone CPU architecture. Restart the app and retry. Update availability was not checked.',
     _ =>
-      'Сервер обновлений не ответил за 60 секунд. Проверь сеть и повтори попытку.',
+      'Не удалось определить архитектуру телефона. Перезапусти приложение и повтори попытку. Наличие обновления не проверено.',
   };
 
   String get updatesDisabled => switch (this) {

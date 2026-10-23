@@ -1,5 +1,6 @@
 package com.tecclub.flutter_singbox.bg
 
+import com.tecclub.flutter_singbox.session.VpnSessionPhase
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -55,10 +56,133 @@ class WatchdogRecoveryPolicyTest {
         assertFalse(WatchdogRecoveryPolicy.canRestart(WatchdogRecoveryState(), -1, false))
     }
 
-    @Test fun `retry probes wait without sleeping past the recovery budget`() {
-        val state = WatchdogRecoveryState(100_000L, 5)
-        assertEquals(60_000L, WatchdogRecoveryPolicy.retryDelayMs(state, 200_000L, false))
-        assertEquals(90_000L, WatchdogRecoveryPolicy.retryDelayMs(state, 200_000L, true))
-        assertEquals(20_000L, WatchdogRecoveryPolicy.retryDelayMs(state, 999_000L, false))
+    @Test fun `readiness probes use short cadence independent of restart cooldown`() {
+        assertEquals(
+            listOf(12_000L, 20_000L, 30_000L, 60_000L, 60_000L),
+            (1..5).map { WatchdogRecoveryPolicy.readinessRetryDelayMs(it, false) },
+        )
+        assertEquals(
+            listOf(30_000L, 60_000L, 90_000L, 90_000L),
+            (1..4).map { WatchdogRecoveryPolicy.readinessRetryDelayMs(it, true) },
+        )
+        assertEquals(12_000L, WatchdogRecoveryPolicy.readinessRetryDelayMs(Int.MIN_VALUE, false))
+    }
+
+    @Test fun `hysteria2 on cellular requires a second failed readiness cycle`() {
+        assertFalse(WatchdogRecoveryPolicy.canAttemptReadinessRestart(
+            failedCycles = 1,
+            usesHysteria2 = true,
+            cellular = true,
+        ))
+        assertTrue(WatchdogRecoveryPolicy.canAttemptReadinessRestart(
+            failedCycles = 2,
+            usesHysteria2 = true,
+            cellular = true,
+        ))
+    }
+
+    @Test fun `other protocols and wifi retain immediate recovery`() {
+        assertTrue(WatchdogRecoveryPolicy.canAttemptReadinessRestart(
+            failedCycles = 1,
+            usesHysteria2 = false,
+            cellular = true,
+        ))
+        assertTrue(WatchdogRecoveryPolicy.canAttemptReadinessRestart(
+            failedCycles = 1,
+            usesHysteria2 = true,
+            cellular = false,
+        ))
+        assertFalse(WatchdogRecoveryPolicy.canAttemptReadinessRestart(
+            failedCycles = 0,
+            usesHysteria2 = false,
+            cellular = false,
+        ))
+    }
+
+    @Test fun `hysteria2 cellular periodic health gets one soft reset before restart`() {
+        assertTrue(WatchdogRecoveryPolicy.shouldAttemptHysteria2CellularSoftReset(
+            failedCycles = 1,
+            usesHysteria2 = true,
+            cellular = true,
+            periodicHealthCheck = true,
+            sawDefaultNetwork = true,
+            hasDefaultNetwork = true,
+            runtimeWasReady = true,
+            alreadyAttempted = false,
+        ))
+        assertFalse(WatchdogRecoveryPolicy.shouldAttemptHysteria2CellularSoftReset(
+            failedCycles = 2,
+            usesHysteria2 = true,
+            cellular = true,
+            periodicHealthCheck = true,
+            sawDefaultNetwork = true,
+            hasDefaultNetwork = true,
+            runtimeWasReady = true,
+            alreadyAttempted = false,
+        ))
+        assertFalse(WatchdogRecoveryPolicy.shouldAttemptHysteria2CellularSoftReset(
+            failedCycles = 1,
+            usesHysteria2 = true,
+            cellular = true,
+            periodicHealthCheck = true,
+            sawDefaultNetwork = true,
+            hasDefaultNetwork = true,
+            runtimeWasReady = true,
+            alreadyAttempted = true,
+        ))
+    }
+
+    @Test fun `soft reset is excluded from startup wifi and non hysteria recovery`() {
+        fun eligible(
+            usesHysteria2: Boolean = true,
+            cellular: Boolean = true,
+            periodic: Boolean = true,
+            sawNetwork: Boolean = true,
+            hasNetwork: Boolean = true,
+            runtimeWasReady: Boolean = true,
+        ) = WatchdogRecoveryPolicy.shouldAttemptHysteria2CellularSoftReset(
+            failedCycles = 1,
+            usesHysteria2 = usesHysteria2,
+            cellular = cellular,
+            periodicHealthCheck = periodic,
+            sawDefaultNetwork = sawNetwork,
+            hasDefaultNetwork = hasNetwork,
+            runtimeWasReady = runtimeWasReady,
+            alreadyAttempted = false,
+        )
+
+        assertFalse(eligible(usesHysteria2 = false))
+        assertFalse(eligible(cellular = false))
+        assertFalse(eligible(periodic = false))
+        assertFalse(eligible(sawNetwork = false))
+        assertFalse(eligible(hasNetwork = false))
+        assertFalse(eligible(runtimeWasReady = false))
+    }
+
+    @Test fun `new reconnect phase grace cannot suppress the established tunnel soft reset`() {
+        val reconnectStartedAt = 100_000L
+        val reconnectGraceElapsed = TunnelReadinessPolicy.canRestartAfterPhaseGrace(
+            nowMs = reconnectStartedAt + 14_000L,
+            currentGeneration = 3L,
+            currentPhase = VpnSessionPhase.Reconnecting,
+            phaseStamp = LifecyclePhaseStamp(
+                generation = 3L,
+                phase = VpnSessionPhase.Reconnecting,
+                startedAtElapsedMs = reconnectStartedAt,
+            ),
+            graceMs = 30_000L,
+        )
+
+        assertFalse(reconnectGraceElapsed)
+        assertTrue(WatchdogRecoveryPolicy.shouldAttemptHysteria2CellularSoftReset(
+            failedCycles = 1,
+            usesHysteria2 = true,
+            cellular = true,
+            periodicHealthCheck = true,
+            sawDefaultNetwork = true,
+            hasDefaultNetwork = true,
+            runtimeWasReady = true,
+            alreadyAttempted = false,
+        ))
     }
 }

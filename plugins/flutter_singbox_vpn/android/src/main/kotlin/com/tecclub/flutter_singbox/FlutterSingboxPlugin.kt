@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.getSystemService
@@ -140,6 +141,16 @@ class ApplicationHelper {
 
 private const val APP_ALERT_CHANNEL_ID = "yurich_connect_alerts"
 
+internal object VpnStopLifecyclePolicy {
+    const val GRACEFUL_TIMEOUT_MS = 25_000L
+    const val FORCE_STOP_TIMEOUT_MS = 4_000L
+    const val PROCESS_EXIT_CONFIRM_TIMEOUT_MS = 2_000L
+
+    fun canStart(isShuttingDown: Boolean): Boolean = !isShuttingDown
+
+    fun canFinalize(serviceRunning: Boolean): Boolean = !serviceRunning
+}
+
 /** FlutterSingboxPlugin */
 class FlutterSingboxPlugin :
     FlutterPlugin,
@@ -214,9 +225,6 @@ class FlutterSingboxPlugin :
     val trafficStats: StateFlow<Map<String, Any>> = _trafficStats
     
     // Session data tracking
-    private var sessionStartUplinkTotal = 0L
-    private var sessionStartDownlinkTotal = 0L
-    private val singBoxSessionTraffic = SessionTrafficAccumulator()
     private var sessionStartUidTxBytes = -1L
     private var sessionStartUidRxBytes = -1L
     private var lastUidTxBytes = -1L
@@ -382,7 +390,8 @@ class FlutterSingboxPlugin :
                         sessionStartedAt = 0L
                         connectionUiState = ConnectionUiState.disconnected()
                         if (isShuttingDown) {
-                            completeStopCleanup("broadcast-stopped")
+                            _vpnStatus.value = Status.Stopping
+                            sendStatusUpdate(Status.Stopping)
                             return
                         }
                     }
@@ -455,6 +464,20 @@ class FlutterSingboxPlugin :
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         android.util.Log.e("FlutterSingboxPlugin", "Plugin attaching to engine")
         context = flutterPluginBinding.applicationContext
+        val restoredTraffic = SessionTrafficRepository.initialize(
+            context = context,
+            restoreActiveSession = SimpleConfigManager.getStartedByUser(context),
+        )
+        if (restoredTraffic.total > 0L) {
+            _trafficStats.value = _trafficStats.value.toMutableMap().apply {
+                put("sessionUplink", restoredTraffic.uplink)
+                put("sessionDownlink", restoredTraffic.downlink)
+                put("sessionTotal", restoredTraffic.total)
+                put("formattedSessionUplink", TrafficStats.formatBytes(restoredTraffic.uplink))
+                put("formattedSessionDownlink", TrafficStats.formatBytes(restoredTraffic.downlink))
+                put("formattedSessionTotal", TrafficStats.formatBytes(restoredTraffic.total))
+            }
+        }
         
         // Initialize service state
         _vpnStatus.value = Status.Stopped
@@ -520,6 +543,7 @@ class FlutterSingboxPlugin :
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 android.util.Log.e("FlutterSingboxPlugin", "Traffic event channel - onListen called")
                 trafficEventSink = events
+                events?.success(_trafficStats.value)
                 syncXrayTrafficSampler(_vpnStatus.value)
             }
             
@@ -603,6 +627,7 @@ class FlutterSingboxPlugin :
         
         // Disconnect from service
         try {
+            SessionTrafficRepository.flush()
             periodicStatusJob?.cancel()
             periodicStatusJob = null
             stopXrayTrafficSampler()
@@ -1222,6 +1247,14 @@ class FlutterSingboxPlugin :
     
     private fun startVPN(result: Result) {
         android.util.Log.e("FlutterSingboxPlugin", "Starting VPN...")
+        if (!VpnStopLifecyclePolicy.canStart(isShuttingDown)) {
+            result.error(
+                "STOP_IN_PROGRESS",
+                "The previous VPN runtime has not stopped yet",
+                null,
+            )
+            return
+        }
         val generation = lifecycleGeneration.incrementAndGet()
         // Reset shutdown flag when starting a new connection
         isShuttingDown = false
@@ -1476,9 +1509,10 @@ class FlutterSingboxPlugin :
                 try {
                     android.util.Log.e("FlutterSingboxPlugin", "Waiting for service to stop...")
 
-                    val deadline = System.currentTimeMillis() + 12000
+                    val deadline = SystemClock.elapsedRealtime() +
+                        VpnStopLifecyclePolicy.GRACEFUL_TIMEOUT_MS
                     var running = true
-                    while (System.currentTimeMillis() < deadline) {
+                    while (SystemClock.elapsedRealtime() < deadline) {
                         kotlinx.coroutines.delay(250)
 
                         if (stopCleanupCompleted) {
@@ -1505,8 +1539,9 @@ class FlutterSingboxPlugin :
                             putExtra(Action.EXTRA_USER_INITIATED, true)
                         })
                         context.stopService(Intent(context, Settings.serviceClass()))
-                        val forceDeadline = System.currentTimeMillis() + 4000
-                        while (System.currentTimeMillis() < forceDeadline) {
+                        val forceDeadline = SystemClock.elapsedRealtime() +
+                            VpnStopLifecyclePolicy.FORCE_STOP_TIMEOUT_MS
+                        while (SystemClock.elapsedRealtime() < forceDeadline) {
                             kotlinx.coroutines.delay(250)
                             running = isVpnServiceRunning()
                             if (!running) {
@@ -1518,8 +1553,9 @@ class FlutterSingboxPlugin :
                     if (running) {
                         val killed = killVpnServiceProcess("forced stop after graceful stop timeout")
                         if (killed) {
-                            val killDeadline = System.currentTimeMillis() + 1500
-                            while (System.currentTimeMillis() < killDeadline) {
+                            val killDeadline = SystemClock.elapsedRealtime() +
+                                VpnStopLifecyclePolicy.PROCESS_EXIT_CONFIRM_TIMEOUT_MS
+                            while (SystemClock.elapsedRealtime() < killDeadline) {
                                 kotlinx.coroutines.delay(150)
                                 running = isVpnServiceRunning()
                                 if (!running) {
@@ -1529,11 +1565,22 @@ class FlutterSingboxPlugin :
                         }
                     }
 
-                    completeStopCleanup(
-                        "cleanup-job running=$running",
-                        generation = generation,
-                        cancelJob = false,
-                    )
+                    if (VpnStopLifecyclePolicy.canFinalize(running)) {
+                        completeStopCleanup(
+                            "cleanup-job service absent",
+                            generation = generation,
+                            cancelJob = false,
+                            serviceRunning = false,
+                        )
+                    } else {
+                        android.util.Log.e(
+                            "FlutterSingboxPlugin",
+                            "VPN service still running after bounded stop; keeping Stopping",
+                        )
+                        _vpnStatus.value = Status.Stopping
+                        sendStatusUpdate(Status.Stopping)
+                        stopCleanupJob = null
+                    }
                 } catch (e: CancellationException) {
                     android.util.Log.e(
                         "FlutterSingboxPlugin",
@@ -1542,21 +1589,20 @@ class FlutterSingboxPlugin :
                     stopCleanupJob = null
                 } catch (e: Exception) {
                     android.util.Log.e("FlutterSingboxPlugin", "Error during stop cleanup: ${e.message}", e)
-                    isShuttingDown = false
-                    _vpnStatus.value = Status.Stopped
-                    sendStatusUpdate(Status.Stopped)
+                    _vpnStatus.value = Status.Stopping
+                    sendStatusUpdate(Status.Stopping)
                     stopCleanupJob = null
                 }
             }
         } catch (e: Exception) {
             android.util.Log.e("FlutterSingboxPlugin", "Error stopping VPN", e)
             
-            // Reset the shutting down flag
-            isShuttingDown = false
-            
-            // Even on error, set status to Stopped for UI consistency
-            _vpnStatus.value = Status.Stopped
-            sendStatusUpdate(Status.Stopped)
+            // A failed stop request is not proof that the native runtime exited.
+            // Keep the lifecycle closed to new starts until service absence is
+            // observed by cleanup or an explicit status query.
+            isShuttingDown = true
+            _vpnStatus.value = Status.Stopping
+            sendStatusUpdate(Status.Stopping)
             
             result.error("STOP_VPN_ERROR", e.message, null)
         }
@@ -1566,7 +1612,15 @@ class FlutterSingboxPlugin :
         reason: String,
         generation: Long = activeStopGeneration,
         cancelJob: Boolean = true,
+        serviceRunning: Boolean,
     ) {
+        if (!VpnStopLifecyclePolicy.canFinalize(serviceRunning)) {
+            android.util.Log.w(
+                "FlutterSingboxPlugin",
+                "Refusing to publish Stopped while VPN service is still running",
+            )
+            return
+        }
         if (stopCleanupCompleted ||
             generation == 0L ||
             generation != activeStopGeneration ||
@@ -1601,7 +1655,7 @@ class FlutterSingboxPlugin :
             "formattedSessionTotal" to "0 B"
         )
         resetUidTrafficSession()
-        singBoxSessionTraffic.reset()
+        SessionTrafficRepository.reset(context)
         _vpnStatus.value = Status.Stopped
         sendStatusUpdate(Status.Stopped)
         isShuttingDown = false
@@ -1659,7 +1713,15 @@ class FlutterSingboxPlugin :
                     }
                 } else {
                     // Service is not running
-                    _vpnStatus.value = Status.Stopped
+                    if (isShuttingDown) {
+                        completeStopCleanup(
+                            reason = "status-query service absent",
+                            generation = activeStopGeneration,
+                            serviceRunning = false,
+                        )
+                    } else {
+                        _vpnStatus.value = Status.Stopped
+                    }
                 }
                 
                 // Return the current status
@@ -1803,7 +1865,9 @@ class FlutterSingboxPlugin :
                     "formattedSessionTotal" to "0 B"
                 )
                 resetUidTrafficSession()
-                singBoxSessionTraffic.reset()
+                if (!SimpleConfigManager.getStartedByUser(context)) {
+                    SessionTrafficRepository.reset(context)
+                }
             }
             else -> {
                 // Starting or Stopping - no action needed
@@ -1827,31 +1891,37 @@ class FlutterSingboxPlugin :
             return
         }
         val uidSample = sampleUidTraffic()
-
-        // When first status update comes, set session start values
-        if (sessionStartUplinkTotal == 0L && sessionStartDownlinkTotal == 0L && status.uplinkTotal > 0) {
-            sessionStartUplinkTotal = status.uplinkTotal
-            sessionStartDownlinkTotal = status.downlinkTotal
-        }
-        
-        // Calculate session data (data transferred since connection started)
-        val singBoxSessionUplink = (status.uplinkTotal - sessionStartUplinkTotal).coerceAtLeast(0L)
-        val singBoxSessionDownlink = (status.downlinkTotal - sessionStartDownlinkTotal).coerceAtLeast(0L)
-        val sessionUplink = if (singBoxSessionUplink > 0L || status.uplink > 0L) {
-            singBoxSessionUplink
+        val singBoxCountersAvailable = status.uplinkTotal > 0L ||
+            status.downlinkTotal > 0L ||
+            status.uplink > 0L ||
+            status.downlink > 0L
+        val sessionSource = if (
+            SessionTrafficRepository.currentSource() == SessionTrafficSource.SING_BOX ||
+            singBoxCountersAvailable
+        ) {
+            SessionTrafficSource.SING_BOX
         } else {
-            uidSample.sessionTx
+            SessionTrafficSource.UID
         }
-        val sessionDownlink = if (singBoxSessionDownlink > 0L || status.downlink > 0L) {
-            singBoxSessionDownlink
+        val sessionRawUplink = if (sessionSource == SessionTrafficSource.SING_BOX) {
+            status.uplinkTotal
         } else {
-            uidSample.sessionRx
+            uidSample.txTotal
+        }
+        val sessionRawDownlink = if (sessionSource == SessionTrafficSource.SING_BOX) {
+            status.downlinkTotal
+        } else {
+            uidSample.rxTotal
         }
         val uplinkSpeed = if (status.uplink > 0L) status.uplink else uidSample.txSpeed
         val downlinkSpeed = if (status.downlink > 0L) status.downlink else uidSample.rxSpeed
         val uplinkTotal = if (status.uplinkTotal > 0L) status.uplinkTotal else uidSample.txTotal
         val downlinkTotal = if (status.downlinkTotal > 0L) status.downlinkTotal else uidSample.rxTotal
-        val session = singBoxSessionTraffic.observe(sessionUplink, sessionDownlink)
+        val session = SessionTrafficRepository.observe(
+            source = sessionSource,
+            rawUplink = sessionRawUplink,
+            rawDownlink = sessionRawDownlink,
+        )
         
         // Update traffic stats
         val stats = currentNetworkSnapshot().toMutableMap()
@@ -1905,8 +1975,17 @@ class FlutterSingboxPlugin :
         xrayTrafficJob = coroutineScope.launch {
             try {
                 while (isActive && _vpnStatus.value == Status.Started) {
+                    val sample = sampleUidTraffic()
+                    val session = SessionTrafficRepository.observe(
+                        source = SessionTrafficSource.UID,
+                        rawUplink = sample.txTotal,
+                        rawDownlink = sample.rxTotal,
+                    )
                     val stats = XrayTrafficEventPolicy.build(
-                        sample = sampleUidTraffic(),
+                        sample = sample.copy(
+                            sessionTx = session.uplink,
+                            sessionRx = session.downlink,
+                        ),
                         networkSnapshot = currentNetworkSnapshot(),
                     )
                     publishTrafficStats(stats)
@@ -1929,9 +2008,18 @@ class FlutterSingboxPlugin :
         xrayTrafficJob = null
         job.cancel()
         if (publishIdleSample) {
+            val sample = sampleUidTraffic()
+            val session = SessionTrafficRepository.observe(
+                source = SessionTrafficSource.UID,
+                rawUplink = sample.txTotal,
+                rawDownlink = sample.rxTotal,
+            )
             publishTrafficStats(
                 XrayTrafficEventPolicy.build(
-                    sample = sampleUidTraffic(),
+                    sample = sample.copy(
+                        sessionTx = session.uplink,
+                        sessionRx = session.downlink,
+                    ),
                     networkSnapshot = currentNetworkSnapshot(),
                     active = false,
                 ),
@@ -1960,10 +2048,8 @@ class FlutterSingboxPlugin :
     }
 
     private fun resetSessionTrafficCounters() {
-        sessionStartUplinkTotal = 0L
-        sessionStartDownlinkTotal = 0L
         sessionStartedAt = 0L
-        singBoxSessionTraffic.reset()
+        SessionTrafficRepository.reset(context)
         resetUidTrafficSession()
         _trafficStats.value = _trafficStats.value.mapValues { (key, value) ->
             when (key) {

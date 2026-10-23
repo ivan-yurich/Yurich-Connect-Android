@@ -3,8 +3,27 @@ package com.tecclub.flutter_singbox
 import com.tecclub.flutter_singbox.constant.Status
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class VpnStatusResolverTest {
+    @Test
+    fun stopLifecycleUsesARealisticNativeCleanupWindow() {
+        assertTrue(VpnStopLifecyclePolicy.GRACEFUL_TIMEOUT_MS >= 25_000L)
+    }
+
+    @Test
+    fun runningServiceCannotFinalizeStopOrAcceptAReplacementStart() {
+        assertFalse(VpnStopLifecyclePolicy.canFinalize(serviceRunning = true))
+        assertFalse(VpnStopLifecyclePolicy.canStart(isShuttingDown = true))
+    }
+
+    @Test
+    fun confirmedServiceAbsenceAllowsStopCompletionAndNextStart() {
+        assertTrue(VpnStopLifecyclePolicy.canFinalize(serviceRunning = false))
+        assertTrue(VpnStopLifecyclePolicy.canStart(isShuttingDown = false))
+    }
+
     @Test
     fun shutdownDefersStoppedBroadcastUntilServiceExit() {
         assertEquals(

@@ -140,6 +140,9 @@ void main() {
       'manualDisconnectRequested': false,
     });
     await tester.pump();
+    // The asynchronous status stream can schedule the UI rebuild after the
+    // current test frame. Do not rely on a perpetual animation for that frame.
+    await tester.pump();
     expect(find.textContaining('VPN остановлен неожиданно'), findsOneWidget);
   }
 
@@ -182,6 +185,39 @@ void main() {
     expect(find.text('1 MB'), findsNothing);
     expect(find.textContaining('8 KB/s'), findsNothing);
     expect(find.text('0 B'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('native recovery preserves session counters across Starting', (
+    tester,
+  ) async {
+    await launchWithProfile(tester);
+    await emitTraffic(tester);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('1 MB'), findsOneWidget);
+
+    nativeStatus = 'Starting';
+    platform.status.add({
+      'status': 'Starting',
+      'manualDisconnectRequested': false,
+      'desiredRunning': true,
+      'sessionReason': 'watchdog:readiness:periodic',
+    });
+    await tester.pump();
+    expect(find.text('1 MB'), findsOneWidget);
+
+    // Periodic status polls do not carry the service's session reason. Once a
+    // recovery was identified, they must not reset the same logical session.
+    platform.status.add({
+      'status': 'Starting',
+      'manualDisconnectRequested': false,
+    });
+    await tester.pump();
+    expect(find.text('1 MB'), findsOneWidget);
+
+    nativeStatus = 'Started';
+    await emitConnected(tester);
+    expect(find.text('1 MB'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -266,59 +302,60 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'pauses UI animation in background and restores traffic on resume',
-    (tester) async {
-      tester.view.physicalSize = const Size(1080, 2400);
-      tester.view.devicePixelRatio = 3;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pumpWidget(const YurichConnectApp());
-      for (var i = 0; i < 12; i++) {
-        await tester.pump(const Duration(milliseconds: 250));
-      }
-      expect(tester.takeException(), isNull);
-      expect(binding.transientCallbackCount, greaterThan(0));
-      nativeCalls.clear();
+  testWidgets('keeps stable UI frame-free and restores traffic on resume', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpWidget(const YurichConnectApp());
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+    expect(tester.takeException(), isNull);
+    expect(binding.transientCallbackCount, 0);
+    expect(binding.hasScheduledFrame, isFalse);
+    nativeCalls.clear();
 
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-      await tester.pump();
-      expect(binding.transientCallbackCount, 0);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(binding.transientCallbackCount, 0);
 
-      await emitTraffic(tester);
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 1));
-      expect(binding.transientCallbackCount, 0);
-      expect(binding.hasScheduledFrame, isFalse);
-      expect(find.textContaining('8 KB/s'), findsNothing);
-      final backgroundCallCount = nativeCalls.length;
-      await tester.pump(const Duration(minutes: 2));
-      expect(nativeCalls.length, backgroundCallCount);
-      expect(binding.transientCallbackCount, 0);
+    await emitTraffic(tester);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(binding.transientCallbackCount, 0);
+    expect(binding.hasScheduledFrame, isFalse);
+    expect(find.textContaining('8 KB/s'), findsNothing);
+    final backgroundCallCount = nativeCalls.length;
+    await tester.pump(const Duration(minutes: 2));
+    expect(nativeCalls.length, backgroundCallCount);
+    expect(binding.transientCallbackCount, 0);
 
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
-      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pump();
-      expect(binding.transientCallbackCount, greaterThan(0));
-      expect(find.textContaining('8 KB/s'), findsOneWidget);
-      expect(find.textContaining('16 KB/s'), findsOneWidget);
-      expect(find.text('1 MB'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      expect(
-        nativeCalls.where(
-          (method) => ['startVPN', 'stopVPN', 'reloadVPN'].contains(method),
-        ),
-        isEmpty,
-      );
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(binding.transientCallbackCount, 0);
+    expect(binding.hasScheduledFrame, isFalse);
+    expect(find.textContaining('8 KB/s'), findsOneWidget);
+    expect(find.textContaining('16 KB/s'), findsOneWidget);
+    expect(find.text('1 MB'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    expect(
+      nativeCalls.where(
+        (method) => ['startVPN', 'stopVPN', 'reloadVPN'].contains(method),
+      ),
+      isEmpty,
+    );
 
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump(const Duration(seconds: 10));
-    },
-  );
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 10));
+  });
 
   testWidgets('TV shares native status and counters without mobile animation', (
     tester,

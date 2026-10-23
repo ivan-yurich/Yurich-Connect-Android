@@ -6,7 +6,7 @@ internal enum class NativeProbeStage(val code: String) {
 
 internal enum class NativeProbeFailure(val code: String) {
     None("none"), Timeout("timeout"), Tls("tls"), Io("io"), Other("other"),
-    ProxyStatus("proxy_status"), HttpStatus("http_status"),
+    ProxyStatus("proxy_status"), HttpStatus("http_status"), Cancelled("cancelled"),
 }
 
 internal enum class NativeProbeEndpoint(val code: String) {
