@@ -1,0 +1,175 @@
+{
+  "verified_at": "2026-11-12",
+  "scope": "Только 24 подтверждённые строки без пакетного правила из основного среза 57 приложений в двух подборках RuStore. Присутствие в подборке не подтверждает скачивание или работу сервиса.",
+  "audit": "RUSTORE_RU_POPULAR_APPS_2026-11-12.md",
+  "verified_android_candidates": [
+    {
+      "package_id": "com.yandex.aliceapp",
+      "name": "Алиса AI",
+      "section": "Поиск, ИИ и браузеры",
+      "source_url": "https://www.rustore.ru/catalog/app/com.yandex.aliceapp",
+      "store_collection": "Обе"
+    },
+    {
+      "package_id": "com.sdkit.search.app",
+      "name": "ГигаЧат",
+      "section": "Поиск, ИИ и браузеры",
+      "source_url": "https://www.rustore.ru/catalog/app/com.sdkit.search.app",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "com.kms.free",
+      "name": "Kaspersky",
+      "section": "Почта, облако и утилиты",
+      "source_url": "https://www.rustore.ru/catalog/app/com.kms.free",
+      "store_collection": "Топ установок"
+    },
+    {
+      "package_id": "ru.mts.mtstv",
+      "name": "КИОН",
+      "section": "Видео, ТВ и музыка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mts.mtstv",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "com.uma.musicvk",
+      "name": "VK Музыка",
+      "section": "Видео, ТВ и музыка",
+      "source_url": "https://www.rustore.ru/catalog/app/com.uma.musicvk",
+      "store_collection": "Обе"
+    },
+    {
+      "package_id": "ru.nspk.mirpay",
+      "name": "Mir Pay",
+      "section": "Банки и платежи",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.nspk.mirpay",
+      "store_collection": "Топ установок"
+    },
+    {
+      "package_id": "com.lamoda.lite",
+      "name": "Lamoda",
+      "section": "Маркетплейсы, объявления и покупки",
+      "source_url": "https://www.rustore.ru/catalog/app/com.lamoda.lite",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.leroymerlin.mobile",
+      "name": "Лемана ПРО",
+      "section": "Маркетплейсы, объявления и покупки",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.leroymerlin.mobile",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.letu",
+      "name": "ЛЭТУАЛЬ",
+      "section": "Маркетплейсы, объявления и покупки",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.letu",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.sportmaster.app",
+      "name": "Спортмастер",
+      "section": "Маркетплейсы, объявления и покупки",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.sportmaster.app",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "com.warefly.checkscan",
+      "name": "ЧекСкан",
+      "section": "Маркетплейсы, объявления и покупки",
+      "source_url": "https://www.rustore.ru/catalog/app/com.warefly.checkscan",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "com.edadeal.android",
+      "name": "Свои Плюсы Едадил",
+      "section": "Маркетплейсы, объявления и покупки",
+      "source_url": "https://www.rustore.ru/catalog/app/com.edadeal.android",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.tander.magnit",
+      "name": "Магнит",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.tander.magnit",
+      "store_collection": "Обе"
+    },
+    {
+      "package_id": "ru.pyaterochka.app.browser",
+      "name": "Пятёрочка",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.pyaterochka.app.browser",
+      "store_collection": "Обе"
+    },
+    {
+      "package_id": "com.icemobile.lenta.prod",
+      "name": "Лента",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/com.icemobile.lenta.prod",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.foodfox.client",
+      "name": "Яндекс Еда",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.foodfox.client",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.kfc.kfc_delivery",
+      "name": "Rostic’s",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.kfc.kfc_delivery",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.dodopizza.app",
+      "name": "Додо Пицца",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.dodopizza.app",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.burgerking",
+      "name": "Бургер Кинг",
+      "section": "Продукты, еда и доставка",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.burgerking",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.dublgis.dgismobile",
+      "name": "2ГИС",
+      "section": "Карты, транспорт и авто",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.dublgis.dgismobile",
+      "store_collection": "Обе"
+    },
+    {
+      "package_id": "ru.serebryakovas.lukoilmobileapp",
+      "name": "АЗС ЛУКОЙЛ",
+      "section": "Карты, транспорт и авто",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.serebryakovas.lukoilmobileapp",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "ru.gibdd_pay.app",
+      "name": "Штрафы ГИБДД (сторонний клиент)",
+      "section": "Карты, транспорт и авто",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gibdd_pay.app",
+      "store_collection": "Топ установок"
+    },
+    {
+      "package_id": "ru.mts.mymts",
+      "name": "Мой МТС",
+      "section": "Связь",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mts.mymts",
+      "store_collection": "Популярное"
+    },
+    {
+      "package_id": "com.platfomni.vita",
+      "name": "Аптека Вита",
+      "section": "Здоровье",
+      "source_url": "https://www.rustore.ru/catalog/app/com.platfomni.vita",
+      "store_collection": "Популярное"
+    }
+  ]
+}

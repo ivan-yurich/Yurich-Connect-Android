@@ -19,8 +19,36 @@ void main() {
     expect(policy.startCallTimeout, const Duration(seconds: 8));
     expect(policy.statusTimeout, const Duration(seconds: 40));
     expect(policy.startupProbeTimeout, const Duration(seconds: 12));
-    expect(policy.stopStatusTimeout, const Duration(seconds: 20));
+    expect(policy.stopStatusTimeout, const Duration(seconds: 35));
+    expect(policy.startSettleDelay, const Duration(seconds: 1));
     expect(policy.attemptBudget, isNull);
+  });
+
+  test('cold Xray keeps readiness but does not restart the same config', () {
+    for (final kind in [
+      VpnProfileKind.vlessXhttp,
+      VpnProfileKind.vlessReality,
+    ]) {
+      final policy = VpnReconnectPolicy.resolve(
+        kind: kind,
+        engine: VpnCoreEngine.xray,
+        rapidRestart: false,
+        crossEngineRestart: false,
+      );
+      expect(policy.mode, VpnReconnectMode.initial);
+      expect(policy.maxPlans, 1);
+      expect(policy.maxAttemptsPerPlan, 1);
+      expect(policy.statusTimeout, const Duration(seconds: 40));
+      expect(policy.stopStatusTimeout, const Duration(seconds: 35));
+      expect(policy.retryDelay, Duration.zero);
+    }
+    final hysteria = VpnReconnectPolicy.resolve(
+      kind: VpnProfileKind.hysteria2,
+      engine: VpnCoreEngine.singBox,
+      rapidRestart: false,
+      crossEngineRestart: false,
+    );
+    expect(hysteria.maxAttemptsPerPlan, 2);
   });
 
   test('rapid sing-box switch has one bounded attempt', () {
@@ -38,7 +66,8 @@ void main() {
     expect(policy.startCallTimeout, const Duration(seconds: 5));
     expect(policy.statusTimeout, const Duration(seconds: 16));
     expect(policy.attemptBudget, const Duration(seconds: 25));
-    expect(policy.stopStatusTimeout, const Duration(seconds: 20));
+    expect(policy.stopStatusTimeout, const Duration(seconds: 35));
+    expect(policy.startSettleDelay, Duration.zero);
   });
 
   test('rapid QUIC and Xray switches get protocol-specific windows', () {
@@ -59,10 +88,10 @@ void main() {
     expect(quic.maxAttemptsPerPlan, 2);
     expect(quic.retryDelay, const Duration(milliseconds: 500));
     expect(quic.attemptBudget, const Duration(seconds: 65));
-    expect(xray.statusTimeout, const Duration(seconds: 16));
+    expect(xray.statusTimeout, const Duration(seconds: 40));
     expect(xray.startCallTimeout, const Duration(seconds: 7));
     expect(xray.startupProbeTimeout, const Duration(seconds: 16));
-    expect(xray.attemptBudget, const Duration(seconds: 32));
+    expect(xray.attemptBudget, const Duration(seconds: 65));
   });
 
   test('rapid Naive keeps fallback but never retries either plan', () {
@@ -162,10 +191,81 @@ void main() {
     );
 
     expect(policy.mode, VpnReconnectMode.rapidCrossEngine);
-    expect(policy.startSettleDelay, const Duration(milliseconds: 650));
-    expect(policy.stopStatusTimeout, const Duration(seconds: 20));
-    expect(policy.attemptBudget, const Duration(seconds: 32));
+    expect(policy.startSettleDelay, Duration.zero);
+    expect(policy.stopStatusTimeout, const Duration(seconds: 35));
+    expect(policy.attemptBudget, const Duration(seconds: 65));
   });
+
+  test(
+    'Auto tries a candidate once and keeps the native cleanup allowance',
+    () {
+      for (final (kind, engine) in [
+        (VpnProfileKind.naive, VpnCoreEngine.singBox),
+        (VpnProfileKind.hysteria2, VpnCoreEngine.singBox),
+        (VpnProfileKind.vlessXhttp, VpnCoreEngine.xray),
+      ]) {
+        final policy = VpnReconnectPolicy.resolve(
+          kind: kind,
+          engine: engine,
+          rapidRestart: false,
+          crossEngineRestart: false,
+          automaticFailover: true,
+        );
+        expect(policy.mode, VpnReconnectMode.autoCandidate);
+        expect(policy.maxPlans, 1);
+        expect(policy.maxAttemptsPerPlan, 1);
+        expect(policy.startSettleDelay, Duration.zero);
+        expect(
+          policy.stopStatusTimeout,
+          greaterThan(const Duration(seconds: 31)),
+        );
+      }
+    },
+  );
+
+  test(
+    'rapid Xray cannot expire before native startup grace and still has one attempt',
+    () {
+      for (final crossEngine in [false, true]) {
+        final rapid = VpnReconnectPolicy.resolve(
+          kind: VpnProfileKind.vlessXhttp,
+          engine: VpnCoreEngine.xray,
+          rapidRestart: true,
+          crossEngineRestart: crossEngine,
+        );
+        final cold = VpnReconnectPolicy.resolve(
+          kind: VpnProfileKind.vlessXhttp,
+          engine: VpnCoreEngine.xray,
+          rapidRestart: false,
+          crossEngineRestart: false,
+        );
+        expect(rapid.statusTimeout, cold.statusTimeout);
+        expect(rapid.statusTimeout, greaterThan(const Duration(seconds: 30)));
+        expect(rapid.maxAttemptsPerPlan, 1);
+        expect(
+          rapid.timeoutWithinAttemptBudget(
+            rapid.statusTimeout,
+            elapsed: const Duration(seconds: 5),
+          ),
+          const Duration(seconds: 40),
+        );
+        expect(
+          rapid.timeoutWithinAttemptBudget(
+            rapid.statusTimeout,
+            elapsed: const Duration(seconds: 64),
+          ),
+          const Duration(seconds: 1),
+        );
+        expect(
+          rapid.timeoutWithinAttemptBudget(
+            rapid.statusTimeout,
+            elapsed: const Duration(seconds: 65),
+          ),
+          Duration.zero,
+        );
+      }
+    },
+  );
 
   test('attempt timeout is clamped to the remaining budget', () {
     final policy = VpnReconnectPolicy.resolve(

@@ -8,6 +8,35 @@ import kotlin.test.assertTrue
 
 class VpnStatusResolverTest {
     @Test
+    fun duplicateStopJoinsOnlyCurrentCleanup() {
+        assertTrue(VpnStopLifecyclePolicy.canJoinStop(true, 9, 9, true))
+        assertFalse(VpnStopLifecyclePolicy.canJoinStop(true, 8, 9, true))
+        assertFalse(VpnStopLifecyclePolicy.canJoinStop(true, 9, 9, false))
+        assertFalse(VpnStopLifecyclePolicy.canJoinStop(false, 9, 9, true))
+        assertFalse(VpnStopLifecyclePolicy.canJoinStop(true, 0, 0, true))
+    }
+    @Test
+    fun systemAlwaysOnOwnsIntentDespiteStaleMainProcessPreferences() {
+        assertEquals(Status.Started, VpnStatusResolver.resolveRunningServiceStatus(
+            startedByUser = false, isShuttingDown = false, nativeStatus = Status.Started,
+            requiresActiveVpnNetwork = false, hasActiveVpnNetwork = true, systemAlwaysOn = true,
+        ))
+    }
+
+    @Test
+    fun systemAlwaysOnCannotInventReadinessOrOverrideAnExplicitStop() {
+        for (native in listOf(null, Status.Starting, Status.Stopped)) {
+            assertEquals(native ?: Status.Starting, VpnStatusResolver.resolveRunningServiceStatus(
+                startedByUser = false, isShuttingDown = false, nativeStatus = native,
+                requiresActiveVpnNetwork = true, hasActiveVpnNetwork = true, systemAlwaysOn = true,
+            ))
+        }
+        assertEquals(Status.Stopping, VpnStatusResolver.resolveRunningServiceStatus(
+            startedByUser = false, isShuttingDown = true, nativeStatus = Status.Started,
+            requiresActiveVpnNetwork = true, hasActiveVpnNetwork = true, systemAlwaysOn = true,
+        ))
+    }
+    @Test
     fun stopLifecycleUsesARealisticNativeCleanupWindow() {
         assertTrue(VpnStopLifecyclePolicy.GRACEFUL_TIMEOUT_MS >= 25_000L)
     }
@@ -22,6 +51,15 @@ class VpnStatusResolverTest {
     fun confirmedServiceAbsenceAllowsStopCompletionAndNextStart() {
         assertTrue(VpnStopLifecyclePolicy.canFinalize(serviceRunning = false))
         assertTrue(VpnStopLifecyclePolicy.canStart(isShuttingDown = false))
+    }
+
+    @Test
+    fun delayedStartOrReloadCannotDispatchAfterStopOrReplacement() {
+        assertTrue(VpnStopLifecyclePolicy.canDispatchStart(7, 7, isShuttingDown = false))
+        assertFalse(VpnStopLifecyclePolicy.canDispatchStart(7, 7, isShuttingDown = true))
+        assertFalse(VpnStopLifecyclePolicy.canDispatchStart(7, 8, isShuttingDown = true))
+        assertFalse(VpnStopLifecyclePolicy.canDispatchStart(7, 9, isShuttingDown = false))
+        assertTrue(VpnStopLifecyclePolicy.canDispatchStart(9, 9, isShuttingDown = false))
     }
 
     @Test

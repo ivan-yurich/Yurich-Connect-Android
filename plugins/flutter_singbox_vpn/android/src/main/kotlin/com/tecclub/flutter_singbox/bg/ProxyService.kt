@@ -11,6 +11,14 @@ class ProxyService : Service(), PlatformInterfaceWrapper {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Application.initializeBaseIfNeeded(applicationContext)
+        if (intent?.action == BoxService.ACTION_START && intent.hasExtra(VpnCommandFence.EXTRA_TOKEN)) {
+            val token = intent.getStringExtra(VpnCommandFence.EXTRA_TOKEN)
+            return VpnCommandFence.runCurrent(applicationContext, token, VpnCommandFence.Kind.Start) {
+                service.rememberAppCommand(token)
+                service.onStartCommand()
+            } ?: service.rejectSupersededStart(startId)
+        }
+        if (!service.isDesiredRunning()) service.rememberAppCommand(null)
         return service.onStartCommand()
     }
 

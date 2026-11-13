@@ -1,43 +1,34 @@
-import 'dart:io';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class PowerManagerService {
   static const _channel = MethodChannel('online.dnsai.ivanvpn/power');
 
-  Future<bool> isIgnoringBatteryOptimizations() async {
-    if (!Platform.isAndroid) {
-      return true;
-    }
+  bool get supported =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<bool?> isIgnoringBatteryOptimizations() async {
+    if (!supported) return null;
     try {
       return await _channel.invokeMethod<bool>(
-            'isIgnoringBatteryOptimizations',
-          ) ??
-          true;
+        'isIgnoringBatteryOptimizations',
+      );
     } on MissingPluginException {
-      return true;
+      return null;
+    } on PlatformException {
+      return null;
     }
   }
 
-  Future<void> requestIgnoreBatteryOptimizations() async {
-    if (!Platform.isAndroid) {
-      return;
-    }
+  Future<bool> openAppBatterySettings() async {
+    if (!supported) return false;
     try {
-      await _channel.invokeMethod<void>('requestIgnoreBatteryOptimizations');
+      return await _channel.invokeMethod<bool>('openAppBatterySettings') ??
+          false;
     } on MissingPluginException {
-      return;
-    }
-  }
-
-  Future<void> openBatteryOptimizationSettings() async {
-    if (!Platform.isAndroid) {
-      return;
-    }
-    try {
-      await _channel.invokeMethod<void>('openBatteryOptimizationSettings');
-    } on MissingPluginException {
-      return;
+      return false;
+    } on PlatformException {
+      return false;
     }
   }
 }

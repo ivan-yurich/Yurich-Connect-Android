@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import '../models/vpn_profile.dart';
 import 'sing_box_config_builder.dart';
+import 'kill_switch_http_policy.dart';
+import 'tls_pin_policy.dart';
 import 'vless_profile_validator.dart';
 
 class ProfileImportException implements Exception {
@@ -66,6 +68,7 @@ class ProfileImporter {
   Future<_FetchedSubscription> _fetchSubscription(Uri uri) async {
     final directClient = HttpClient()
       ..connectionTimeout = const Duration(seconds: 12);
+    await KillSwitchHttpPolicy.protect(directClient);
     final proxyClient = HttpClient()
       ..connectionTimeout = const Duration(seconds: 8)
       ..findProxy = (_) =>
@@ -85,6 +88,8 @@ class ProfileImporter {
       );
     } finally {
       cancelled = true;
+      KillSwitchHttpPolicy.forget(directClient);
+      KillSwitchHttpPolicy.forget(proxyClient);
       directClient.close(force: true);
       proxyClient.close(force: true);
     }
@@ -116,6 +121,7 @@ class ProfileImporter {
               candidateUri,
               userAgent: userAgent,
               client: viaLocalProxy ? proxyClient : directClient,
+              alwaysProxy: viaLocalProxy,
             );
             final body = fetched.body;
             if (_canParsePayload(body)) {
@@ -188,10 +194,12 @@ class ProfileImporter {
     Uri uri, {
     required String userAgent,
     required HttpClient client,
+    bool alwaysProxy = false,
   }) async {
     var currentUri = uri;
     for (var redirectCount = 0; ; redirectCount += 1) {
       _validateSubscriptionUri(currentUri);
+      await KillSwitchHttpPolicy.protect(client, alwaysProxy: alwaysProxy);
       final request = await client.getUrl(currentUri);
       request.headers.set(HttpHeaders.userAgentHeader, userAgent);
       request.headers.set(
@@ -611,6 +619,8 @@ class ProfileImporter {
       if (decoded is Map<String, dynamic>) {
         if (decoded.containsKey('inbounds') &&
             decoded.containsKey('outbounds')) {
+          final tlsError = TlsPinPolicy.documentError(decoded);
+          if (tlsError != null) throw ProfileImportException(tlsError);
           final outbounds = decoded['outbounds'];
           _validateVlessOutbounds(outbounds);
           if (outbounds is List &&
@@ -658,6 +668,11 @@ class ProfileImporter {
     if (type == null || server == null || server.isEmpty) {
       return null;
     }
+    final tlsError = TlsPinPolicy.outboundError(
+      outbound,
+      disallowPublicKeyPin: type == 'http' || type == 'naive',
+    );
+    if (tlsError != null) throw ProfileImportException(tlsError);
 
     final port =
         _asInt(outbound['server_port']) ?? _asInt(outbound['port']) ?? 443;
@@ -785,6 +800,11 @@ class ProfileImporter {
     Map<String, dynamic> config,
     Map<String, dynamic> outbound,
   ) {
+    final tlsError = TlsPinPolicy.outboundError(
+      outbound,
+      disallowPublicKeyPin: true,
+    );
+    if (tlsError != null) throw ProfileImportException(tlsError);
     final settings = _asMap(outbound['settings']);
     if (settings == null) {
       throw const ProfileImportException('Xray VLESS outbound без settings.');
@@ -901,6 +921,8 @@ class ProfileImporter {
     for (var index = 0; index < links.length; index += 1) {
       final link = links[index];
       try {
+        final tlsError = TlsPinPolicy.inputError(link);
+        if (tlsError != null) throw ProfileImportException(tlsError);
         final lower = link.toLowerCase();
         if (lower.startsWith('vless://')) {
           profiles.add(_parseVless(link));

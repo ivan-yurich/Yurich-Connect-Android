@@ -1,8 +1,99 @@
 import '../models/profile_stability.dart';
+import '../models/profile_network_stability.dart';
 import '../models/vpn_profile.dart';
 
 class ProfileAutoSelector {
   const ProfileAutoSelector();
+
+  /// Separate from the legacy preference-first picker: this mode includes
+  /// UDP profiles and never treats an unmeasured profile as the closest.
+  /// [preferCurrentNetwork] demotes recent failures on this network rather
+  /// than excluding candidates based on failures on another network.
+  List<VpnProfile> rankForLatency(
+    List<VpnProfile> profiles, {
+    Map<String, int> directLatencyMs = const {},
+    Set<String> offlineProfileIds = const {},
+    Map<String, ProfileStabilityStats> stabilityStats = const {},
+    Map<String, ProfileNetworkStabilityStats> networkStats = const {},
+    String? lastProfileId,
+    DateTime? now,
+    bool preferCurrentNetwork = false,
+  }) {
+    final current = now ?? DateTime.now();
+    const failureCooldown = Duration(minutes: 3);
+    final candidates = profiles.where((profile) {
+      if (!profile.kind.isClientSupported ||
+          profile.rawConfig != null ||
+          offlineProfileIds.contains(profile.id) ||
+          (profile.subscriptionExpiresAt?.isBefore(current) ?? false)) {
+        return false;
+      }
+      if (preferCurrentNetwork) return true;
+      final stats = stabilityStats[profile.id];
+      final lastFailure = stats?.lastFailureAt;
+      final lastSuccess = stats?.lastHealthyAt ?? stats?.lastStartedAt;
+      final recentFailure =
+          lastFailure != null &&
+          (lastSuccess == null || lastFailure.isAfter(lastSuccess)) &&
+          current.difference(lastFailure) < failureCooldown;
+      return stats?.isTemporarilyUnstable(now: current) != true &&
+          !recentFailure;
+    }).toList();
+
+    int currentNetworkPenalty(VpnProfile profile) {
+      final stats = networkStats[profile.id];
+      final lastFailure = stats?.lastFailureAt;
+      if (lastFailure == null) return 0;
+      final lastSuccess = stats?.lastHealthyAt;
+      final age = current.difference(lastFailure);
+      return !age.isNegative &&
+              age < failureCooldown &&
+              (lastSuccess == null || lastFailure.isAfter(lastSuccess))
+          ? 1
+          : 0;
+    }
+
+    int? validLatency(VpnProfile profile) {
+      final value = directLatencyMs[profile.id];
+      return value != null && value > 0 ? value : null;
+    }
+
+    candidates.sort((a, b) {
+      if (a.id == b.id) return 0;
+      if (preferCurrentNetwork) {
+        final recentFailure = currentNetworkPenalty(
+          a,
+        ).compareTo(currentNetworkPenalty(b));
+        if (recentFailure != 0) return recentFailure;
+      }
+      final aLatency = validLatency(a), bLatency = validLatency(b);
+      if (aLatency != null || bLatency != null) {
+        if (aLatency == null) return 1;
+        if (bLatency == null) return -1;
+        final measured = aLatency.compareTo(bLatency);
+        if (measured != 0) return measured;
+      }
+      final aNetwork = networkStats[a.id], bNetwork = networkStats[b.id];
+      final networkSuccess = (bNetwork?.successfulStarts ?? 0).compareTo(
+        aNetwork?.successfulStarts ?? 0,
+      );
+      if (networkSuccess != 0) return networkSuccess;
+      final aStats = stabilityStats[a.id], bStats = stabilityStats[b.id];
+      final successful = (bStats?.successfulStarts ?? 0).compareTo(
+        aStats?.successfulStarts ?? 0,
+      );
+      if (successful != 0) return successful;
+      if (!preferCurrentNetwork) {
+        final reliability = (aStats?.autoSelectPenalty(now: current) ?? 0)
+            .compareTo(bStats?.autoSelectPenalty(now: current) ?? 0);
+        if (reliability != 0) return reliability;
+      }
+      if (a.id == lastProfileId) return -1;
+      if (b.id == lastProfileId) return 1;
+      return a.id.compareTo(b.id);
+    });
+    return candidates;
+  }
 
   VpnProfile? choose(
     List<VpnProfile> profiles, {

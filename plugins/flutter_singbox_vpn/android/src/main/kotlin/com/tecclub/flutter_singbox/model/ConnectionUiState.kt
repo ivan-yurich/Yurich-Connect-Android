@@ -10,7 +10,8 @@ data class ConnectionUiState(
     val uploadSpeed: String,
     val downloadSpeed: String,
     val totalTraffic: String,
-    val sessionDuration: String?
+    val sessionDuration: String?,
+    val pingObservedAtMs: Long? = null,
 ) {
     companion object {
         fun disconnected(): ConnectionUiState {
@@ -92,7 +93,8 @@ data class ConnectionUiState(
                 uploadSpeed = clean(value["uploadSpeed"]) ?: "0 B/s",
                 downloadSpeed = clean(value["downloadSpeed"]) ?: "0 B/s",
                 totalTraffic = clean(value["totalTraffic"]) ?: "0 B",
-                sessionDuration = clean(value["sessionDuration"])
+                sessionDuration = clean(value["sessionDuration"]),
+                pingObservedAtMs = (value["pingObservedAtMs"] as? Number)?.toLong(),
             )
         }
 

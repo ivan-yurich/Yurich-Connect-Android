@@ -10,6 +10,10 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.tecclub.flutter_singbox.Application
 import com.tecclub.flutter_singbox.config.SimpleConfigManager
+import com.tecclub.flutter_singbox.config.RuntimeKillSwitchPolicy
+import com.tecclub.flutter_singbox.config.KillSwitchIntentStore
+import com.tecclub.flutter_singbox.config.SmartRouteApps
+import com.tecclub.flutter_singbox.config.StrictProtectionIntent
 import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Action
 import io.nekohasekai.libbox.TunOptions
@@ -32,12 +36,161 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     private val service = BoxService(this, this)
     var systemProxyAvailable = false
     var systemProxyEnabled = false
+    @Volatile private var nextRuntimeStrict = false
+    @Volatile private var nextRuntimeFingerprint: String? = null
+    @Volatile private var activeTunStrict = false
+    @Volatile private var activeAppRoutes: AppRoutes? = null
+    @Volatile private var systemStartSeen = false
+    private val protectionHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val protectionCheck = object : Runnable {
+        override fun run() {
+            // A Settings change need not restart an already connected VPN.
+            // Failure to OBSERVE does not trigger a restart or downgrade policy.
+            if (runCatching { service.isRuntimeConnected() && needsRuntimePolicyUpdate() }.getOrDefault(false)) {
+                service.serviceReload()
+            }
+            protectionHandler.postDelayed(this, 3_000L)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        protectionHandler.post(protectionCheck)
+    }
+
+    private fun liveSystemOn(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val identity = android.os.Binder.clearCallingIdentity()
+        return try { isAlwaysOn || isLockdownEnabled }
+        finally { android.os.Binder.restoreCallingIdentity(identity) }
+    }
+
+    internal fun systemOwnsLifecycle(): Boolean = systemStartSeen || liveSystemOn()
+
+    private fun strictPolicyRequested(systemStartRequest: Boolean = false): Boolean {
+        val persisted = KillSwitchIntentStore.requested(applicationContext)
+        val live = liveSystemOn()
+        val required = StrictProtectionIntent.required(persisted, systemStartRequest, live)
+        if (required && !persisted) KillSwitchIntentStore.setRequested(applicationContext, true)
+        return required
+    }
+
+    internal fun needsRuntimePolicyUpdate(): Boolean = nextRuntimeStrict != strictPolicyRequested()
+
+    internal fun protectionState(): Map<String, Boolean> {
+        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+        val tunOpen = runCatching { service.fileDescriptor?.fileDescriptor?.valid() == true }.getOrDefault(false)
+        val identity = android.os.Binder.clearCallingIdentity()
+        return try { mapOf(
+            "alwaysOn" to isAlwaysOn,
+            "lockdown" to isLockdownEnabled,
+            "strictRuntime" to (activeTunStrict && tunOpen),
+            "vpnActive" to service.isDesiredRunning(),
+            "tunOpen" to tunOpen,
+        ) } finally { android.os.Binder.restoreCallingIdentity(identity) }
+    }
+
+    /** A protected or uncertain VPN is out of scope for this pilot. Read only. */
+    internal fun hermesPolicyAllows(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !systemOwnsLifecycle() &&
+            !activeTunStrict && !nextRuntimeStrict && !KillSwitchIntentStore.requested(applicationContext)
+
+    internal fun prepareRuntime(content: String): RuntimeKillSwitchPolicy.Plan {
+        val lockdown = strictPolicyRequested()
+        return RuntimeKillSwitchPolicy.prepare(content, lockdown)
+    }
+
+    internal fun useRuntimePlan(plan: RuntimeKillSwitchPolicy.Plan, fingerprint: String) {
+        nextRuntimeStrict = plan.strict
+        nextRuntimeFingerprint = fingerprint.takeUnless { plan.strict }
+    }
+
+    private data class AppRoutes(
+        val descriptor: ParcelFileDescriptor,
+        val excluded: List<String>,
+    )
+
+    /** Report actual successful Builder calls, only for the current established TUN. */
+    internal fun appliedAppExclusions(): List<String>? {
+        val routes = activeAppRoutes ?: return null
+        return routes.excluded.takeIf {
+            service.isRuntimeConnected() && service.fileDescriptor === routes.descriptor &&
+                runCatching { routes.descriptor.fileDescriptor.valid() }.getOrDefault(false)
+        }
+    }
+
+    private fun applyAppExclusions(
+        builder: Builder,
+        configured: Iterable<String>,
+        applied: MutableList<String>,
+        includeOptIns: Boolean,
+        tolerateLegacyErrors: Boolean = false,
+    ) {
+        val optIns = if (includeOptIns) {
+            SmartRouteApps.exclusions(applicationContext, nextRuntimeFingerprint, nextRuntimeStrict)
+        } else emptyList()
+        val packages = VpnPackagePolicy.disallowedPackages(configured + optIns, packageName)
+        packages.forEach { id ->
+            try {
+                builder.addDisallowedApplication(id)
+                if (id != packageName) applied.add(id)
+            } catch (error: NameNotFoundException) {
+                if (id == packageName && !tolerateLegacyErrors) throw error
+                // App can be removed between the eligibility check and establish.
+            } catch (error: Exception) {
+                if (!tolerateLegacyErrors) throw error
+                Log.w(TAG, "Android could not apply an Xray app exclusion")
+            }
+        }
+    }
+
+    private fun rememberAppRoutes(pfd: ParcelFileDescriptor, applied: List<String>) {
+        activeAppRoutes = if (applied.size <= NativeProtectionQuery.MAX_REPORTED_EXCLUSIONS) {
+            AppRoutes(pfd, applied.toList())
+        } else null
+    }
+
+    private fun strictTunRequired(): Boolean {
+        check(!strictPolicyRequested() || nextRuntimeStrict) {
+            "Kill switch: runtime policy changed; reconnect required"
+        }
+        return nextRuntimeStrict
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == BoxService.ACTION_START && intent.hasExtra(VpnCommandFence.EXTRA_TOKEN)) {
+            val token = intent.getStringExtra(VpnCommandFence.EXTRA_TOKEN)
+            val result = VpnCommandFence.runCurrent(applicationContext, token, VpnCommandFence.Kind.Start) {
+                service.rememberAppCommand(
+                    token,
+                    intent.getStringExtra(com.tecclub.flutter_singbox.diagnostics.HermesPilotGate.EXTRA_MANAGED_CONFIG),
+                )
+                acceptStartCommand(intent, startId)
+            }
+            return result ?: service.rejectSupersededStart(startId)
+        }
+        // OS Always-on, boot restore and legacy tile starts do not carry an
+        // app-issued token. Their authorization and restore policy is unchanged.
+        if (!service.isDesiredRunning() || intent == null || intent.action == SERVICE_INTERFACE) {
+            service.rememberAppCommand(null)
+        }
+        return acceptStartCommand(intent, startId)
+    }
+
+    private fun acceptStartCommand(intent: Intent?, startId: Int): Int {
         Application.initializeBaseIfNeeded(applicationContext)
+        // An always-on start is a system-owned request, including a null sticky
+        // intent after process death. A stale manual-disconnect flag must not win.
+        val systemOwned = intent?.action == SERVICE_INTERFACE || liveSystemOn()
+        if (systemOwned) {
+            systemStartSeen = true
+            strictPolicyRequested(systemStartRequest = true)
+            SimpleConfigManager.setStartedByUser(true)
+            SimpleConfigManager.setManualDisconnectRequested(false)
+        }
         android.util.Log.e("VPNService", "onStartCommand called with intent: ${intent?.action}")
 
-        if (intent?.getBooleanExtra(Action.EXTRA_BACKGROUND_RESTORE, false) == true) {
+        if (!systemOwned && intent?.getBooleanExtra(Action.EXTRA_BACKGROUND_RESTORE, false) == true) {
             val restoreRequested = PackageReplaceRestorePolicy.restoreRequested(
                 autoStart = SimpleConfigManager.getAutoStart(applicationContext),
                 startedByUser = SimpleConfigManager.getStartedByUser(applicationContext),
@@ -63,7 +216,14 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
                 // The app process already persisted it. Cache the exact intent payload
                 // here so BoxService never performs Keystore I/O on the service main thread.
                 android.util.Log.e("VPNService", "Caching received runtime config")
-                SimpleConfigManager.cacheConfig(configContent)
+                val revision = intent.getIntExtra(
+                    com.tecclub.flutter_singbox.config.RuntimeTlsPolicy.INTENT_REVISION_EXTRA, 0,
+                )
+                if (!SimpleConfigManager.cacheConfig(configContent, revision)) {
+                    Log.w(TAG, "Refusing unsupported or unvalidated TLS start payload")
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
             } else {
                 android.util.Log.e("VPNService", "WARNING: No config content received in intent")
             }
@@ -81,6 +241,7 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     }
 
     override fun onDestroy() {
+        protectionHandler.removeCallbacks(protectionCheck)
         service.onDestroy()
         super.onDestroy()
     }
@@ -97,6 +258,7 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
 
     override fun autoDetectInterfaceControl(fd: Int) {
         val result = protect(fd)
+        check(result || !nextRuntimeStrict) { "Kill switch: upstream socket protection failed" }
         val call = protectCallCount.incrementAndGet()
         if (call <= PROTECT_LOG_LIMIT || !result) {
             val message = "sing-box protect call=$call fd=$fd protected=$result"
@@ -110,6 +272,8 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
 
     override fun openTun(options: TunOptions): Int {
         if (prepare(this) != null) error("android: missing vpn permission")
+        val strict = strictTunRequired()
+        val appliedPackages = mutableListOf<String>()
 
         // A reload can reach openTun before the previous native service has released
         // its descriptor. Keep only one Android VPN interface across profile switches.
@@ -136,7 +300,13 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             builder.addAddress(address.address(), address.prefix())
         }
 
-        if (options.autoRoute) {
+        if (strict) {
+            // Capture both families regardless of a raw/native caller's routes.
+            // No allowBypass, allowFamily, exclusions or include-only app lists.
+            builder.addRoute("0.0.0.0", 0)
+            builder.addRoute("::", 0)
+            builder.addDnsServer(options.dnsServerAddress.value)
+        } else if (options.autoRoute) {
             builder.addDnsServer(options.dnsServerAddress.value)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -200,16 +370,7 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
                         "android: per-app include list has no installed external applications"
                     }
                 } else {
-                    VpnPackagePolicy.disallowedPackages(appList, packageName).forEach {
-                        if (it == packageName) {
-                            builder.addDisallowedApplication(it)
-                        } else {
-                            try {
-                                builder.addDisallowedApplication(it)
-                            } catch (_: NameNotFoundException) {
-                            }
-                        }
-                    }
+                    applyAppExclusions(builder, appList, appliedPackages, includeOptIns = false)
                 }
             } else {
                 val includePackage = options.includePackage
@@ -233,21 +394,12 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
                     val excludedPackages = buildList {
                         while (excludePackage.hasNext()) add(excludePackage.next())
                     }
-                    VpnPackagePolicy.disallowedPackages(excludedPackages, packageName).forEach {
-                        if (it == packageName) {
-                            builder.addDisallowedApplication(it)
-                        } else {
-                            try {
-                                builder.addDisallowedApplication(it)
-                            } catch (_: NameNotFoundException) {
-                            }
-                        }
-                    }
+                    applyAppExclusions(builder, excludedPackages, appliedPackages, includeOptIns = true)
                 }
             }
         }
 
-        if (options.isHTTPProxyEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (!strict && options.isHTTPProxyEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             systemProxyAvailable = true
             systemProxyEnabled = Settings.systemProxyEnabled
             if (systemProxyEnabled) builder.setHttpProxy(
@@ -265,6 +417,8 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
         val pfd =
             builder.establish() ?: error("android: the application is not prepared or is revoked")
         service.fileDescriptor = pfd
+        activeTunStrict = strict
+        rememberAppRoutes(pfd, appliedPackages)
         return pfd.fd
     }
 
@@ -272,6 +426,8 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
         androidDisallowedPackages: List<String> = emptyList(),
     ): ParcelFileDescriptor {
         if (prepare(this) != null) error("android: missing vpn permission")
+        val strict = strictTunRequired()
+        val appliedPackages = mutableListOf<String>()
 
         service.fileDescriptor?.close()
         service.fileDescriptor = null
@@ -290,26 +446,18 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
             builder.setMetered(false)
         }
 
-        val excludedPackages = linkedSetOf(packageName)
-        androidDisallowedPackages
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .forEach { excludedPackages.add(it) }
-
-        excludedPackages.forEach { excludedPackage ->
-            try {
-                builder.addDisallowedApplication(excludedPackage)
-            } catch (_: NameNotFoundException) {
-                Log.d(TAG, "Xray Smart Route package is not installed: $excludedPackage")
-            } catch (e: Exception) {
-                Log.w(TAG, "Unable to exclude package from Xray VPN: $excludedPackage", e)
-            }
+        if (!strict) {
+            applyAppExclusions(
+                builder, androidDisallowedPackages, appliedPackages,
+                includeOptIns = true, tolerateLegacyErrors = true,
+            )
         }
-        Log.i(TAG, "Xray TUN excluded packages requested: ${excludedPackages.size}")
 
         val pfd =
             builder.establish() ?: error("android: the application is not prepared or is revoked")
         service.fileDescriptor = pfd
+        activeTunStrict = strict
+        rememberAppRoutes(pfd, appliedPackages)
         return pfd
     }
     

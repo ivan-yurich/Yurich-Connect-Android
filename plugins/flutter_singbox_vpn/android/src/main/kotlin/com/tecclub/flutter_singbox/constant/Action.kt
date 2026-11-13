@@ -6,6 +6,7 @@ object Action {
     const val SERVICE_RESTART = "com.tecclub.flutter_singbox.SERVICE_RESTART"
     const val SERVICE_RELOAD = "com.tecclub.flutter_singbox.SERVICE_RELOAD"
     const val SERVICE_STATUS_QUERY = "com.tecclub.flutter_singbox.SERVICE_STATUS_QUERY"
+    const val SERVICE_PROTECTION_QUERY = "com.tecclub.flutter_singbox.SERVICE_PROTECTION_QUERY"
     const val OPEN_URL = "com.tecclub.flutter_singbox.SERVICE_OPEN_URL"
     const val BROADCAST_ALERT = "com.tecclub.flutter_singbox.BROADCAST_ALERT"
     const val BROADCAST_STATUS_CHANGED = "com.tecclub.flutter_singbox.BROADCAST_STATUS_CHANGED"
@@ -19,6 +20,7 @@ object Action {
     const val EXTRA_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
     const val EXTRA_SESSION_REASON = "session_reason"
     const val EXTRA_DESIRED_RUNNING = "desired_running"
+    const val EXTRA_SYSTEM_ALWAYS_ON = "system_always_on"
     const val EXTRA_TRAFFIC_UP = "traffic_up"
     const val EXTRA_TRAFFIC_DOWN = "traffic_down"
 }

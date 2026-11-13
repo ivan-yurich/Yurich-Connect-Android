@@ -1,5 +1,7 @@
 package com.tecclub.flutter_singbox.config.parser
 
+import com.tecclub.flutter_singbox.config.RuntimeTlsPolicy
+
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
@@ -83,6 +85,7 @@ object ConfigParser {
         }
 
         val uri = parseUri(raw)
+        RuntimeTlsPolicy.queryError(uri)?.let { throw ConfigParseException(it) }
         return when (uri.scheme?.lowercase(Locale.US)) {
             "vless" -> parseVless(uri)
             "naive+https", "naive" -> parseNaive(uri, raw)
@@ -95,6 +98,7 @@ object ConfigParser {
     fun parseToSingBoxJson(input: String): String = parse(input).toSingBoxJson()
 
     fun buildSingBoxConfig(config: ProxyConfig): String {
+        RuntimeTlsPolicy.queryError(config.query)?.let { throw ConfigParseException(it) }
         val outbound = outbound(config)
         val document = buildJsonObject {
             put("log", buildJsonObject {

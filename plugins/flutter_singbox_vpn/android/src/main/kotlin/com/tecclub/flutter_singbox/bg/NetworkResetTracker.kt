@@ -1,5 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
+internal data class RuntimeNetworkTransition(val changed: Boolean, val resetRuntime: Boolean)
+
 internal class NetworkResetTracker<T> {
     private var currentNetwork: T? = null
     private var pendingRecovery = false
@@ -14,18 +16,21 @@ internal class NetworkResetTracker<T> {
     }
 
     @Synchronized
-    fun onNetworkEvent(network: T?): Boolean {
+    fun observeNetwork(network: T?): RuntimeNetworkTransition {
+        val changed = currentNetwork != network
         if (network == null) {
             currentNetwork = null
-            return false
+            return RuntimeNetworkTransition(changed, false)
         }
-        if (network == currentNetwork) {
-            return false
+        if (!changed) {
+            return RuntimeNetworkTransition(false, false)
         }
         currentNetwork = network
         pendingRecovery = true
-        return true
+        return RuntimeNetworkTransition(true, true)
     }
+
+    fun onNetworkEvent(network: T?): Boolean = observeNetwork(network).resetRuntime
 
     @Synchronized
     fun consumeRecoveryAllowance(): Boolean {

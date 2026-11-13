@@ -48,8 +48,8 @@ class VpnNotificationHelper(private val context: Context) {
         val protocol = state.protocolDisplayName ?: "—"
         val country = formatCountry(state)
         val profile = state.profileName ?: "—"
-        val ping = state.pingMs?.let { "$it ms" } ?: "—"
         val session = state.sessionDuration ?: "—"
+        val trafficLine = VpnNotificationTraffic.line(state, System.currentTimeMillis())
 
         val contentText = when (state.status) {
             ConnectionStatus.Connected ->
@@ -62,7 +62,7 @@ class VpnNotificationHelper(private val context: Context) {
 
         val summary = when (state.status) {
             ConnectionStatus.Connected ->
-                "$country • ↑ ${state.uploadSpeed} • ↓ ${state.downloadSpeed} • Σ ${state.totalTraffic}"
+                "$country • Σ ${state.totalTraffic}"
             ConnectionStatus.Connecting -> country
             ConnectionStatus.Disconnected -> "Протокол: — • Страна: —"
         }
@@ -73,8 +73,7 @@ class VpnNotificationHelper(private val context: Context) {
             appendLine("Протокол: $protocol")
             appendLine("Страна: $country")
             appendLine("Профиль: $profile")
-            appendLine("Пинг: $ping")
-            appendLine("Скорость: ↑ ${state.uploadSpeed} / ↓ ${state.downloadSpeed}")
+            if (trafficLine != null) appendLine(trafficLine)
             appendLine("Трафик: ${state.totalTraffic}")
             append("Сессия: $session")
         }
@@ -83,8 +82,8 @@ class VpnNotificationHelper(private val context: Context) {
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification_shield)
             .setContentTitle(title)
-            .setContentText(contentText)
-            .setSubText("VPN")
+            .setContentText(trafficLine ?: contentText)
+            .setSubText(if (trafficLine != null) "VPN · $contentText" else "VPN")
             .setStyle(
                 NotificationCompat.BigTextStyle()
                     .bigText(bigText)

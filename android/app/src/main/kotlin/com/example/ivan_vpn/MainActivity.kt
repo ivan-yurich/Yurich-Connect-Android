@@ -23,9 +23,12 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import android.util.AtomicFile
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import com.tecclub.flutter_singbox.diagnostics.LocalConnectionIncidents
+import com.tecclub.flutter_singbox.diagnostics.HermesPilotGate
 import com.tecclub.flutter_singbox.diagnostics.OnDeviceDiagnostics
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -52,6 +55,8 @@ class MainActivity : FlutterActivity() {
     private var pendingSoakCommand: PendingSoakCommand? = null
     private var soakQueryReceiverRegistered = false
     private var diagnosticExportResult: MethodChannel.Result? = null
+    private var hermesSecretScreen = false
+    private var hermesAddedSecureFlag = false
     private val soakQueryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             handleSoakControlIntent(
@@ -116,12 +121,9 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "isIgnoringBatteryOptimizations" ->
                     result.success(isIgnoringBatteryOptimizations())
-                "requestIgnoreBatteryOptimizations" -> {
-                    requestIgnoreBatteryOptimizations()
-                    result.success(null)
-                }
-                "openBatteryOptimizationSettings" -> {
-                    openBatteryOptimizationSettings()
+                "openAppBatterySettings" -> result.success(openAppBatterySettings())
+                "requestIgnoreBatteryOptimizations", "openBatteryOptimizationSettings" -> {
+                    openAppBatterySettings()
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -159,7 +161,103 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        if (Regex("""\d+\.\d+\.\d+-test\.[0-9.]+""").matches(BuildConfig.VERSION_NAME)) {
+            configureLocalIncidents(flutterEngine)
+        }
         configureSoakBridge(flutterEngine)
+    }
+
+    private fun configureLocalIncidents(flutterEngine: FlutterEngine) {
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger,
+            "online.dnsai.ivanvpn/local_incidents").setMethodCallHandler { call, result ->
+            val arguments = call.arguments as? Map<*, *>
+            fun local(task: () -> Map<String, Any>) = runIo(result) {
+                try {
+                    task()
+                } catch (_: Exception) {
+                    throw NativeMethodFailure("LOCAL_INCIDENT_STORAGE", "Local incident storage unavailable")
+                }
+            }
+            when (call.method) {
+                "state" -> local { LocalConnectionIncidents.state(applicationContext) }
+                "hermesPreview" -> {
+                    if (BuildConfig.HERMES_INCIDENT_PILOT &&
+                        Regex("""\d+\.\d+\.\d+-test\.\d{8}\.\d+""").matches(BuildConfig.VERSION_NAME)
+                    ) {
+                        result.success(LocalConnectionIncidents.hermesPreview(BuildConfig.VERSION_NAME))
+                    } else {
+                        result.notImplemented()
+                    }
+                }
+                "hermesDeliveryState" -> {
+                    if (!hermesDeliveryPilotEnabled()) result.notImplemented()
+                    else local { LocalConnectionIncidents.hermesDeliveryState(applicationContext) }
+                }
+                "configureHermesDelivery" -> {
+                    if (!hermesDeliveryPilotEnabled()) {
+                        result.notImplemented()
+                    } else {
+                        val enabled = arguments?.get("enabled") as? Boolean
+                        if (enabled == null || (enabled && !hermesSecretScreen)) {
+                            result.error("HERMES_CONSENT_REQUIRED", "Open protected incident settings", null)
+                        } else {
+                            val bearer = arguments?.get("bearer") as? String
+                            local { LocalConnectionIncidents.configureHermesDelivery(applicationContext, enabled, bearer) }
+                        }
+                    }
+                }
+                "setHermesSecretScreen" -> {
+                    if (!hermesDeliveryPilotEnabled()) result.notImplemented()
+                    else {
+                        val enabled = arguments?.get("enabled") as? Boolean
+                        result.success(enabled != null && setHermesSecretScreen(enabled))
+                    }
+                }
+                "setEnabled" -> {
+                    val enabled = arguments?.get("enabled") as? Boolean
+                    if (enabled == null) {
+                        result.error("LOCAL_INCIDENT_ARGUMENT", "Invalid local consent", null)
+                    } else local { LocalConnectionIncidents.setEnabled(applicationContext, enabled) }
+                }
+                "record" -> {
+                    val epoch = arguments?.get("epoch") as? String
+                    if (epoch.isNullOrEmpty() || epoch.length > 80) {
+                        result.error("LOCAL_INCIDENT_ARGUMENT", "Invalid local consent", null)
+                    } else local {
+                        LocalConnectionIncidents.record(
+                            applicationContext, epoch, BuildConfig.VERSION_NAME,
+                            arguments?.get("protocol") as? String ?: "unknown",
+                            arguments?.get("network") as? String ?: "unknown",
+                            arguments?.get("stage") as? String ?: "unknown",
+                            arguments?.get("code") as? String ?: "unknown",
+                        )
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun hermesDeliveryPilotEnabled(): Boolean =
+        BuildConfig.HERMES_DELIVERY_PILOT && HermesPilotGate.enabled(applicationContext)
+
+    private fun setHermesSecretScreen(enabled: Boolean): Boolean {
+        val flag = android.view.WindowManager.LayoutParams.FLAG_SECURE
+        return runCatching {
+            if (enabled) {
+                if (!hermesSecretScreen) {
+                    hermesAddedSecureFlag = window.attributes.flags and flag == 0
+                    if (hermesAddedSecureFlag) window.addFlags(flag)
+                }
+                hermesSecretScreen = window.attributes.flags and flag != 0
+                hermesSecretScreen
+            } else {
+                if (hermesAddedSecureFlag) window.clearFlags(flag)
+                hermesAddedSecureFlag = false
+                hermesSecretScreen = false
+                true
+            }
+        }.getOrDefault(false)
     }
 
     @Suppress("DEPRECATION")
@@ -389,6 +487,7 @@ class MainActivity : FlutterActivity() {
                         SOAK_TAG,
                         "SOAK_QA_RESULT request=${command.requestId} $payload",
                     )
+                    persistSoakResult(payload)
                 }
 
                 override fun error(code: String, message: String?, details: Any?) {
@@ -408,6 +507,32 @@ class MainActivity : FlutterActivity() {
                 }
             },
         )
+    }
+
+    /** Bounded QA-only journal when an OEM suppresses logcat. No config payloads. */
+    private fun persistSoakResult(payload: String) {
+        if (BuildConfig.DISTRIBUTION_CHANNEL != "soak" || payload.length > MAX_SOAK_RESULT_LENGTH) return
+        try {
+            currentIoExecutor().execute {
+                try {
+                    val directory = File(requireNotNull(getExternalFilesDir(null)), "soak-control")
+                    check(directory.isDirectory || directory.mkdirs())
+                    val file = AtomicFile(File(directory, "latest-result.json"))
+                    val output = file.startWrite()
+                    try {
+                        output.write(payload.toByteArray(Charsets.UTF_8))
+                        file.finishWrite(output)
+                    } catch (error: Exception) {
+                        file.failWrite(output)
+                        throw error
+                    }
+                } catch (error: Exception) {
+                    Log.w(SOAK_TAG, "SOAK_QA_JOURNAL_FAILED type=${error.javaClass.simpleName}")
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            Log.w(SOAK_TAG, "SOAK_QA_JOURNAL_FAILED type=ExecutorUnavailable")
+        }
     }
 
     private fun inspectApk(path: String?, result: MethodChannel.Result) {
@@ -894,17 +1019,16 @@ class MainActivity : FlutterActivity() {
         return powerManager.isIgnoringBatteryOptimizations(packageName)
     }
 
-    private fun requestIgnoreBatteryOptimizations() {
-        if (isIgnoringBatteryOptimizations()) {
-            return
-        }
-        openBatteryOptimizationSettings()
-    }
-
-    private fun openBatteryOptimizationSettings() {
-        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(intent)
+    private fun openAppBatterySettings(): Boolean = try {
+        // App details avoids the manufacturer's filtered optimization list.
+        // Only the user can change the battery policy in Android Settings.
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", packageName, null)))
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    } catch (_: SecurityException) {
+        false
     }
 
     private fun pendingIntentFlags(): Int =
@@ -929,6 +1053,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        if (hermesSecretScreen || hermesAddedSecureFlag) setHermesSecretScreen(false)
         diagnosticExportResult?.error("EXPORT_INTERRUPTED", "Activity closed during export", null)
         diagnosticExportResult = null
         unregisterSoakQueryReceiver()
@@ -1094,7 +1219,7 @@ class MainActivity : FlutterActivity() {
         const val SOAK_TAG = "YurichSoakBridge"
         const val MAX_SOAK_RESULT_LENGTH = 16 * 1024
         val SOAK_MAIN_INSTANCE_ELAPSED_MS = SystemClock.elapsedRealtime()
-        val SOAK_COMMANDS = setOf("inventory", "status", "activate", "reconnect", "stop")
+        val SOAK_COMMANDS = setOf("inventory", "status", "activate", "reconnect", "stop", "probe")
         val SOAK_REQUEST_ID = Regex("^[a-zA-Z0-9._-]{1,64}$")
         val SOAK_PROFILE_TOKEN = Regex("^p\\d{4}$")
         const val FIRST_FRAME_TIMEOUT_MS = 8_000L

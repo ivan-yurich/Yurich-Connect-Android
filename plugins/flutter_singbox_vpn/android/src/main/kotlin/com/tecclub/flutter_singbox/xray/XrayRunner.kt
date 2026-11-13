@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.tecclub.flutter_singbox.bg.VPNService
+import com.tecclub.flutter_singbox.bg.NativeConfigBinding
+import com.tecclub.flutter_singbox.diagnostics.HermesPilotGate
 import dalvik.system.DexClassLoader
 import java.io.File
 import java.lang.reflect.Proxy
@@ -23,10 +25,18 @@ class XrayRunner(
 
     @Volatile
     private var started = false
+    @Volatile private var hermesRuntime: HermesRuntime? = null
+    internal class HermesRuntime(val path: String, val fingerprint: String)
+    internal fun hermesProof(): HermesRuntime? = hermesRuntime
+    internal fun ownsHermesRuntime(proof: HermesRuntime): Boolean =
+        hermesRuntime === proof && started && bridge.hermesBrowserDialerExcluded()
+    private var hermesSocketFile: File? = null
+    private var diagnosticLog: XrayDiagnosticLog? = null
 
     fun start(
         configJson: String,
         androidDisallowedPackages: List<String> = emptyList(),
+        prepareHermesRoute: Boolean = false,
     ): String = synchronized(runnerLock) {
         stopLocked()
 
@@ -37,23 +47,68 @@ class XrayRunner(
         }
 
         bridge.ensureInitialized(service.applicationContext)
+        val diagnostic = XrayDiagnosticLog.openIfEnabled(service)
+        diagnosticLog = diagnostic
+        val original = diagnostic?.attach(configJson) ?: configJson
+        var runtimeConfig = original
+        if (prepareHermesRoute && HermesPilotGate.enabled(service) && diagnostic == null &&
+            bridge.hermesBrowserDialerExcluded()
+        ) {
+            val directory = File(service.filesDir, "h")
+            // A short path in credential-encrypted private app data. Never use
+            // the public loopback port or an abstract/global socket address.
+            if (directory.isDirectory || directory.mkdir()) {
+                val candidate = File(directory, java.util.UUID.randomUUID().toString().replace("-", ""))
+                val patched = hermesXrayRoute.prepare(original, candidate.absolutePath)
+                // A failed pilot config check must not disrupt an ordinary VPN.
+                if (patched != null && runCatching { confirmedSuccess(validateConfig(datDir, patched)) }.getOrDefault(false)) {
+                    runtimeConfig = patched
+                    hermesSocketFile = candidate
+                }
+            }
+        }
         Log.i(TAG, "Embedded Xray version: ${redact(bridge.xrayVersion()).take(96)}")
-        val testResponse = validateConfig(datDir, configJson)
-        if (looksFailed(testResponse)) {
-            throw IllegalStateException("Xray config validation failed: $testResponse")
+        if (hermesSocketFile == null) {
+            val testResponse = validateConfig(datDir, runtimeConfig)
+            if (looksFailed(testResponse)) {
+                diagnostic?.record(XrayDiagnosticKind.config_failure)
+                throw IllegalStateException("Xray config validation failed: $testResponse")
+            }
         }
 
         val tun = service.openXrayTun(androidDisallowedPackages)
-        bridge.registerProtectFd(service)
+        bridge.registerProtectFd(service) { protected ->
+            diagnostic?.record(if (protected) XrayDiagnosticKind.protect_ok else XrayDiagnosticKind.protect_failed)
+        }
         bridge.setTunFd(tun.fd)
 
-        val request = bridge.newRunFromJsonRequest(datDir.absolutePath, configJson)
-        val response = bridge.runXrayFromJson(request)
+        val request = bridge.newRunFromJsonRequest(datDir.absolutePath, runtimeConfig)
+        var response = bridge.runXrayFromJson(request)
+        if (hermesSocketFile != null && (!confirmedSuccess(response) ||
+                !runCatching { bridge.getXrayState() }.getOrDefault(false))) {
+            // A kernel/OEM may reject the private listener. Never use that
+            // route; recover the user's VPN with its original config only
+            // after Xray's existing instance is confirmed stopped.
+            bridge.stopXray()
+            check(!bridge.getXrayState()) { "Pilot runtime cleanup not confirmed" }
+            removeHermesSocket()
+            runtimeConfig = original
+            val fallback = bridge.newRunFromJsonRequest(datDir.absolutePath, original)
+            response = bridge.runXrayFromJson(fallback)
+            check(confirmedSuccess(response) && bridge.getXrayState()) { "Original Xray runtime could not start" }
+        }
         if (looksFailed(response)) {
             throw IllegalStateException("Xray start failed: $response")
         }
 
         started = true
+        val path = hermesSocketFile?.absolutePath
+        if (path != null && confirmedSuccess(response) &&
+            hermesXrayRoute.verifies(runtimeConfig, path) &&
+            runCatching { bridge.getXrayState() }.getOrDefault(false)
+        ) {
+            hermesRuntime = HermesRuntime(path, NativeConfigBinding.fingerprint(runtimeConfig))
+        }
         Log.i(TAG, "Xray started: ${redact(response)}")
         response
     }
@@ -84,17 +139,30 @@ class XrayRunner(
     }
 
     private fun stopLocked() {
-        if (!bridge.isInitialized()) {
-            return
+        hermesRuntime = null
+        try {
+            if (!bridge.isInitialized()) return
+            if (started || bridge.getXrayState()) {
+                val response = runCatching { bridge.stopXray() }
+                    .onFailure { Log.w(TAG, "Xray stop failed", it) }
+                    .getOrDefault("")
+                Log.i(TAG, "Xray stopped: ${redact(response)}")
+            }
+        } finally {
+            started = false
+            diagnosticLog?.close()
+            diagnosticLog = null
+            removeHermesSocket()
         }
+    }
 
-        if (started || bridge.getXrayState()) {
-            val response = runCatching { bridge.stopXray() }
-                .onFailure { Log.w(TAG, "Xray stop failed", it) }
-                .getOrDefault("")
-            Log.i(TAG, "Xray stopped: ${redact(response)}")
+    private fun removeHermesSocket() {
+        // The path is unique to this runner, never a newer instance's listener.
+        hermesSocketFile?.let {
+            runCatching { it.delete() }
+            runCatching { File(it.path + ".lock").delete() }
         }
-        started = false
+        hermesSocketFile = null
     }
 
     fun isStarted(): Boolean =
@@ -116,6 +184,10 @@ class XrayRunner(
             lower.contains("panic") ||
             lower.contains("\"success\":false")
     }
+
+    private fun confirmedSuccess(response: String?): Boolean = runCatching {
+        org.json.JSONObject(decodeResponse(response).orEmpty()).opt("success") == true
+    }.getOrDefault(false)
 
     private fun redact(value: String?): String {
         if (value.isNullOrBlank()) {
@@ -145,6 +217,7 @@ class XrayRunner(
         private lateinit var classLoader: ClassLoader
         private lateinit var libXrayClass: Class<*>
         private var dialerControllerProxy: Any? = null
+        @Volatile private var cleanBrowserEnvironmentAtLoad = false
         private val protectCallCount = AtomicInteger(0)
 
         @Synchronized
@@ -168,11 +241,13 @@ class XrayRunner(
                 ClassLoader.getSystemClassLoader(),
             )
             try {
+                val browserEnvironmentClean = hermesEnvironmentClean()
                 val candidateClass = freshLoader.loadClass("libXray.LibXray")
                 // touch() initializes libgojni via libXray class static initializer.
                 candidateClass.getMethod("touch").invoke(null)
                 classLoader = freshLoader
                 libXrayClass = candidateClass
+                cleanBrowserEnvironmentAtLoad = browserEnvironmentClean
                 initialized = true
                 return
             } catch (error: UnsatisfiedLinkError) {
@@ -188,6 +263,7 @@ class XrayRunner(
                         existing.getMethod("touch").invoke(null)
                         classLoader = existing.classLoader ?: ClassLoader.getSystemClassLoader()
                         libXrayClass = existing
+                        cleanBrowserEnvironmentAtLoad = false
                         initialized = true
                         return
                     }
@@ -241,7 +317,17 @@ class XrayRunner(
 
         fun isInitialized(): Boolean = initialized
 
-        fun registerProtectFd(service: VPNService) {
+        fun hermesBrowserDialerExcluded(): Boolean =
+            initialized && cleanBrowserEnvironmentAtLoad && hermesEnvironmentClean()
+
+        private fun hermesEnvironmentClean(): Boolean = runCatching {
+            // Xray's Go browser_dialer.init() reads these exact aliases.
+            // Read before JNI first load and refuse uncertain prior loaders.
+            android.system.Os.getenv("xray.browser.dialer").isNullOrEmpty() &&
+                android.system.Os.getenv("XRAY_BROWSER_DIALER").isNullOrEmpty()
+        }.getOrDefault(false)
+
+        fun registerProtectFd(service: VPNService, observe: (Boolean) -> Unit = {}) {
             ensureInitialized(service.applicationContext)
             val controllerClass = classLoader.loadClass("libXray.DialerController")
             val proxy = Proxy.newProxyInstance(
@@ -252,6 +338,7 @@ class XrayRunner(
                     "protectFd" -> {
                         val fd = (args?.firstOrNull() as? Number)?.toInt()
                         val protected = fd != null && service.protect(fd)
+                        observe(protected)
                         val call = protectCallCount.incrementAndGet()
                         if (call <= PROTECT_LOG_LIMIT || !protected) {
                             Log.i(

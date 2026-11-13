@@ -6,6 +6,31 @@ import kotlin.test.assertTrue
 
 class NetworkResetTrackerTest {
     @Test
+    fun `first observation from a wake event preserves the physical transition`() {
+        val tracker = NetworkResetTracker<String>()
+        tracker.markCurrent("wifi")
+        val wake = tracker.observeNetwork("cellular")
+        assertTrue(wake.changed)
+        assertTrue(wake.resetRuntime)
+        assertFalse(TunnelReadinessPolicy.shouldDebounceNetworkEvent(200L, 5_000L, wake.changed))
+        val duplicate = tracker.observeNetwork("cellular")
+        assertFalse(duplicate.changed)
+        assertFalse(duplicate.resetRuntime)
+    }
+
+    @Test
+    fun `loss and restoration remain distinct atomic observations`() {
+        val tracker = NetworkResetTracker<String>()
+        tracker.markCurrent("wifi")
+        val lost = tracker.observeNetwork(null)
+        assertTrue(lost.changed)
+        assertFalse(lost.resetRuntime)
+        val restored = tracker.observeNetwork("wifi")
+        assertTrue(restored.changed)
+        assertTrue(restored.resetRuntime)
+    }
+
+    @Test
     fun `network loss is a change even though it cannot reset onto a new network`() {
         val tracker = NetworkResetTracker<String>()
         tracker.markCurrent("wifi")

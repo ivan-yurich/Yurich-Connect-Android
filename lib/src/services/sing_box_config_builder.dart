@@ -5,6 +5,7 @@ import '../models/dns_protection_mode.dart';
 import '../models/vpn_profile.dart';
 import 'profile_engine_selector.dart';
 import 'smart_route_rules.dart';
+import 'tls_pin_policy.dart';
 import 'vless_profile_validator.dart';
 
 enum SingBoxConfigTarget { android }
@@ -27,6 +28,7 @@ class SingBoxConfigBuilder {
     List<String> smartRouteRuBypassPackages = const [],
     DnsProtectionMode dnsProtectionMode = DnsProtectionMode.stable,
   }) {
+    TlsPinPolicy.requireProfile(profile);
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
       if (raw == null || raw.trim().isEmpty) {
@@ -92,6 +94,11 @@ class SingBoxConfigBuilder {
             'action': 'hijack-dns',
           },
           _unsupportedUdpRule(rejectUnsupportedUdp),
+          // Local diagnostics must not follow Smart Route or private bypasses.
+          {
+            'inbound': ['mixed-in'],
+            'outbound': 'proxy',
+          },
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {
             'ip_cidr': ['198.18.0.0/15', 'fc00::/18'],
@@ -105,7 +112,7 @@ class SingBoxConfigBuilder {
       },
     };
 
-    return const JsonEncoder.withIndent('  ').convert(config);
+    return jsonEncode(config);
   }
 
   String _withHealthProxy(String raw) {
@@ -195,17 +202,21 @@ class SingBoxConfigBuilder {
 
   List<Map<String, dynamic>> _smartRouteRules() {
     return [
-      {'domain': SmartRouteRules.globalProxyDomains, 'outbound': 'proxy'},
-      {
-        'domain_suffix': SmartRouteRules.globalProxyDomainSuffixes,
-        'outbound': 'proxy',
-      },
-      {'domain': SmartRouteRules.ruDirectDomains, 'outbound': 'direct'},
-      {
-        'domain_suffix': SmartRouteRules.ruDirectDomainSuffixes,
-        'outbound': 'direct',
-      },
+      _domainRoute(SmartRouteRules.proxyDomainRules, 'proxy'),
+      _domainRoute(SmartRouteRules.directDomainRules, 'direct'),
     ];
+  }
+
+  Map<String, dynamic> _domainRoute(
+    SmartRouteDomainRules rules,
+    String outbound,
+  ) {
+    return {
+      if (rules.domains.isNotEmpty) 'domain': rules.domains,
+      if (rules.domainSuffixes.isNotEmpty)
+        'domain_suffix': rules.domainSuffixes,
+      'outbound': outbound,
+    };
   }
 
   Map<String, dynamic> _mixedInbound() {

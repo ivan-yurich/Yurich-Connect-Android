@@ -4,6 +4,7 @@ import 'dart:io';
 import '../models/dns_protection_mode.dart';
 import '../models/vpn_profile.dart';
 import 'smart_route_rules.dart';
+import 'tls_pin_policy.dart';
 import 'vless_profile_validator.dart';
 
 class XrayConfigBuilder {
@@ -20,6 +21,7 @@ class XrayConfigBuilder {
     List<String> smartRouteRuBypassPackages = const [],
     DnsProtectionMode dnsProtectionMode = DnsProtectionMode.stable,
   }) {
+    TlsPinPolicy.requireProfile(profile);
     if (profile.kind != VpnProfileKind.vlessXhttp &&
         profile.kind != VpnProfileKind.vlessReality) {
       throw UnsupportedError('Xray builder supports only VLESS XHTTP/Reality.');
@@ -91,6 +93,11 @@ class XrayConfigBuilder {
             'inboundTag': ['dns-generated'],
             'outboundTag': 'proxy',
           },
+          {
+            'type': 'field',
+            'inboundTag': ['health-http-in'],
+            'outboundTag': 'proxy',
+          },
           if (smartRouteRuDirect) ..._smartRouteRules(),
           {
             'type': 'field',
@@ -116,7 +123,7 @@ class XrayConfigBuilder {
       },
     };
 
-    return const JsonEncoder.withIndent('  ').convert({
+    return jsonEncode({
       '_yurich': {
         'core': runtimeCore,
         'schema': runtimeSchema,
@@ -134,33 +141,12 @@ class XrayConfigBuilder {
     return [
       {
         'type': 'field',
-        'domain': [
-          for (final domain in SmartRouteRules.globalProxyDomains)
-            'full:$domain',
-        ],
+        'domain': SmartRouteRules.proxyDomainRules.xrayDomains,
         'outboundTag': 'proxy',
       },
       {
         'type': 'field',
-        'domain': [
-          for (final domain in SmartRouteRules.globalProxyDomainSuffixes)
-            'domain:$domain',
-        ],
-        'outboundTag': 'proxy',
-      },
-      {
-        'type': 'field',
-        'domain': [
-          for (final domain in SmartRouteRules.ruDirectDomains) 'full:$domain',
-        ],
-        'outboundTag': 'direct',
-      },
-      {
-        'type': 'field',
-        'domain': [
-          for (final domain in SmartRouteRules.ruDirectDomainSuffixes)
-            'domain:$domain',
-        ],
+        'domain': SmartRouteRules.directDomainRules.xrayDomains,
         'outboundTag': 'direct',
       },
     ];

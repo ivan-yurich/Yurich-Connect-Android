@@ -1,5 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
+import com.tecclub.flutter_singbox.model.ConnectionUiState
+
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -25,6 +27,9 @@ import com.tecclub.flutter_singbox.constant.Alert
 import com.tecclub.flutter_singbox.constant.Status
 import com.tecclub.flutter_singbox.database.Settings
 import com.tecclub.flutter_singbox.diagnostics.OnDeviceDiagnostics
+import com.tecclub.flutter_singbox.diagnostics.HermesDeliveryLane
+import com.tecclub.flutter_singbox.diagnostics.HermesLiveRoute
+import com.tecclub.flutter_singbox.diagnostics.HermesPilotGate
 import com.tecclub.flutter_singbox.session.VpnSessionPhase
 import com.tecclub.flutter_singbox.session.VpnSessionSnapshot
 import com.tecclub.flutter_singbox.session.VpnSessionStateMachine
@@ -117,7 +122,35 @@ class BoxService(
         }
     }
 
-    var fileDescriptor: ParcelFileDescriptor? = null
+    @Volatile var fileDescriptor: ParcelFileDescriptor? = null
+    @Volatile private var appCommandToken: String? = null
+    @Volatile private var hermesManagedFingerprint: String? = null
+    internal fun isDesiredRunning(): Boolean = sessionState.snapshot().desiredRunning
+    internal fun isRuntimeConnected(): Boolean = sessionState.snapshot().phase == VpnSessionPhase.Connected
+
+    internal fun rememberAppCommand(token: String?, managedFingerprint: String? = null) {
+        if (hermesManagedFingerprint != null || hermesLane != null) {
+            hermesLane?.invalidateRoute()
+        }
+        hermesManagedFingerprint = managedFingerprint
+        appCommandToken = token
+    }
+
+    internal fun rejectSupersededStart(startId: Int): Int {
+        // A stale start on an already active/newer service must not stop it.
+        // A cold start delivered via startForegroundService, however, owes
+        // Android a foreground notification even when no tunnel is opened.
+        if (isDesiredRunning()) {
+            return if (runCatching { SimpleConfigManager.getStartedByUser() }.getOrDefault(false)) {
+                Service.START_STICKY
+            } else Service.START_NOT_STICKY
+        }
+        if (currentSessionStatus() == Status.Stopped) {
+            notification.show(ConnectionUiState.disconnected())
+            service.stopSelfResult(startId)
+        }
+        return Service.START_NOT_STICKY
+    }
 
     private val status = MutableLiveData(Status.Stopped)
     private val binder = ServiceBinder(status) // We're using StatusClient now for traffic stats
@@ -125,8 +158,14 @@ class BoxService(
         ServiceNotification(service)
     }
     private var commandServer: CommandServer? = null
-    private var xrayRunner: XrayRunner? = null
+    @Volatile private var xrayRunner: XrayRunner? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val hermesNetworkEpoch = AtomicLong()
+    @Volatile private var hermesLane: HermesDeliveryLane? = null
+    private val hermesLaneLock = Any()
+    private var hermesDestroyed = false
+    // The Android Service is constructed before attachBaseContext().
+    private val hermesBuild by lazy { service is VPNService && HermesPilotGate.enabled(service) }
     private val sessionState = VpnSessionStateMachine()
     private val instanceElapsedMs = SystemClock.elapsedRealtime()
     @Volatile private var lifecyclePhaseStamp = LifecyclePhaseStamp(
@@ -212,11 +251,19 @@ class BoxService(
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Action.SERVICE_CLOSE -> {
-                    if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
-                        SimpleConfigManager.setStartedByUser(false)
-                        SimpleConfigManager.setManualDisconnectRequested(true)
+                    val close = {
+                        if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
+                            SimpleConfigManager.setStartedByUser(false)
+                            SimpleConfigManager.setManualDisconnectRequested(true)
+                        }
+                        stopService()
                     }
-                    stopService()
+                    if (intent.hasExtra(VpnCommandFence.EXTRA_TOKEN)) {
+                        VpnCommandFence.runCurrent(service, intent.getStringExtra(VpnCommandFence.EXTRA_TOKEN),
+                            VpnCommandFence.Kind.Stop, close)
+                    } else {
+                        close()
+                    }
                 }
 
                 Action.SERVICE_RESTART -> {
@@ -234,16 +281,26 @@ class BoxService(
                 }
 
                 Action.SERVICE_RELOAD -> {
-                    // Each process has its own config cache; preferences do not refresh it.
-                    if (!RuntimeConfigReload.cacheReceived(intent, SimpleConfigManager::cacheConfig)) {
-                        android.util.Log.w("BoxService", "Ignoring reload without a runtime config")
-                        return
+                    val token = intent.getStringExtra(VpnCommandFence.EXTRA_TOKEN)
+                    val reload = {
+                        // Each process has its own config cache; preferences do not refresh it.
+                        if (RuntimeConfigReload.cacheReceived(intent) { SimpleConfigManager.cacheConfig(it) }) {
+                            if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
+                                SimpleConfigManager.setStartedByUser(true)
+                                SimpleConfigManager.setManualDisconnectRequested(false)
+                            }
+                            rememberAppCommand(token, intent.getStringExtra(HermesPilotGate.EXTRA_MANAGED_CONFIG)
+                                .takeIf { hermesBuild && token != null })
+                            serviceReload()
+                        } else {
+                            android.util.Log.w("BoxService", "Ignoring reload without a runtime config")
+                        }
                     }
-                    if (intent.getBooleanExtra(Action.EXTRA_USER_INITIATED, false)) {
-                        SimpleConfigManager.setStartedByUser(true)
-                        SimpleConfigManager.setManualDisconnectRequested(false)
+                    if (intent.hasExtra(VpnCommandFence.EXTRA_TOKEN)) {
+                        VpnCommandFence.runCurrent(service, token, VpnCommandFence.Kind.Start, reload)
+                    } else {
+                        reload()
                     }
-                    serviceReload()
                 }
 
                 Action.SERVICE_STATUS_QUERY -> {
@@ -257,6 +314,23 @@ class BoxService(
                     resultData = nativeConfigBinding?.forGeneration(snapshot.generation)
                 }
 
+
+                Action.SERVICE_PROTECTION_QUERY -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && service is VPNService) {
+                        resultCode = NativeProtectionQuery.PRESENT
+                        setResultExtras(android.os.Bundle().apply {
+                            service.protectionState().forEach { (key, value) -> putBoolean(key, value) }
+                            if (intent.getBooleanExtra(NativeProtectionQuery.INCLUDE_APP_ROUTING, false)) {
+                                service.appliedAppExclusions()?.let {
+                                    putStringArrayList(NativeProtectionQuery.APPLIED_EXCLUSIONS, ArrayList(it))
+                                }
+                            }
+                        })
+                    }
+                }
+
+                HermesPilotGate.ACCESS_CHANGED -> hermesLane?.accessChanged()
+                HermesPilotGate.QUEUE_CHANGED -> hermesLane?.queueChanged()
 
                 PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -326,10 +400,49 @@ class BoxService(
     }
 
     private fun publishSessionStatus() {
-        recordDiagnostic("session")
         val nextStatus = currentSessionStatus()
+        if (nextStatus != Status.Started) hermesLane?.invalidateRoute()
+        recordDiagnostic("session")
         status.postValue(nextStatus)
         broadcastStatus(nextStatus)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun installHermesLease(generation: Long) {
+        val runner = xrayRunner ?: return
+        val proof = runner.hermesProof() ?: return
+        val command = appCommandToken ?: return
+        val descriptor = fileDescriptor ?: return
+        val network = lastHealthyDefaultNetwork ?: return
+        val lease = HermesLiveRoute(generation, proof.fingerprint, command, descriptor,
+            network, hermesNetworkEpoch.get(), proof.path)
+        if (!runCatching { hermesRouteIsCurrent(lease) }.getOrDefault(false)) return
+        synchronized(hermesLaneLock) {
+            if (hermesDestroyed) return
+            val lane = hermesLane ?: HermesDeliveryLane(
+                service.applicationContext, serviceScope, ::hermesRouteIsCurrent,
+            ).also { hermesLane = it }
+            lane.install(lease)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun hermesRouteIsCurrent(lease: HermesLiveRoute): Boolean {
+        val vpn = service as? VPNService ?: return false
+        val state = sessionState.snapshot()
+        val runner = xrayRunner ?: return false
+        val currentProof = runner.hermesProof() ?: return false
+        return state.desiredRunning && state.phase == VpnSessionPhase.Connected &&
+            state.generation == lease.sessionGeneration && runner.ownsHermesRuntime(currentProof) &&
+            currentProof.fingerprint == lease.configuration &&
+            currentProof.path == lease.path && hermesNetworkEpoch.get() == lease.networkEpoch &&
+            appCommandToken == lease.command && fileDescriptor === lease.descriptor &&
+            lease.descriptor.fileDescriptor.valid() && DefaultNetworkMonitor.defaultNetwork == lease.network &&
+            physicalDefaultNetwork() == lease.network && DefaultNetworkMonitor.isValidatedPhysical(lease.network) &&
+            // A stop/reload issued by the app invalidates the old lease even
+            // before Android delivers the corresponding broadcast.
+            VpnCommandFence.isCurrentStart(service, lease.command) && vpn.hermesPolicyAllows() &&
+            sessionState.isCurrent(lease.sessionGeneration) && fileDescriptor === lease.descriptor
     }
 
     private fun ensureCurrentSession(
@@ -408,14 +521,25 @@ class BoxService(
                 return
             }
 
-            val xrayConfig = XrayRuntimeConfig.from(content)
+            // Keep requested fingerprint for Flutter's generation-bound ACK.
+            // Only the effective config goes into a core. Every start, reload,
+            // clean-process/sticky/package restore passes through this boundary.
+            val runtimePlan = (service as? VPNService)?.prepareRuntime(content)
+            if (runtimePlan != null) (service as VPNService).useRuntimePlan(runtimePlan, fingerprint)
+            val effectiveContent = runtimePlan?.content ?: content
+            val xrayConfig = XrayRuntimeConfig.from(effectiveContent)
             if (xrayConfig.enabled) {
-                startXrayService(xrayConfig, generation)
+                val hasPilotOrigin = hermesBuild && runtimePlan?.strict == false &&
+                    hermesManagedFingerprint == fingerprint && appCommandToken != null &&
+                    // The Xray bootstrap can resolve only the selected proxy.
+                    // Never let it resolve the incident destination itself.
+                    com.tecclub.flutter_singbox.xray.hermesXrayRoute.canBootstrap(xrayConfig.configJson)
+                startXrayService(xrayConfig, generation, hasPilotOrigin)
                 return
             }
             activeRuntimeCore = VpnRuntimeCore.SingBox
             processRuntimeCore = VpnRuntimeCore.SingBox
-            processUsedHysteria2 = processUsedHysteria2 || SingBoxRuntimeConfig.usesHysteria2(content)
+            processUsedHysteria2 = processUsedHysteria2 || SingBoxRuntimeConfig.usesHysteria2(effectiveContent)
 
             Application.ensureLibboxInitialized(service.applicationContext)
             verifyNativeRuntimeIsolation(VpnRuntimeCore.SingBox)
@@ -432,9 +556,7 @@ class BoxService(
             // }
 
             android.util.Log.e("BoxService", "Starting DefaultNetworkMonitor")
-            DefaultNetworkMonitor.setNetworkChangeObserver {
-                handleNetworkWakeEvent("default-network")
-            }
+            DefaultNetworkMonitor.setNetworkChangeObserver(::handleDefaultNetworkTransition)
             DefaultNetworkMonitor.start()
             
             android.util.Log.e("BoxService", "Setting memory limit")
@@ -443,7 +565,7 @@ class BoxService(
             android.util.Log.e("BoxService", "Config accepted, length: ${content.length}")
 
             try {
-                activeCommandServer.startOrReloadService(content, OverrideOptions())
+                activeCommandServer.startOrReloadService(effectiveContent, OverrideOptions())
                 android.util.Log.e("BoxService", "SingBox service started successfully")
             } catch (e: Exception) {
                 android.util.Log.e("BoxService", "Failed to start SingBox service: ${e.message}", e)
@@ -482,7 +604,11 @@ class BoxService(
         }
     }
 
-    private suspend fun startXrayService(runtimeConfig: XrayRuntimeConfig, generation: Long) {
+    private suspend fun startXrayService(
+        runtimeConfig: XrayRuntimeConfig,
+        generation: Long,
+        prepareHermesRoute: Boolean,
+    ) {
         val configJson = runtimeConfig.configJson
         if (service !is VPNService) {
             stopAndAlert(
@@ -504,16 +630,20 @@ class BoxService(
                 configJson,
                 WATCHDOG_MIXED_PROXY_PORT,
             )
-            DefaultNetworkMonitor.setNetworkChangeObserver {
-                handleNetworkWakeEvent("default-network")
-            }
+            DefaultNetworkMonitor.setNetworkChangeObserver(::handleDefaultNetworkTransition)
             DefaultNetworkMonitor.start()
+            // Android's default resolver can point back into our own TUN.
+            // Resolve only the upstream on the physical network; keep requested
+            // config/fingerprint and TLS/HTTP identities unchanged.
+            val bootstrapConfig = com.tecclub.flutter_singbox.xray.XrayBootstrapResolver.resolve(service, configJson)
+            ensureCurrentSession(generation)
             val runner = XrayRunner(service)
             xrayRunner = runner
             val response = withContext(Dispatchers.IO) {
                 runner.start(
-                    configJson,
+                    bootstrapConfig,
                     runtimeConfig.androidDisallowedPackages,
+                    prepareHermesRoute = prepareHermesRoute,
                 )
             }
             verifyNativeRuntimeIsolation(VpnRuntimeCore.Xray)
@@ -671,6 +801,7 @@ class BoxService(
     }
 
     private fun closeTunFileDescriptor() {
+        hermesLane?.invalidateRoute()
         val pfd = fileDescriptor ?: return
         runCatching {
             pfd.close()
@@ -887,7 +1018,8 @@ class BoxService(
                 recoverStaleLifecycleState(currentStatus, keepRunning)
                 return if (keepRunning) Service.START_STICKY else Service.START_NOT_STICKY
             } else {
-                val hasConfigChange = lastConfigFingerprint != null &&
+                val policyChanged = (service as? VPNService)?.needsRuntimePolicyUpdate() == true
+                val hasConfigChange = policyChanged || lastConfigFingerprint != null &&
                     !incomingConfig.isBlank() &&
                     incomingConfig != "{}" &&
                     incomingFingerprint.isNotEmpty() &&
@@ -1004,6 +1136,7 @@ class BoxService(
             Intent(service, VpnProcessRestartReceiver::class.java).apply {
                 action = VpnProcessRestartReceiver.ACTION_RESTART_CLEAN_PROCESS
                 putExtra(VpnProcessRestartReceiver.EXTRA_PREVIOUS_VPN_PID, android.os.Process.myPid())
+                appCommandToken?.let { putExtra(VpnCommandFence.EXTRA_TOKEN, it) }
             }
         )
         closeTunFileDescriptor()
@@ -1039,6 +1172,11 @@ class BoxService(
             addAction(Action.SERVICE_RESTART)
             addAction(Action.SERVICE_RELOAD)
             addAction(Action.SERVICE_STATUS_QUERY)
+            addAction(Action.SERVICE_PROTECTION_QUERY)
+            if (hermesBuild) {
+                addAction(HermesPilotGate.ACCESS_CHANGED)
+                addAction(HermesPilotGate.QUEUE_CHANGED)
+            }
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1078,6 +1216,11 @@ class BoxService(
     }
 
     internal fun onDestroy() {
+        synchronized(hermesLaneLock) {
+            hermesDestroyed = true
+            hermesLane?.close()
+            hermesLane = null
+        }
         recordDiagnostic("destroy")
         nativeSoakObserver.unregister()
         val destroySnapshot = sessionState.snapshot()
@@ -1150,6 +1293,9 @@ class BoxService(
                 putExtra(Action.EXTRA_CONFIG_FINGERPRINT, nativeConfigBinding?.forGeneration(snapshot.generation))
                 putExtra(Action.EXTRA_SESSION_REASON, snapshot.reason)
                 putExtra(Action.EXTRA_DESIRED_RUNNING, snapshot.desiredRunning)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && service is VPNService) {
+                    putExtra(Action.EXTRA_SYSTEM_ALWAYS_ON, service.systemOwnsLifecycle())
+                }
                 SimpleConfigManager.getManualDisconnectRequested()?.let {
                     putExtra(Action.EXTRA_MANUAL_DISCONNECT_REQUESTED, it)
                 }
@@ -1170,6 +1316,9 @@ class BoxService(
 
         lastHealthyDefaultNetwork = physicalDefaultNetwork()
         networkResetTracker.markCurrent(lastHealthyDefaultNetwork)
+        if (hermesBuild && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            installHermesLease(generation)
+        }
         watchdogFailures = 0
         if (!wasConnected) {
             android.util.Log.i(
@@ -1522,6 +1671,59 @@ class BoxService(
         watchdogFlapDetector.reset()
     }
 
+    private fun handleDefaultNetworkTransition(network: Network?, transition: DefaultNetworkTransition) {
+        if (transition == DefaultNetworkTransition.Changed) {
+            if (hermesBuild) {
+                hermesNetworkEpoch.incrementAndGet()
+                hermesLane?.invalidateRoute()
+            }
+            handleNetworkWakeEvent("default-network")
+            return
+        }
+        // Android may validate the new physical network after the first
+        // delayed rebind already returned. Deliver this edge without treating
+        // every capability callback as a fresh handover.
+        val expectedNetwork = network ?: return
+        val snapshot = sessionState.snapshot()
+        if (!TunnelReadinessPolicy.canHandleNetworkEvent(
+                phase = snapshot.phase,
+                desiredRunning = snapshot.desiredRunning,
+                runtimeActive = hasActiveRuntime(),
+                restarting = watchdogRestarting,
+            ) ||
+            physicalDefaultNetwork() != expectedNetwork ||
+            !DefaultNetworkMonitor.isValidatedPhysical(expectedNetwork) ||
+            !sessionState.isCurrent(snapshot.generation)
+        ) return
+
+        if (networkResetTracker.hasRecoveryAllowance() &&
+            XrayNetworkChangePolicy.shouldRebind(
+                activeRuntimeCore, snapshot.phase, snapshot.reason,
+                networkChanged = true, networkAvailable = true, desiredRunning = snapshot.desiredRunning,
+            )
+        ) {
+            // The delayed job still checks the generation, the live network
+            // and consumes the existing one-rebind allowance.
+            scheduleXrayNetworkRebind(expectedNetwork, snapshot.generation)
+            return
+        }
+
+        commandServer?.wake()
+        if (snapshot.phase != VpnSessionPhase.Reconnecting ||
+            !snapshot.reason.startsWith("readiness:default-network") ||
+            !sessionState.isCurrent(snapshot.generation)
+        ) return
+        // The existing same-profile readiness loop may be asleep in retry
+        // backoff from an unusable path. Replace it, not the runtime; keep
+        // the ordinary HTTPS quorum, deadlines and number of attempts.
+        startReadinessValidation(
+            generation = snapshot.generation,
+            reason = "default-network-validated",
+            initialDelayMs = NETWORK_RESET_DELAY_MS,
+            demoteUntilReady = true,
+        )
+    }
+
     private fun handleNetworkWakeEvent(reason: String) {
         recordDiagnostic("network", labels = mapOf("source" to when (reason) {
             "default-network" -> "default_network"
@@ -1542,11 +1744,16 @@ class BoxService(
 
         val currentDefaultNetwork = physicalDefaultNetwork()
         val isDefaultNetworkEvent = reason.contains("default-network", ignoreCase = true)
-        val networkChanged = isDefaultNetworkEvent &&
-            networkResetTracker.isDifferentNetwork(currentDefaultNetwork)
-        val shouldResetRuntimeNetwork = networkResetTracker.onNetworkEvent(
-            currentDefaultNetwork,
-        )
+        // A wake event can be the first observation after a missed callback.
+        // Atomically detect the physical transition before duplicate/debounce
+        // checks; otherwise they can remember a new network without resetting it.
+        val transition = networkResetTracker.observeNetwork(currentDefaultNetwork)
+        val networkChanged = transition.changed
+        if (hermesBuild && networkChanged && !isDefaultNetworkEvent) {
+            hermesNetworkEpoch.incrementAndGet()
+            hermesLane?.invalidateRoute()
+        }
+        val shouldResetRuntimeNetwork = transition.resetRuntime
         if (networkChanged) {
             watchdogFlapDetector.reset()
         }
@@ -1580,10 +1787,13 @@ class BoxService(
             refreshKeeperWakeLock(reason)
         }
         if (shouldResetRuntimeNetwork) {
-            scheduleRuntimeNetworkReset(
-                network = checkNotNull(currentDefaultNetwork),
-                generation = snapshot.generation,
-            )
+            val network = checkNotNull(currentDefaultNetwork)
+            if (XrayNetworkChangePolicy.shouldRebind(activeRuntimeCore, snapshot.phase,
+                    snapshot.reason, networkChanged, true, snapshot.desiredRunning)) {
+                scheduleXrayNetworkRebind(network, snapshot.generation)
+            } else {
+                scheduleRuntimeNetworkReset(network, snapshot.generation)
+            }
         }
         commandServer?.wake()
 
@@ -1602,6 +1812,28 @@ class BoxService(
             demoteUntilReady = networkChanged || alreadyValidating,
             probeAttempts = readinessPlan.probeAttempts,
         )
+    }
+
+    private fun scheduleXrayNetworkRebind(network: Network, generation: Long) {
+        val expectedRunner = xrayRunner ?: return
+        networkResetJob?.cancel()
+        networkResetJob = serviceScope.launch {
+            delay(NETWORK_RESET_DELAY_MS)
+            // No restart for a probe failure, duplicate callback, cold start,
+            // superseded profile, null/captive network, or manual disconnect.
+            if (!sessionState.isCurrent(generation) || xrayRunner !== expectedRunner ||
+                physicalDefaultNetwork() != network ||
+                !DefaultNetworkMonitor.isValidatedPhysical(network) ||
+                !networkResetTracker.consumeRecoveryAllowance()) return@launch
+            val reconnect = sessionState.requestReconnect("network-rebind", generation) ?: return@launch
+            stampLifecyclePhase(reconnect)
+            publishSessionStatus()
+            // Detach this job before recycle cancels the old network-reset job.
+            networkResetJob = null
+            launchLifecycle(reconnect.generation) {
+                recycleVpnService("network-rebind", reconnect.generation)
+            }
+        }
     }
 
     private fun scheduleRuntimeNetworkReset(network: Network, generation: Long) {
@@ -2091,6 +2323,7 @@ class BoxService(
             return
         }
         stickyRestartScheduled = true
+        val token = appCommandToken
         android.util.Log.w("BoxService", "Scheduling sticky restart after $reason")
         Handler(Looper.getMainLooper()).postDelayed({
             stickyRestartScheduled = false
@@ -2101,10 +2334,16 @@ class BoxService(
                 android.util.Log.w("BoxService", "Sticky restart skipped: user flag/config missing")
                 return@postDelayed
             }
+            if (token != null && !VpnCommandFence.isCurrentStart(service, token)) return@postDelayed
 
             val intent = Intent(service.applicationContext, Settings.serviceClass()).apply {
                 action = ACTION_START
+                token?.let { putExtra(VpnCommandFence.EXTRA_TOKEN, it) }
                 putExtra(EXTRA_CONFIG_CONTENT, SimpleConfigManager.getConfig())
+                putExtra(
+                    com.tecclub.flutter_singbox.config.RuntimeTlsPolicy.INTENT_REVISION_EXTRA,
+                    com.tecclub.flutter_singbox.config.RuntimeTlsPolicy.CURRENT_REVISION,
+                )
             }
             ContextCompat.startForegroundService(service.applicationContext, intent)
         }, STICKY_RESTART_DELAY_MS)

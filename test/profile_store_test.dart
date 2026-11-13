@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:aurum_vpn/src/models/dns_protection_mode.dart';
@@ -7,10 +8,13 @@ import 'package:aurum_vpn/src/models/profile_stability.dart';
 import 'package:aurum_vpn/src/services/profile_store.dart';
 import 'package:aurum_vpn/src/services/profile_auto_selector.dart';
 import 'package:aurum_vpn/src/services/secure_profile_storage.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
   late _MemorySecureProfileStorage secureStorage;
   late ProfileStore store;
 
@@ -87,6 +91,210 @@ void main() {
 
     await store.saveSmartRouteRuDirect(false);
     expect(await store.loadSmartRouteRuDirect(), isFalse);
+  });
+
+  group('Smart Route install default', () {
+    const channel = MethodChannel('com.tecclub.flutter_singbox/methods');
+    const preferenceKey = 'smartRouteRuDirect';
+    final installTime = DateTime.utc(2026, 11, 12, 10);
+    final later = installTime.add(const Duration(days: 1));
+    final epoch = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    final calls = <String>[];
+    Object? nativeAnswer;
+    PlatformException? nativeError;
+    Completer<bool>? pendingSeed;
+
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      calls.clear();
+      nativeAnswer = true;
+      nativeError = null;
+      pendingSeed = null;
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        calls.add(call.method);
+        if (nativeError case final error?) throw error;
+        if (pendingSeed case final seed?) return seed.future;
+        return nativeAnswer;
+      });
+    });
+
+    tearDown(() {
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    Future<bool> loadFresh() => store.loadSmartRouteRuDirect(
+      installTime: installTime,
+      updateTime: installTime,
+    );
+
+    Future<void> expectNoDefaultSaved() async {
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.containsKey(preferenceKey), isFalse);
+    }
+
+    for (final manualKeyPresent in [false, true]) {
+      test(
+        'enables and stores the clean Android default ($manualKeyPresent manual key)',
+        () async {
+          if (manualKeyPresent) {
+            SharedPreferences.setMockInitialValues({
+              'manualDisconnectRequested': false,
+            });
+          }
+          expect(await loadFresh(), isTrue);
+          final prefs = await SharedPreferences.getInstance();
+          expect(prefs.getBool(preferenceKey), isTrue);
+          expect(calls, ['initializeSmartRouteInstallDefault']);
+
+          final afterUpdate = ProfileStore(secureStorage: secureStorage);
+          expect(
+            await afterUpdate.loadSmartRouteRuDirect(
+              installTime: installTime,
+              updateTime: later,
+            ),
+            isTrue,
+          );
+          expect(calls, hasLength(1));
+        },
+      );
+    }
+
+    test('keeps the implicit setting off on an Android update', () async {
+      expect(
+        await store.loadSmartRouteRuDirect(
+          installTime: installTime,
+          updateTime: later,
+        ),
+        isFalse,
+      );
+      await expectNoDefaultSaved();
+      expect(calls, isEmpty);
+    });
+
+    test(
+      'does not override an explicit off saved during native seeding',
+      () async {
+        pendingSeed = Completer<bool>();
+        final load = loadFresh();
+        await Future<void>.delayed(Duration.zero);
+        expect(calls, ['initializeSmartRouteInstallDefault']);
+        await store.saveSmartRouteRuDirect(false);
+        pendingSeed!.complete(true);
+        expect(await load, isFalse);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getBool(preferenceKey), isFalse);
+      },
+    );
+
+    for (final enabled in [false, true]) {
+      test(
+        'preserves an explicit $enabled choice on install and update',
+        () async {
+          SharedPreferences.setMockInitialValues({preferenceKey: enabled});
+          expect(await loadFresh(), enabled);
+          expect(
+            await store.loadSmartRouteRuDirect(
+              installTime: installTime,
+              updateTime: later,
+            ),
+            enabled,
+          );
+          final prefs = await SharedPreferences.getInstance();
+          expect(prefs.getBool(preferenceKey), enabled);
+          expect(calls, isEmpty);
+        },
+      );
+    }
+
+    test('keeps the default off for missing or invalid timestamps', () async {
+      for (final (installed, updated) in [
+        (null, null),
+        (installTime, null),
+        (null, installTime),
+        (epoch, epoch),
+        (
+          epoch.subtract(const Duration(seconds: 1)),
+          epoch.subtract(const Duration(seconds: 1)),
+        ),
+        (later, installTime),
+      ]) {
+        expect(
+          await store.loadSmartRouteRuDirect(
+            installTime: installed,
+            updateTime: updated,
+          ),
+          isFalse,
+        );
+      }
+      await expectNoDefaultSaved();
+      expect(calls, isEmpty);
+    });
+
+    for (final restoredKey in [
+      'selectedProfileId',
+      'profiles',
+      'manualDisconnectRequested',
+    ]) {
+      test(
+        'does not enable over restored preferences ($restoredKey)',
+        () async {
+          SharedPreferences.setMockInitialValues({
+            restoredKey: switch (restoredKey) {
+              'selectedProfileId' => 'restored-profile',
+              'profiles' => '[]',
+              _ => true,
+            },
+          });
+          expect(await loadFresh(), isFalse);
+          await expectNoDefaultSaved();
+        },
+      );
+    }
+
+    for (final (secureKey, value) in [
+      ('profiles.v1', '[]'),
+      ('deletedProfileIdsBySubscriptionSource.v1', '{}'),
+    ]) {
+      test('does not enable over restored secure state ($secureKey)', () async {
+        await secureStorage.write(secureKey, value);
+        expect(await loadFresh(), isFalse);
+        await expectNoDefaultSaved();
+      });
+    }
+
+    test('keeps the default off if secure state cannot be read', () async {
+      secureStorage.failReads = true;
+      expect(await loadFresh(), isFalse);
+      await expectNoDefaultSaved();
+    });
+
+    test(
+      'keeps the default off when native state is used or unknown',
+      () async {
+        for (final answer in [false, null, 'unknown']) {
+          nativeAnswer = answer;
+          expect(await loadFresh(), isFalse);
+        }
+        nativeError = PlatformException(code: 'NATIVE_STATE_UNAVAILABLE');
+        expect(await loadFresh(), isFalse);
+        await expectNoDefaultSaved();
+        expect(calls, List.filled(4, 'initializeSmartRouteInstallDefault'));
+      },
+    );
+
+    test('does not infer a clean install on other platforms', () async {
+      for (final platform in TargetPlatform.values.where(
+        (value) => value != TargetPlatform.android,
+      )) {
+        debugDefaultTargetPlatformOverride = platform;
+        expect(await loadFresh(), isFalse);
+      }
+      await expectNoDefaultSaved();
+      expect(calls, isEmpty);
+    });
   });
 
   test('stores DNS protection mode', () async {
@@ -273,6 +481,7 @@ void main() {
 
 final class _MemorySecureProfileStorage implements SecureProfileStorage {
   final _values = <String, String>{};
+  bool failReads = false;
 
   @override
   Future<void> delete(String key) async {
@@ -280,7 +489,10 @@ final class _MemorySecureProfileStorage implements SecureProfileStorage {
   }
 
   @override
-  Future<String?> read(String key) async => _values[key];
+  Future<String?> read(String key) async {
+    if (failReads) throw StateError('Secure profile storage unavailable');
+    return _values[key];
+  }
 
   @override
   Future<void> write(String key, String value) async {

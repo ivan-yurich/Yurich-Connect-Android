@@ -29,11 +29,13 @@ import androidx.core.app.ActivityCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
 import com.tecclub.flutter_singbox.bg.BoxService
+import com.tecclub.flutter_singbox.bg.DirectProbeNetworkGate
 import com.tecclub.flutter_singbox.bg.NativeConfigBinding
 import com.tecclub.flutter_singbox.bg.NativeStatusQuery
 import com.tecclub.flutter_singbox.bg.RuntimeConfigReload
 import com.tecclub.flutter_singbox.bg.ServiceConnection
 import com.tecclub.flutter_singbox.bg.ServiceNotification
+import com.tecclub.flutter_singbox.bg.VpnCommandFence
 import com.tecclub.flutter_singbox.bg.VpnNotificationHelper
 import com.tecclub.flutter_singbox.database.Settings
 import com.tecclub.flutter_singbox.config.SimpleConfigManager
@@ -60,6 +62,7 @@ import io.flutter.plugin.common.PluginRegistry
 import io.nekohasekai.libbox.StatusMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -148,7 +151,14 @@ internal object VpnStopLifecyclePolicy {
 
     fun canStart(isShuttingDown: Boolean): Boolean = !isShuttingDown
 
+    fun canDispatchStart(generation: Long, currentGeneration: Long, isShuttingDown: Boolean): Boolean =
+        generation == currentGeneration && canStart(isShuttingDown)
+
     fun canFinalize(serviceRunning: Boolean): Boolean = !serviceRunning
+
+    fun canJoinStop(isShuttingDown: Boolean, activeGeneration: Long,
+                    currentGeneration: Long, cleanupRunning: Boolean): Boolean =
+        isShuttingDown && cleanupRunning && activeGeneration != 0L && activeGeneration == currentGeneration
 }
 
 /** FlutterSingboxPlugin */
@@ -178,6 +188,7 @@ class FlutterSingboxPlugin :
     private val statusClient by lazy { StatusClient(coroutineScope, this) }
     private val logClient by lazy { LogClient(coroutineScope, this) }
     private val coroutineScope = CoroutineScope(Dispatchers.Main + Job())
+    private val directProbeDns = mutableMapOf<Long, Job>()
     
     // Status tracking
     private val _vpnStatus = MutableStateFlow(Status.Stopped)
@@ -188,6 +199,7 @@ class FlutterSingboxPlugin :
     
     // Flag to prevent reconnection during shutdown
     private var isShuttingDown = false
+    private var lastKnownSystemAlwaysOn: Boolean? = null
     
     // Flag to prevent Stopped status during startup
     private var isStarting = false
@@ -201,6 +213,7 @@ class FlutterSingboxPlugin :
     private val lifecycleGeneration = AtomicLong(0L)
     @Volatile private var pendingVpnPermissionGeneration = 0L
     @Volatile private var activeStopGeneration = 0L
+    private var earliestStopConfirmationAt = 0L
     private val configSaveGeneration = AtomicLong(0L)
     private val configSaveMutex = Mutex()
     private var periodicStatusJob: kotlinx.coroutines.Job? = null
@@ -208,6 +221,7 @@ class FlutterSingboxPlugin :
     @Volatile private var serviceStatusCheckInFlight = false
     private var networkGenerationId = 0
     private var lastNetworkFingerprint = ""
+    private var lastNetworkChangedAtMs = 0L
 
     // Traffic stats
     private var _trafficStats = MutableStateFlow<Map<String, Any>>(
@@ -277,6 +291,9 @@ class FlutterSingboxPlugin :
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Action.BROADCAST_STATUS_CHANGED) {
+                if (intent.hasExtra(Action.EXTRA_SYSTEM_ALWAYS_ON)) {
+                    lastKnownSystemAlwaysOn = intent.getBooleanExtra(Action.EXTRA_SYSTEM_ALWAYS_ON, false)
+                }
                 val statusOrdinal = intent.getIntExtra(Action.EXTRA_STATUS, Status.Stopped.ordinal)
                 val reportedStatus = Status.values().getOrNull(statusOrdinal) ?: return
                 val status = if (reportedStatus == Status.Started && !NativeStatusQuery.matchesConfig(
@@ -303,7 +320,7 @@ class FlutterSingboxPlugin :
                     isShuttingDown = isShuttingDown,
                     isStarting = isStarting,
                     startedByUser = runCatching {
-                        SimpleConfigManager.getStartedByUser()
+                        SimpleConfigManager.getStartedByUser() || lastKnownSystemAlwaysOn == true
                     }.getOrDefault(false),
                 )
                 if (guardedStatus != status) {
@@ -688,6 +705,7 @@ class FlutterSingboxPlugin :
             return
         }
         serviceStatusCheckInFlight = true
+        val queryGeneration = lifecycleGeneration.get()
         
         coroutineScope.launch {
             try {
@@ -700,10 +718,12 @@ class FlutterSingboxPlugin :
                     }
                 }
                 
+                if (queryGeneration != lifecycleGeneration.get() || isShuttingDown) return@launch
                 android.util.Log.e("FlutterSingboxPlugin", "VPN service running check: $isServiceRunning")
                 
                 if (isServiceRunning) {
                     val inferredStatus = inferredRunningStatus()
+                    if (queryGeneration != lifecycleGeneration.get() || isShuttingDown) return@launch
                     _vpnStatus.value = inferredStatus
                     
                     if (inferredStatus == Status.Stopped) {
@@ -745,6 +765,9 @@ class FlutterSingboxPlugin :
         sessionReason: String? = null,
         desiredRunning: Boolean? = null,
     ) {
+        if (status != Status.Started) {
+            clearNotificationPing(refresh = status != Status.Stopped)
+        }
         syncXrayTrafficSampler(status)
         android.util.Log.e("FlutterSingboxPlugin", "Sending status update to Flutter: ${status.name}")
         val statusMap = currentNetworkSnapshot().toMutableMap()
@@ -752,7 +775,7 @@ class FlutterSingboxPlugin :
             "status" to status.name,
             "statusCode" to status.ordinal
         ))
-        (manualDisconnectRequested
+        (manualDisconnectRequested ?: (if (lastKnownSystemAlwaysOn == true && !isShuttingDown) false else null)
             ?: runCatching { SimpleConfigManager.getManualDisconnectRequested() }.getOrNull())
             ?.let { statusMap["manualDisconnectRequested"] = it }
         sessionReason?.let { statusMap["sessionReason"] = it }
@@ -772,22 +795,24 @@ class FlutterSingboxPlugin :
         }
     }
 
-    private suspend fun killVpnServiceProcess(reason: String): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun killVpnServiceProcess(reason: String, canKill: () -> Boolean): Boolean {
         try {
-            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val processName = "${context.packageName}:vpn"
-            val process = manager.runningAppProcesses
-                ?.firstOrNull { it.processName == processName }
-            val pid = process?.pid ?: return@withContext false
-            android.util.Log.w(
-                "FlutterSingboxPlugin",
-                "Killing $processName pid=$pid: $reason"
-            )
-            android.os.Process.killProcess(pid)
-            true
+            val pid = withContext(Dispatchers.IO) {
+                val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                manager.runningAppProcesses
+                    ?.firstOrNull { it.processName == "${context.packageName}:vpn" }?.pid
+            } ?: return false
+            return withContext(Dispatchers.Main.immediate) {
+                if (!canKill()) return@withContext false
+                android.util.Log.w("FlutterSingboxPlugin", "Stopping stale VPN process: $reason")
+                android.os.Process.killProcess(pid)
+                true
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("FlutterSingboxPlugin", "Failed to kill VPN service process", e)
-            false
+            return false
         }
     }
 
@@ -797,6 +822,7 @@ class FlutterSingboxPlugin :
     }.getOrNull()
 
     private suspend fun inferredRunningStatus(): Status {
+        val systemOwnsConnection = observeSystemAlwaysOn()
         val queryGeneration = lifecycleGeneration.get()
         val expected = expectedConfigFingerprint()
         val requiresActiveVpnNetwork = isCurrentXrayRuntime()
@@ -815,8 +841,15 @@ class FlutterSingboxPlugin :
             isShuttingDown = isShuttingDown,
             nativeStatus = nativeStatus,
             requiresActiveVpnNetwork = requiresActiveVpnNetwork,
-            hasActiveVpnNetwork = !requiresActiveVpnNetwork || hasActiveVpnNetwork()
+            hasActiveVpnNetwork = !requiresActiveVpnNetwork || hasActiveVpnNetwork(),
+            systemAlwaysOn = systemOwnsConnection,
         )
+    }
+
+    private suspend fun observeSystemAlwaysOn(): Boolean {
+        val snapshot = com.tecclub.flutter_singbox.bg.KillSwitchStatus.systemState(context)
+        lastKnownSystemAlwaysOn = snapshot?.get("alwaysOn")
+        return lastKnownSystemAlwaysOn == true
     }
 
     private fun isCurrentXrayRuntime(): Boolean =
@@ -843,6 +876,8 @@ class FlutterSingboxPlugin :
         val fingerprint = snapshot["fingerprint"]?.toString() ?: "none"
         if (lastNetworkFingerprint.isNotEmpty() && lastNetworkFingerprint != fingerprint) {
             networkGenerationId += 1
+            lastNetworkChangedAtMs = System.currentTimeMillis()
+            clearNotificationPing(refresh = _vpnStatus.value == Status.Started)
         }
         lastNetworkFingerprint = fingerprint
         snapshot["generation"] = networkGenerationId
@@ -853,7 +888,7 @@ class FlutterSingboxPlugin :
         return try {
             val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val networks = connectivity.allNetworks
-            val candidate = networks
+            val candidates = networks
                 .mapNotNull { network ->
                     val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
                     if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
@@ -874,13 +909,17 @@ class FlutterSingboxPlugin :
                     } + if (validated) 10 else 0
                     NetworkSnapshotCandidate(
                         type = type,
+                        handle = network.networkHandle,
                         interfaceName = linkProperties?.interfaceName ?: "",
                         validated = validated,
                         metered = metered,
                         score = score
                     )
                 }
-                .maxByOrNull { it.score }
+            val defaultHandle = connectivity.activeNetwork?.networkHandle
+            val physicalDefault = candidates.firstOrNull { it.handle == defaultHandle }
+            val candidate = physicalDefault ?: candidates.maxByOrNull { it.score }
+            val validatedPhysical = candidates.filter { it.validated }
 
             if (candidate == null) {
                 return mapOf(
@@ -888,6 +927,7 @@ class FlutterSingboxPlugin :
                     "interfaceName" to "",
                     "validated" to false,
                     "metered" to false,
+                    "probePhysicalNetwork" to "",
                     "fingerprint" to "none"
                 )
             }
@@ -903,6 +943,12 @@ class FlutterSingboxPlugin :
                 "interfaceName" to candidate.interfaceName,
                 "validated" to candidate.validated,
                 "metered" to candidate.metered,
+                "probePhysicalNetwork" to candidate.handle.toString(),
+                // A VPN can hide the actual underlay from the app process.
+                // In that case the score is a hint, not a proven route switch.
+                "autoPhysicalRouteConfirmed" to (physicalDefault != null ||
+                    (validatedPhysical.size == 1 && validatedPhysical[0] == candidate)),
+                "autoValidatedPhysicalKeys" to validatedPhysical.map { it.handle.toString() },
                 "fingerprint" to fingerprint
             )
         } catch (e: Exception) {
@@ -912,6 +958,7 @@ class FlutterSingboxPlugin :
                 "interfaceName" to "",
                 "validated" to false,
                 "metered" to false,
+                "probePhysicalNetwork" to "",
                 "fingerprint" to "unknown"
             )
         }
@@ -929,6 +976,7 @@ class FlutterSingboxPlugin :
 
     private data class NetworkSnapshotCandidate(
         val type: String,
+        val handle: Long,
         val interfaceName: String,
         val validated: Boolean,
         val metered: Boolean,
@@ -942,7 +990,11 @@ class FlutterSingboxPlugin :
             }
             "saveConfig" -> {
                 val config = call.argument<String>("config") ?: ""
-                saveConfig(config, result)
+                saveConfig(
+                    config, result,
+                    managedSmartRoute = call.argument<Boolean>("smartRouteApps") == true,
+                    managedHermes = call.argument<Boolean>("hermesManagedXhttp") == true,
+                )
             }
             "getConfig" -> {
                 getConfig(result)
@@ -960,10 +1012,139 @@ class FlutterSingboxPlugin :
                 getVPNStatus(result)
             }
             "getManualDisconnectRequested" -> {
-                result.success(SimpleConfigManager.getManualDisconnectRequested())
+                coroutineScope.launch {
+                    result.success(if (observeSystemAlwaysOn()) false else SimpleConfigManager.getManualDisconnectRequested())
+                }
             }
             "getNetworkSnapshot" -> {
                 result.success(currentNetworkSnapshot())
+            }
+            "getKillSwitchState" -> {
+                coroutineScope.launch {
+                    result.success(com.tecclub.flutter_singbox.bg.KillSwitchStatus.query(context))
+                }
+            }
+            "getDirectProbeNetwork" -> {
+                coroutineScope.launch {
+                    result.success(DirectProbeNetworkGate.read(context))
+                }
+            }
+            "resolveDirectProbeHost" -> {
+                val request = call.argument<Number>("request")?.toLong()
+                val host = call.argument<String>("host")
+                val network = call.argument<String>("network")
+                if (request == null || request <= 0 || host == null || network.isNullOrEmpty() ||
+                    directProbeDns.size >= 8 || directProbeDns.containsKey(request)) {
+                    result.success(null)
+                    return
+                }
+                fun finish(addresses: List<String>?) {
+                    if (directProbeDns.remove(request) == null) return
+                    result.success(addresses)
+                }
+                val job = coroutineScope.launch(start = CoroutineStart.LAZY) {
+                    finish(DirectProbeNetworkGate.resolve(context, host, network))
+                }
+                directProbeDns[request] = job
+                job.invokeOnCompletion { failure ->
+                    if (failure != null) Handler(Looper.getMainLooper()).post { finish(null) }
+                }
+                job.start()
+            }
+            "cancelDirectProbeDns" -> {
+                call.argument<Number>("request")?.toLong()?.let { directProbeDns[it]?.cancel() }
+                result.success(null)
+            }
+            "initializeSmartRouteInstallDefault" -> {
+                coroutineScope.launch {
+                    val clean = withContext(Dispatchers.IO) {
+                        try {
+                            configSaveMutex.withLock {
+                                com.tecclub.flutter_singbox.config.SmartRouteApps.initializeInstallDefault(context)
+                            }
+                        } catch (error: Exception) {
+                            if (error is kotlinx.coroutines.CancellationException) throw error
+                            false
+                        }
+                    }
+                    result.success(clean)
+                }
+            }
+            "getSmartRouteApps" -> {
+                coroutineScope.launch {
+                    try {
+                        result.success(com.tecclub.flutter_singbox.config.SmartRouteApps.snapshot(context))
+                    } catch (error: Exception) {
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        result.error("SMART_ROUTE_APPS_UNAVAILABLE", "App route status unavailable", null)
+                    }
+                }
+            }
+            "saveSmartRouteApps" -> {
+                val packages = call.argument<List<*>>("packages")
+                if (packages == null || packages.size > com.tecclub.flutter_singbox.config.SmartRouteAppPolicy.MAX_CANDIDATES) {
+                    result.error("BAD_ARGUMENT", "Invalid Smart Route selection", null)
+                    return
+                }
+                coroutineScope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            com.tecclub.flutter_singbox.config.SmartRouteApps.saveSelection(context, packages)
+                        }
+                        result.success(true)
+                    } catch (error: Exception) {
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        result.error("SMART_ROUTE_APPS_WRITE_FAILED", "Unable to save app selection", null)
+                    }
+                }
+            }
+            "clearSmartRouteAppBinding" -> {
+                coroutineScope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            configSaveMutex.withLock {
+                                com.tecclub.flutter_singbox.config.SmartRouteApps.bindManagedConfig(context, null)
+                            }
+                        }
+                        result.success(true)
+                    } catch (error: Exception) {
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        result.error("SMART_ROUTE_APPS_WRITE_FAILED", "Unable to revoke app routing", null)
+                    }
+                }
+            }
+            "openVpnSettings" -> {
+                try {
+                    context.startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    result.success(true)
+                } catch (_: Exception) {
+                    result.error("VPN_SETTINGS_UNAVAILABLE", "Open Android VPN settings manually", null)
+                }
+            }
+            "setKillSwitchRequested" -> {
+                val enabled = call.argument<Boolean>("enabled")
+                if (enabled == null) {
+                    result.error("BAD_ARGUMENT", "Protection intent must be boolean", null)
+                    return
+                }
+                coroutineScope.launch {
+                    if (!enabled) {
+                        val snapshot = com.tecclub.flutter_singbox.bg.KillSwitchStatus.query(context)
+                        if (snapshot["supported"] != false &&
+                            (snapshot["known"] != true || snapshot["alwaysOn"] == true || snapshot["lockdown"] == true)) {
+                            result.error("ANDROID_PROTECTION_ACTIVE_OR_UNKNOWN", "Disable Android protection first and verify the running VPN", null)
+                            return@launch
+                        }
+                    }
+                    try {
+                        withContext(Dispatchers.IO) {
+                            com.tecclub.flutter_singbox.config.KillSwitchIntentStore.setRequested(context, enabled)
+                        }
+                        result.success(true)
+                    } catch (_: Exception) {
+                        result.error("PROTECTION_INTENT_WRITE_FAILED", "Unable to persist protection intent", null)
+                    }
+                }
             }
             // Per-App Tunneling Methods
             "setPerAppProxyMode" -> {
@@ -1072,7 +1253,14 @@ class FlutterSingboxPlugin :
                     "Ignoring stale notification status ${requestedState.status}; native=$nativeStatus",
                 )
             }
-            connectionUiState = requestedState.copy(status = resolvedStatus)
+            val observedAt = requestedState.pingObservedAtMs
+            val keepPing = nativeStatus == Status.Started && resolvedStatus == ConnectionStatus.Connected &&
+                observedAt != null && observedAt >= lastNetworkChangedAtMs
+            connectionUiState = requestedState.copy(
+                status = resolvedStatus,
+                pingMs = requestedState.pingMs.takeIf { keepPing },
+                pingObservedAtMs = requestedState.pingObservedAtMs.takeIf { keepPing },
+            )
             requestedState.profileName
                 ?.takeIf { it.isNotBlank() }
                 ?.let(SimpleConfigManager::setActiveProfileName)
@@ -1083,6 +1271,12 @@ class FlutterSingboxPlugin :
         } catch (e: Exception) {
             result.error("NOTIFICATION_UPDATE_ERROR", e.message, null)
         }
+    }
+
+    private fun clearNotificationPing(refresh: Boolean) {
+        if (connectionUiState.pingMs == null && connectionUiState.pingObservedAtMs == null) return
+        connectionUiState = connectionUiState.copy(pingMs = null, pingObservedAtMs = null)
+        if (refresh) runCatching { vpnNotificationHelper.updateNotification(connectionUiState) }
     }
 
     private fun requestNotificationPermission(result: Result) {
@@ -1190,10 +1384,21 @@ class FlutterSingboxPlugin :
     }
     
     @Volatile private var configContent: String? = null
+    @Volatile private var hermesSavedFingerprint: String? = null
     
-    private fun saveConfig(config: String, result: Result) {
+    private fun saveConfig(
+        config: String,
+        result: Result,
+        managedSmartRoute: Boolean = false,
+        managedHermes: Boolean = false,
+    ) {
+        com.tecclub.flutter_singbox.config.RuntimeTlsPolicy.validationError(config)?.let { error ->
+            result.error("CONFIG_TLS_POLICY", error, null)
+            return
+        }
         android.util.Log.e("FlutterSingboxPlugin", "Saving config: ${config.length} bytes")
         val generation = configSaveGeneration.incrementAndGet()
+        hermesSavedFingerprint = null
         if (!SimpleConfigManager.cacheConfig(config)) {
             result.error("CONFIG_SAVE_FAILED", "Configuration is empty", null)
             return
@@ -1208,7 +1413,18 @@ class FlutterSingboxPlugin :
                         superseded = true
                         false
                     } else {
-                        SimpleConfigManager.persistConfig(config)
+                        // Bind opt-ins out of band. Raw configs and saved profile
+                        // JSON never receive a new field or an extra exclusion.
+                        com.tecclub.flutter_singbox.config.SmartRouteApps.bindManagedConfig(context, null)
+                        val persisted = SimpleConfigManager.persistConfig(config)
+                        if (persisted && managedSmartRoute &&
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                            generation == configSaveGeneration.get()
+                        ) {
+                            val fingerprint = com.tecclub.flutter_singbox.bg.NativeConfigBinding.fingerprint(config)
+                            com.tecclub.flutter_singbox.config.SmartRouteApps.bindManagedConfig(context, fingerprint)
+                        }
+                        persisted
                     }
                 }
                 android.util.Log.e("FlutterSingboxPlugin", "Config save result: $success")
@@ -1220,6 +1436,9 @@ class FlutterSingboxPlugin :
                             null,
                         )
                     } else if (success) {
+                        if (managedHermes && com.tecclub.flutter_singbox.diagnostics.HermesPilotGate.enabled(context)) {
+                            hermesSavedFingerprint = com.tecclub.flutter_singbox.bg.NativeConfigBinding.fingerprint(config)
+                        }
                         result.success(true)
                     } else {
                         result.error("CONFIG_SAVE_FAILED", "Failed to save configuration", null)
@@ -1246,212 +1465,191 @@ class FlutterSingboxPlugin :
     }
     
     private fun startVPN(result: Result) {
-        android.util.Log.e("FlutterSingboxPlugin", "Starting VPN...")
         if (!VpnStopLifecyclePolicy.canStart(isShuttingDown)) {
-            result.error(
-                "STOP_IN_PROGRESS",
-                "The previous VPN runtime has not stopped yet",
-                null,
-            )
+            result.error("STOP_IN_PROGRESS", "The previous VPN runtime has not stopped yet", null)
+            return
+        }
+        // Android returns permission results using a fixed request code. A
+        // cancelled dialog must finish before another start can reuse it.
+        if (pendingVpnPermissionGeneration != 0L) {
+            result.error("VPN_PERMISSION_PENDING", "A VPN permission request is still open", null)
+            return
+        }
+        val currentActivity = activity
+        if (currentActivity == null) {
+            result.error("ACTIVITY_UNAVAILABLE", "Activity is not available", null)
             return
         }
         val generation = lifecycleGeneration.incrementAndGet()
-        // Reset shutdown flag when starting a new connection
-        isShuttingDown = false
-        stopCleanupCompleted = false
-        activity?.let {
-            val intent = VpnService.prepare(it)
-            if (intent != null) {
-                android.util.Log.e("FlutterSingboxPlugin", "VPN permission required, showing dialog")
-                pendingVpnPermissionResult = result
-                pendingVpnPermissionGeneration = generation
-                it.startActivityForResult(intent, VPN_REQUEST_CODE)
-            } else {
-                android.util.Log.e("FlutterSingboxPlugin", "VPN permission already granted, starting service")
-                startVPNService(result, generation)
-            }
-        } ?: run {
-            android.util.Log.e("FlutterSingboxPlugin", "Activity unavailable, cannot start VPN")
-            result.error("ACTIVITY_UNAVAILABLE", "Activity is not available", null)
-        }
-    }
-    
-    private fun startVPNService(result: Result, generation: Long) {
-        android.util.Log.e("FlutterSingboxPlugin", "Starting VPN Service...")
-        if (generation != lifecycleGeneration.get()) {
-            result.error("START_CANCELLED", "A newer VPN lifecycle operation replaced this start", null)
-            return
-        }
-        
-        // Cancel any pending stop cleanup job from previous stopVPN call
-        stopCleanupJob?.cancel()
-        stopCleanupJob = null
-        android.util.Log.e("FlutterSingboxPlugin", "Cancelled any pending stop cleanup job")
-        
-        // Reset shutdown flag and set starting flag
-        isShuttingDown = false
-        stopCleanupCompleted = false
-        isStarting = true
-        hasStartupError = false
         try {
-            // Update status to Starting
-            _vpnStatus.value = Status.Starting
-            connectionUiState = connectionUiState.copy(
-                status = ConnectionStatus.Connecting,
-                uploadSpeed = "0 B/s",
-                downloadSpeed = "0 B/s",
-                totalTraffic = "0 B",
-                sessionDuration = null
-            )
-            vpnNotificationHelper.updateNotification(connectionUiState)
-            android.util.Log.e("FlutterSingboxPlugin", "Set VPN status to Starting")
-            SimpleConfigManager.setStartedByUser(true)
-            SimpleConfigManager.setManualDisconnectRequested(false)
-            sendStatusUpdate(Status.Starting)
-            
-            // Reset session traffic counters
-            resetSessionTrafficCounters()
-            
-            // Start the service using proper method
-            android.util.Log.e("FlutterSingboxPlugin", "Calling startService method")
-            startService(result)
-            
-            // Delay before connecting to service to give it time to start
-            coroutineScope.launch {
-                android.util.Log.e("FlutterSingboxPlugin", "Waiting for service to initialize...")
-                kotlinx.coroutines.delay(1500) // Wait 1.5 seconds for service to start
-                if (generation != lifecycleGeneration.get() || isShuttingDown) {
-                    android.util.Log.e("FlutterSingboxPlugin", "Skipping stale delayed service connection")
-                    return@launch
-                }
-                
-                // Check if there was a startup error
-                if (hasStartupError) {
-                    android.util.Log.e("FlutterSingboxPlugin", "Startup error detected, not connecting to service")
-                    isStarting = false
-                    return@launch
-                }
-                
-                // Connect to the service
-                android.util.Log.e("FlutterSingboxPlugin", "Connecting to service after delay")
-                connection.connect()
-                
-                // Reset starting flag after connection attempt
-                kotlinx.coroutines.delay(500) // Additional delay for connection to stabilize
-                if (generation == lifecycleGeneration.get()) {
-                    isStarting = false
-                }
-                android.util.Log.e("FlutterSingboxPlugin", "Starting phase complete")
+            val permission = VpnService.prepare(currentActivity)
+            if (permission == null) {
+                startVPNService(result, generation)
+            } else {
+                requestVpnPermission(currentActivity, permission, generation, result)
             }
-            
-            android.util.Log.e("FlutterSingboxPlugin", "VPN service start successful")
-            result.success(true)
-        } catch (e: Exception) {
-            android.util.Log.e("FlutterSingboxPlugin", "Error starting VPN service: ${e.message}", e)
-            if (generation == lifecycleGeneration.get()) {
-                isStarting = false
-                SimpleConfigManager.setStartedByUser(false)
-                _vpnStatus.value = Status.Stopped
-            }
-            result.error("START_VPN_ERROR", e.message, null)
+        } catch (_: Exception) {
+            result.error("START_VPN_ERROR", "Unable to prepare Android VPN", null)
         }
     }
-    
-    private fun startService(result: Result) {
-        coroutineScope.launch(Dispatchers.IO) {
-            android.util.Log.e("FlutterSingboxPlugin", "Starting service in IO coroutine")
 
-            if (Settings.serviceMode == ServiceMode.VPN) {
-                 android.util.Log.e("FlutterSingboxPlugin", "Service mode is VPN, checking if prepare is needed")
-                 if (prepare(result)) {
-                     android.util.Log.e("FlutterSingboxPlugin", "VPN prepare returned true, exiting launch")
-                     return@launch
-                 }
-                 android.util.Log.e("FlutterSingboxPlugin", "VPN prepare returned false, continuing")
-             }
-             
-            // Load config from SimpleConfigManager and set it as an extra
-            val config = configContent
-                ?.takeIf { it.isNotBlank() && it != "{}" }
-                ?: SimpleConfigManager.getConfig()
-            android.util.Log.e("FlutterSingboxPlugin", "Loaded config from SimpleConfigManager, length: ${config.length}")
+    private fun requestVpnPermission(activity: Activity, intent: Intent, generation: Long, result: Result) {
+        pendingVpnPermissionResult = result
+        pendingVpnPermissionGeneration = generation
+        try {
+            activity.startActivityForResult(intent, VPN_REQUEST_CODE)
+        } catch (error: Exception) {
+            pendingVpnPermissionResult = null
+            pendingVpnPermissionGeneration = 0L
+            throw error
+        }
+    }
 
-            val isXrayRuntime = runCatching { XrayRuntimeConfig.isXray(config) }
-                .getOrDefault(false)
-            if (isXrayRuntime && !hasActiveVpnNetwork() && isVpnServiceRunning()) {
-                val killed = killVpnServiceProcess("pre-start stale Xray service without active VPN")
-                if (killed) {
-                    val deadline = System.currentTimeMillis() + 1500
-                    while (System.currentTimeMillis() < deadline && isVpnServiceRunning()) {
-                        kotlinx.coroutines.delay(150)
+    private fun canDispatchStart(generation: Long): Boolean =
+        VpnStopLifecyclePolicy.canDispatchStart(generation, lifecycleGeneration.get(), isShuttingDown)
+
+    private fun reportCancelledStart(result: Result) {
+        result.error("START_CANCELLED", "A newer VPN lifecycle operation replaced this start", null)
+    }
+
+    private fun attachHermesSource(intent: Intent, config: String) {
+        val fingerprint = hermesSavedFingerprint ?: return
+        if (fingerprint == com.tecclub.flutter_singbox.bg.NativeConfigBinding.fingerprint(config)) {
+            intent.putExtra(com.tecclub.flutter_singbox.diagnostics.HermesPilotGate.EXTRA_MANAGED_CONFIG, fingerprint)
+        }
+    }
+
+    private fun startVPNService(result: Result, generation: Long) {
+        coroutineScope.launch {
+            if (!canDispatchStart(generation)) {
+                reportCancelledStart(result)
+                return@launch
+            }
+            try {
+                val config = configContent?.takeIf { it.isNotBlank() && it != "{}" }
+                    ?: withContext(Dispatchers.IO) { SimpleConfigManager.getConfig() }
+                if (!canDispatchStart(generation)) {
+                    reportCancelledStart(result)
+                    return@launch
+                }
+                val isXrayRuntime = runCatching { XrayRuntimeConfig.isXray(config) }.getOrDefault(false)
+                if (isXrayRuntime && !hasActiveVpnNetwork() && isVpnServiceRunning()) {
+                    val killed = killVpnServiceProcess("pre-start stale Xray service without active VPN") {
+                        canDispatchStart(generation) && !hasActiveVpnNetwork()
+                    }
+                    if (killed) {
+                        val deadline = SystemClock.elapsedRealtime() + 1500
+                        while (canDispatchStart(generation) &&
+                            SystemClock.elapsedRealtime() < deadline && isVpnServiceRunning()
+                        ) {
+                            kotlinx.coroutines.delay(150)
+                        }
                     }
                 }
+                // Check after I/O. Nothing below may suspend between this
+                // check and dispatch: stopVPN uses the same main thread.
+                if (!canDispatchStart(generation)) {
+                    reportCancelledStart(result)
+                    return@launch
+                }
+                val permission = if (Settings.serviceMode == ServiceMode.VPN) VpnService.prepare(context) else null
+                if (permission != null) {
+                    val currentActivity = activity
+                    if (currentActivity == null) {
+                        result.error("ACTIVITY_UNAVAILABLE", "Activity is not available", null)
+                    } else {
+                        requestVpnPermission(currentActivity, permission, generation, result)
+                    }
+                    return@launch
+                }
+                val commandToken = VpnCommandFence.issue(context, VpnCommandFence.Kind.Start)
+                val intent = Intent(context, Settings.serviceClass()).apply {
+                    action = BoxService.ACTION_START
+                    putExtra(VpnCommandFence.EXTRA_TOKEN, commandToken)
+                    putExtra(BoxService.EXTRA_CONFIG_CONTENT, config)
+                    putExtra(
+                        com.tecclub.flutter_singbox.config.RuntimeTlsPolicy.INTENT_REVISION_EXTRA,
+                        com.tecclub.flutter_singbox.config.RuntimeTlsPolicy.CURRENT_REVISION,
+                    )
+                    putExtra(Action.EXTRA_USER_INITIATED, true)
+                }
+                attachHermesSource(intent, config)
+                stopCleanupJob?.cancel()
+                stopCleanupJob = null
+                stopCleanupCompleted = false
+                isStarting = true
+                hasStartupError = false
+                _vpnStatus.value = Status.Starting
+                connectionUiState = connectionUiState.copy(
+                    status = ConnectionStatus.Connecting,
+                    uploadSpeed = "0 B/s",
+                    downloadSpeed = "0 B/s",
+                    sessionDuration = null,
+                    pingMs = null,
+                    pingObservedAtMs = null,
+                )
+                vpnNotificationHelper.updateNotification(connectionUiState)
+                SimpleConfigManager.setStartedByUser(true)
+                SimpleConfigManager.setManualDisconnectRequested(false)
+                resetSessionTrafficCounters()
+                checkNotNull(ContextCompat.startForegroundService(context, intent))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (canDispatchStart(generation)) {
+                    isStarting = false
+                    SimpleConfigManager.setStartedByUser(false)
+                    _vpnStatus.value = Status.Stopped
+                }
+                android.util.Log.e("FlutterSingboxPlugin", "VPN start dispatch failed: " + error.javaClass.simpleName)
+                result.error("START_VPN_ERROR", "Unable to start Android VPN service", null)
+                return@launch
             }
-
-            // Create intent with action and config content
-            val intent = Intent(context, Settings.serviceClass()).apply {
-                action = BoxService.ACTION_START
-                putExtra(BoxService.EXTRA_CONFIG_CONTENT, config)
-                putExtra(Action.EXTRA_USER_INITIATED, true)
+            // Acknowledges Android dispatch only, not tunnel readiness.
+            result.success(true)
+            sendStatusUpdate(Status.Starting)
+            kotlinx.coroutines.delay(1500)
+            if (!canDispatchStart(generation)) return@launch
+            if (hasStartupError) {
+                isStarting = false
+                return@launch
             }
-            android.util.Log.e("FlutterSingboxPlugin", "Created intent with ACTION_START and config extra")
-            
-            withContext(Dispatchers.Main) {
-                android.util.Log.e("FlutterSingboxPlugin", "Starting foreground service")
-                androidx.core.content.ContextCompat.startForegroundService(context, intent)
-                android.util.Log.e("FlutterSingboxPlugin", "Service start request sent")
-            }
+            connection.connect()
+            kotlinx.coroutines.delay(500)
+            if (canDispatchStart(generation)) isStarting = false
         }
     }
 
-    private suspend fun prepare(result: Result) = withContext(Dispatchers.Main) {
-         try {
-             android.util.Log.e("FlutterSingboxPlugin", "Preparing VPN service")
-             val intent = VpnService.prepare(this@FlutterSingboxPlugin.context)
-             if (intent != null) {
-                 android.util.Log.e("FlutterSingboxPlugin", "VPN preparation returned an intent, need permission")
-                 
-                 // We shouldn't call startVPN here as it would cause an infinite loop
-                 // Instead, we need to store the result and show the dialog
-                 activity?.let {
-                     android.util.Log.e("FlutterSingboxPlugin", "Starting VPN permission request activity")
-                     pendingVpnPermissionResult = result
-                     it.startActivityForResult(intent, VPN_REQUEST_CODE)
-                     true
-                 } ?: run {
-                     android.util.Log.e("FlutterSingboxPlugin", "Activity unavailable for permission request")
-                     onServiceAlert(Alert.RequestVPNPermission, "Activity unavailable")
-                     false
-                 }
-             } else {
-                 android.util.Log.e("FlutterSingboxPlugin", "VPN preparation returned null, permission already granted")
-                 false
-             }
-         } catch (e: Exception) {
-             android.util.Log.e("FlutterSingboxPlugin", "Error preparing VPN: ${e.message}", e)
-             onServiceAlert(Alert.RequestVPNPermission, e.message)
-             false
-         }
-     }
-    
     private fun reloadVPN(result: Result) {
+        val requestedGeneration = lifecycleGeneration.get()
         coroutineScope.launch {
             try {
                 if (isShuttingDown || !isVpnServiceRunning()) {
                     result.success(false)
                     return@launch
                 }
-                lifecycleGeneration.incrementAndGet()
+                if (!canDispatchStart(requestedGeneration)) {
+                    reportCancelledStart(result)
+                    return@launch
+                }
+                val generation = lifecycleGeneration.incrementAndGet()
 
                 val config = configContent?.takeIf { it.isNotBlank() && it != "{}" }
                     ?: withContext(Dispatchers.IO) { SimpleConfigManager.getConfig() }
+                if (!canDispatchStart(generation)) {
+                    reportCancelledStart(result)
+                    return@launch
+                }
+                val commandToken = VpnCommandFence.issue(context, VpnCommandFence.Kind.Start)
                 val reloadIntent = RuntimeConfigReload.attach(
                     Intent(Action.SERVICE_RELOAD).apply {
                         `package` = context.packageName
+                        putExtra(VpnCommandFence.EXTRA_TOKEN, commandToken)
                         putExtra(Action.EXTRA_USER_INITIATED, true)
                     },
                     config,
                 )
+                attachHermesSource(reloadIntent, config)
 
                 SimpleConfigManager.setStartedByUser(true)
                 SimpleConfigManager.setManualDisconnectRequested(false)
@@ -1462,6 +1660,8 @@ class FlutterSingboxPlugin :
                 sendStatusUpdate(Status.Starting)
                 context.sendBroadcast(reloadIntent)
                 result.success(true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 android.util.Log.e("FlutterSingboxPlugin", "Error reloading VPN", e)
                 result.error("RELOAD_VPN_ERROR", e.message, null)
@@ -1469,16 +1669,43 @@ class FlutterSingboxPlugin :
         }
     }
 
+    private fun sendVpnClose(commandToken: String?) {
+        context.sendBroadcast(Intent(Action.SERVICE_CLOSE).apply {
+            `package` = context.packageName
+            putExtra(Action.EXTRA_USER_INITIATED, true)
+            commandToken?.let { putExtra(VpnCommandFence.EXTRA_TOKEN, it) }
+        })
+    }
+
     private fun stopVPN(result: Result) {
+        if (VpnStopLifecyclePolicy.canJoinStop(isShuttingDown, activeStopGeneration,
+                lifecycleGeneration.get(), stopCleanupJob?.isActive == true)) {
+            // Stop acknowledges a request, not the cleanup. Keep the original
+            // deadline instead of extending it on a profile replacement.
+            result.success(true)
+            return
+        }
         try {
             android.util.Log.e("FlutterSingboxPlugin", "Stopping VPN")
             val generation = lifecycleGeneration.incrementAndGet()
             activeStopGeneration = generation
+            // Even when durable invalidation is unavailable, request normal
+            // cleanup; the caller must not be told that fencing succeeded.
+            val commandToken = runCatching { VpnCommandFence.issue(context, VpnCommandFence.Kind.Stop) }.getOrNull()
+            val stoppedDuringStartup = _vpnStatus.value == Status.Starting
+            // A start acknowledged by Android may not have installed the
+            // service-side close receiver yet. Allow the first cleanup poll
+            // to observe it and reissue close rather than trusting a transient
+            // absence or waiting the entire graceful timeout.
+            earliestStopConfirmationAt = if (stoppedDuringStartup) SystemClock.elapsedRealtime() + 250 else 0L
             
             // Set shutting down flag and clear starting flag
             isShuttingDown = true
             stopCleanupCompleted = false
             isStarting = false
+            val permissionWaiter = pendingVpnPermissionResult
+            pendingVpnPermissionResult = null
+            permissionWaiter?.let(::reportCancelledStart)
             SimpleConfigManager.setStartedByUser(false)
             SimpleConfigManager.setManualDisconnectRequested(true)
             stopCleanupJob?.cancel()
@@ -1495,12 +1722,13 @@ class FlutterSingboxPlugin :
             // The broadcast receiver will handle status updates, and we'll disconnect after
             // the service is confirmed stopped
             android.util.Log.e("FlutterSingboxPlugin", "Sending SERVICE_CLOSE broadcast")
-            context.sendBroadcast(Intent(Action.SERVICE_CLOSE).apply {
-                `package` = context.packageName
-                putExtra(Action.EXTRA_USER_INITIATED, true)
-            })
+            sendVpnClose(commandToken)
 
-            result.success(true)
+            if (commandToken == null) {
+                result.error("STOP_VPN_ERROR", "VPN stop requested; durable cancellation was not confirmed", null)
+            } else {
+                result.success(true)
+            }
             
             // Wait for service to stop before disconnecting
             // The service will broadcast Status.Stopped when it's done cleaning up
@@ -1512,6 +1740,7 @@ class FlutterSingboxPlugin :
                     val deadline = SystemClock.elapsedRealtime() +
                         VpnStopLifecyclePolicy.GRACEFUL_TIMEOUT_MS
                     var running = true
+                    var resentStartupClose = false
                     while (SystemClock.elapsedRealtime() < deadline) {
                         kotlinx.coroutines.delay(250)
 
@@ -1527,23 +1756,26 @@ class FlutterSingboxPlugin :
                         }
 
                         running = isVpnServiceRunning()
+                        if (!isShuttingDown || generation != lifecycleGeneration.get()) return@launch
                         if (!running) {
                             break
+                        }
+                        if (stoppedDuringStartup && !resentStartupClose) {
+                            sendVpnClose(commandToken)
+                            resentStartupClose = true
                         }
                     }
 
                     if (running) {
                         android.util.Log.e("FlutterSingboxPlugin", "Service still running after graceful stop, requesting stopService")
-                        context.sendBroadcast(Intent(Action.SERVICE_CLOSE).apply {
-                            `package` = context.packageName
-                            putExtra(Action.EXTRA_USER_INITIATED, true)
-                        })
+                        sendVpnClose(commandToken)
                         context.stopService(Intent(context, Settings.serviceClass()))
                         val forceDeadline = SystemClock.elapsedRealtime() +
                             VpnStopLifecyclePolicy.FORCE_STOP_TIMEOUT_MS
                         while (SystemClock.elapsedRealtime() < forceDeadline) {
                             kotlinx.coroutines.delay(250)
                             running = isVpnServiceRunning()
+                            if (!isShuttingDown || generation != lifecycleGeneration.get()) return@launch
                             if (!running) {
                                 break
                             }
@@ -1551,13 +1783,17 @@ class FlutterSingboxPlugin :
                     }
 
                     if (running) {
-                        val killed = killVpnServiceProcess("forced stop after graceful stop timeout")
+                        val killed = killVpnServiceProcess("forced stop after graceful stop timeout") {
+                            isShuttingDown && generation == lifecycleGeneration.get()
+                        }
+                        if (!isShuttingDown || generation != lifecycleGeneration.get()) return@launch
                         if (killed) {
                             val killDeadline = SystemClock.elapsedRealtime() +
                                 VpnStopLifecyclePolicy.PROCESS_EXIT_CONFIRM_TIMEOUT_MS
                             while (SystemClock.elapsedRealtime() < killDeadline) {
                                 kotlinx.coroutines.delay(150)
                                 running = isVpnServiceRunning()
+                                if (!isShuttingDown || generation != lifecycleGeneration.get()) return@launch
                                 if (!running) {
                                     break
                                 }
@@ -1586,12 +1822,14 @@ class FlutterSingboxPlugin :
                         "FlutterSingboxPlugin",
                         "Stop cleanup job cancelled"
                     )
-                    stopCleanupJob = null
+                    if (generation == activeStopGeneration) stopCleanupJob = null
                 } catch (e: Exception) {
                     android.util.Log.e("FlutterSingboxPlugin", "Error during stop cleanup: ${e.message}", e)
-                    _vpnStatus.value = Status.Stopping
-                    sendStatusUpdate(Status.Stopping)
-                    stopCleanupJob = null
+                    if (isShuttingDown && generation == lifecycleGeneration.get()) {
+                        _vpnStatus.value = Status.Stopping
+                        sendStatusUpdate(Status.Stopping)
+                        stopCleanupJob = null
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -1624,7 +1862,8 @@ class FlutterSingboxPlugin :
         if (stopCleanupCompleted ||
             generation == 0L ||
             generation != activeStopGeneration ||
-            generation != lifecycleGeneration.get()
+            generation != lifecycleGeneration.get() ||
+            SystemClock.elapsedRealtime() < earliestStopConfirmationAt
         ) {
             return
         }
@@ -1674,6 +1913,7 @@ class FlutterSingboxPlugin :
         
         coroutineScope.launch {
             try {
+                val queryGeneration = lifecycleGeneration.get()
                 // Check if the VPN service is actually running
                 val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
                 val isServiceRunning = withContext(Dispatchers.IO) {
@@ -1681,6 +1921,10 @@ class FlutterSingboxPlugin :
                         it.service.className.contains("BoxService") || 
                         it.service.className.contains("VPNService")
                     }
+                }
+                if (queryGeneration != lifecycleGeneration.get()) {
+                    result.success(_vpnStatus.value.name)
+                    return@launch
                 }
                 
                 android.util.Log.e("FlutterSingboxPlugin", "VPN service running check in getVPNStatus: $isServiceRunning")
@@ -1698,6 +1942,10 @@ class FlutterSingboxPlugin :
                         return@launch
                     }
                     val inferredStatus = inferredRunningStatus()
+                    if (queryGeneration != lifecycleGeneration.get()) {
+                        result.success(_vpnStatus.value.name)
+                        return@launch
+                    }
                     _vpnStatus.value = inferredStatus
                     
                     if (inferredStatus == Status.Stopped) {
@@ -1738,40 +1986,21 @@ class FlutterSingboxPlugin :
     }
     
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-        if (requestCode == VPN_REQUEST_CODE) {
-            android.util.Log.e("FlutterSingboxPlugin", "VPN permission request result: ${if (resultCode == Activity.RESULT_OK) "GRANTED" else "DENIED"}")
-            if (resultCode == Activity.RESULT_OK) {
-                android.util.Log.e("FlutterSingboxPlugin", "VPN permission granted, starting service")
-                pendingVpnPermissionResult?.let {
-                    // First load the config that should be used
-                    val configContent = SimpleConfigManager.getConfig()
-                    android.util.Log.e("FlutterSingboxPlugin", "Loaded config from SimpleConfigManager: ${configContent.length} bytes")
-                    
-                    // Start VPN service with the config
-                    val generation = pendingVpnPermissionGeneration
-                    if (generation == lifecycleGeneration.get()) {
-                        startVPNService(it, generation)
-                    } else {
-                        it.error(
-                            "START_CANCELLED",
-                            "VPN permission completed for a stale start request",
-                            null,
-                        )
-                    }
-                } ?: run {
-                    android.util.Log.e("FlutterSingboxPlugin", "WARNING: No pending result found after permission granted")
-                }
-            } else {
-                android.util.Log.e("FlutterSingboxPlugin", "VPN permission denied by user")
-                pendingVpnPermissionResult?.error("VPN_PERMISSION_DENIED", "VPN permission denied", null)
-            }
-            pendingVpnPermissionResult = null
-            pendingVpnPermissionGeneration = 0L
-            return true
+        if (requestCode != VPN_REQUEST_CODE) return false
+        val result = pendingVpnPermissionResult
+        val generation = pendingVpnPermissionGeneration
+        pendingVpnPermissionResult = null
+        pendingVpnPermissionGeneration = 0L
+        if (result == null) return true
+
+        when {
+            !canDispatchStart(generation) -> reportCancelledStart(result)
+            resultCode == Activity.RESULT_OK -> startVPNService(result, generation)
+            else -> result.error("VPN_PERMISSION_DENIED", "VPN permission denied", null)
         }
-        return false
+        return true
     }
-    
+
     // ServiceConnection.Callback implementation
     override fun onServiceStatusChanged(status: Status) {
         android.util.Log.e("FlutterSingboxPlugin", "onServiceStatusChanged: ${status.name}, hasStartupError=$hasStartupError")
@@ -1779,7 +2008,7 @@ class FlutterSingboxPlugin :
             broadcastStatus = status,
             isShuttingDown = isShuttingDown,
             isStarting = isStarting,
-            startedByUser = runCatching { SimpleConfigManager.getStartedByUser() }.getOrDefault(false),
+            startedByUser = runCatching { SimpleConfigManager.getStartedByUser() || lastKnownSystemAlwaysOn == true }.getOrDefault(false),
         )
         if (guarded != status) {
             _vpnStatus.value = guarded
@@ -1865,7 +2094,7 @@ class FlutterSingboxPlugin :
                     "formattedSessionTotal" to "0 B"
                 )
                 resetUidTrafficSession()
-                if (!SimpleConfigManager.getStartedByUser(context)) {
+                if (!SimpleConfigManager.getStartedByUser(context) && lastKnownSystemAlwaysOn != true) {
                     SessionTrafficRepository.reset(context)
                 }
             }

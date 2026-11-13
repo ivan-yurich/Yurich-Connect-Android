@@ -19,10 +19,11 @@ internal object VpnStatusResolver {
         isShuttingDown: Boolean,
         nativeStatus: Status?,
         requiresActiveVpnNetwork: Boolean,
-        hasActiveVpnNetwork: Boolean
+        hasActiveVpnNetwork: Boolean,
+        systemAlwaysOn: Boolean = false,
     ): Status = when {
         isShuttingDown -> Status.Stopping
-        !startedByUser -> Status.Stopped
+        !startedByUser && !systemAlwaysOn -> Status.Stopped
         nativeStatus == null -> Status.Starting
         nativeStatus == Status.Started && requiresActiveVpnNetwork && !hasActiveVpnNetwork -> Status.Starting
         else -> nativeStatus

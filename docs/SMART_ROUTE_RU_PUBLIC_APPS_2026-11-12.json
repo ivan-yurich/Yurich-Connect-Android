@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-11-12",
+  "use": "verified_additions_to_the_android_package_catalog",
+  "verified_android_candidates": [
+    {
+      "package_id": "ru.ok.android",
+      "name": "Одноклассники",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.ok.android"
+    },
+    {
+      "package_id": "com.vk.vkvideo",
+      "name": "VK Видео",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.vk.vkvideo"
+    },
+    {
+      "package_id": "com.vk.im",
+      "name": "VK Мессенджер",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.vk.im"
+    },
+    {
+      "package_id": "com.vk.clips",
+      "name": "VK Клипы",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.vk.clips"
+    },
+    {
+      "package_id": "live.vkplay.app",
+      "name": "VK Видео Live",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/live.vkplay.app"
+    },
+    {
+      "package_id": "ru.zen.android",
+      "name": "Дзен",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.zen.android"
+    },
+    {
+      "package_id": "ru.mail.my",
+      "name": "Мой Мир",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mail.my"
+    },
+    {
+      "package_id": "ru.pikabu.android",
+      "name": "Пикабу",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.pikabu.android"
+    },
+    {
+      "package_id": "ru.gostinder",
+      "name": "TenChat",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gostinder"
+    },
+    {
+      "package_id": "ru.setka",
+      "name": "Сетка",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.setka"
+    },
+    {
+      "package_id": "ru.rutube.app",
+      "name": "RUTUBE",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.rutube.app"
+    },
+    {
+      "package_id": "ru.rostel",
+      "name": "Госуслуги",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.rostel"
+    },
+    {
+      "package_id": "ru.gosuslugi.goskey",
+      "name": "Госключ",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.goskey"
+    },
+    {
+      "package_id": "ru.sigma.gisgkh",
+      "name": "Госуслуги Дом",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.sigma.gisgkh"
+    },
+    {
+      "package_id": "ru.gosuslugi.auto",
+      "name": "Госуслуги Авто",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.auto"
+    },
+    {
+      "package_id": "ru.gosuslugi.culture",
+      "name": "Госуслуги Культура",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.culture"
+    },
+    {
+      "package_id": "ru.rtlabs.mobile.ebs.gosuslugi.android",
+      "name": "Госуслуги Биометрия",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.rtlabs.mobile.ebs.gosuslugi.android"
+    },
+    {
+      "package_id": "ru.gosuslugi.pos",
+      "name": "Госуслуги Решаем вместе",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.pos"
+    },
+    {
+      "package_id": "ru.fanid",
+      "name": "Госуслуги Карта болельщика",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.fanid"
+    },
+    {
+      "package_id": "ru.gosuslugi.school",
+      "name": "Госуслуги Моя школа",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.school"
+    },
+    {
+      "package_id": "ru.gosuslugi.teacher",
+      "name": "Госуслуги Учитель",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.teacher"
+    },
+    {
+      "package_id": "ru.gosuslugi.volunteer",
+      "name": "Госуслуги Волонтёр",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gosuslugi.volunteer",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/b46d9f81"
+    },
+    {
+      "package_id": "com.gnivts.selfemployed",
+      "name": "Мой налог",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.gnivts.selfemployed",
+      "publisher_url": "https://npd.nalog.ru/app/"
+    },
+    {
+      "package_id": "ru.fns.lkfl",
+      "name": "Налоги ФЛ",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.fns.lkfl",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/112491c5"
+    },
+    {
+      "package_id": "ru.gnivc.lkip",
+      "name": "Личный кабинет предпринимателя",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.gnivc.lkip",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/112491c5"
+    },
+    {
+      "package_id": "ru.fns.billchecker.mobile.android",
+      "name": "Проверка чеков ФНС России",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.fns.billchecker.mobile.android",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/112491c5"
+    },
+    {
+      "package_id": "ru.fns.mysign",
+      "name": "Моя подпись",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.fns.mysign",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/112491c5"
+    },
+    {
+      "package_id": "com.electro_tickets.app",
+      "name": "Мои чеки онлайн",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.electro_tickets.app",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/112491c5"
+    },
+    {
+      "package_id": "com.gnivts.ausn",
+      "name": "АУСН ФНС России",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.gnivts.ausn",
+      "publisher_url": "https://www.rustore.ru/catalog/developer/112491c5"
+    },
+    {
+      "package_id": "io.citizens.security",
+      "name": "МЧС России",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/io.citizens.security"
+    },
+    {
+      "package_id": "ru.mvd",
+      "name": "МВД России",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mvd"
+    },
+    {
+      "package_id": "ru.sitesoft.fssp",
+      "name": "ФССП",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.sitesoft.fssp"
+    },
+    {
+      "package_id": "ru.finassist",
+      "name": "ЦБ онлайн",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.finassist"
+    },
+    {
+      "package_id": "ru.mos.app",
+      "name": "Моя Москва",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mos.app"
+    },
+    {
+      "package_id": "ru.altarix.mos.pgu",
+      "name": "Госуслуги Москвы",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.altarix.mos.pgu"
+    },
+    {
+      "package_id": "com.fls.gosuslugispb",
+      "name": "Госуслуги Санкт-Петербурга",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.fls.gosuslugispb"
+    },
+    {
+      "package_id": "ru.mosreg.uslugi.mobile.beta",
+      "name": "Добродел",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mosreg.uslugi.mobile.beta"
+    },
+    {
+      "package_id": "ru.mos.ed",
+      "name": "Электронный дом Москва",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mos.ed"
+    },
+    {
+      "package_id": "ru.mos.ourcity",
+      "name": "Наш город",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mos.ourcity"
+    }
+  ]
+}

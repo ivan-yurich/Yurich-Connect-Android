@@ -23,6 +23,7 @@ class VpnProcessRestartReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         val appContext = context.applicationContext
         val previousPid = intent.getIntExtra(EXTRA_PREVIOUS_VPN_PID, -1)
+        val token = intent.getStringExtra(VpnCommandFence.EXTRA_TOKEN)
         thread(name = "yurich-vpn-core-switch") {
             try {
                 val receiverPid = Process.myPid()
@@ -52,9 +53,11 @@ class VpnProcessRestartReceiver : BroadcastReceiver() {
                     Log.w(TAG, "Clean VPN process restart skipped: user flag/config missing")
                     return@thread
                 }
+                if (token != null && !VpnCommandFence.isCurrentStart(appContext, token)) return@thread
 
                 val serviceIntent = Intent(appContext, Settings.serviceClass()).apply {
                     action = BoxService.ACTION_START
+                    token?.let { putExtra(VpnCommandFence.EXTRA_TOKEN, it) }
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     ContextCompat.startForegroundService(appContext, serviceIntent)

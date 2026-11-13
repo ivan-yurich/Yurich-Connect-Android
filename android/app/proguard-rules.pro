@@ -3,7 +3,7 @@
 -keep class online.dnsai.ivanvpn.MainActivity { *; }
 
 # libbox and its Go/JNI bridge rely on stable native and reflected names.
--keep class com.tecclub.flutter_singbox.** { *; }
+-keep class !com.tecclub.flutter_singbox.diagnostics.Hermes**, !com.tecclub.flutter_singbox.xray.Hermes**, com.tecclub.flutter_singbox.** { *; }
 -keep class io.nekohasekai.libbox.** { *; }
 -keep class go.** { *; }
 -keepclasseswithmembernames class * {

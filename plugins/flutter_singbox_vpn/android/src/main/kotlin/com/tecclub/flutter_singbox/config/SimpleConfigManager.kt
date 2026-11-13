@@ -9,6 +9,7 @@ object SimpleConfigManager {
     private const val STATE_PREF_NAME = "singbox_config"
     private const val CONFIG_PREF_NAME = "singbox_runtime_config"
     private const val KEY_CONFIG = "config_json"
+    private const val KEY_TLS_POLICY_REVISION = "tls_policy_revision"
     private const val KEY_AUTO_START = "auto_start"
     private const val KEY_STARTED_BY_USER = "started_by_user"
     private const val KEY_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
@@ -30,8 +31,12 @@ object SimpleConfigManager {
     @Volatile
     private var cachedConfig: String = DEFAULT_CONFIG
     
-    fun cacheConfig(config: String): Boolean {
+    fun cacheConfig(config: String, sourceRevision: Int = RuntimeTlsPolicy.CURRENT_REVISION): Boolean {
         if (config.isBlank()) return false
+        if (RuntimeTlsPolicy.validationError(config, sourceRevision) != null) {
+            Log.w(TAG, "TLS policy refused runtime cache")
+            return false
+        }
         cachedConfig = config
         return true
     }
@@ -45,11 +50,16 @@ object SimpleConfigManager {
     fun persistConfig(config: String): Boolean {
         Log.e(TAG, "Persisting config, length: ${config.length}")
         if (config.isBlank()) return false
+        if (RuntimeTlsPolicy.validationError(config) != null) {
+            Log.w(TAG, "TLS policy refused runtime persistence")
+            return false
+        }
 
         return try {
             val prefs = Application.application.getSharedPreferences(CONFIG_PREF_NAME, Context.MODE_PRIVATE)
             val encrypted = SecureConfigCipher.encrypt(config)
-            if (!prefs.edit().putString(KEY_CONFIG, encrypted).commit()) {
+            if (!prefs.edit().putString(KEY_CONFIG, encrypted)
+                    .putInt(KEY_TLS_POLICY_REVISION, RuntimeTlsPolicy.CURRENT_REVISION).commit()) {
                 Log.e(TAG, "Config commit returned false")
                 return false
             }
@@ -102,11 +112,18 @@ object SimpleConfigManager {
         }
     }
 
+    // Presence only: never decrypt, log or migrate restored configuration
+    // while deciding whether a new routing default is safe.
+    internal fun hasStoredRuntimeConfig(context: Context): Boolean =
+        context.getSharedPreferences(CONFIG_PREF_NAME, Context.MODE_PRIVATE).contains(KEY_CONFIG) ||
+            context.getSharedPreferences(STATE_PREF_NAME, Context.MODE_PRIVATE).contains(KEY_CONFIG)
+
     private fun loadPersistedConfig(context: Context): String {
         val configPrefs = context.getSharedPreferences(CONFIG_PREF_NAME, Context.MODE_PRIVATE)
         val stored = configPrefs.getString(KEY_CONFIG, DEFAULT_CONFIG) ?: DEFAULT_CONFIG
         if (stored.isNotEmpty() && stored != DEFAULT_CONFIG) {
-            return decodeStoredConfig(configPrefs, stored)
+            val config = decodeStoredConfig(configPrefs, stored)
+            return validatedRestoredConfig(config, configPrefs.getInt(KEY_TLS_POLICY_REVISION, 0))
         }
 
         // Older releases kept runtime secrets and service flags in one preference
@@ -119,12 +136,23 @@ object SimpleConfigManager {
         }
 
         val config = decodeStoredConfig(legacyPrefs, legacyStored)
+        val sourceRevision = legacyPrefs.getInt(KEY_TLS_POLICY_REVISION, 0)
+        if (validatedRestoredConfig(config, sourceRevision) == DEFAULT_CONFIG) return DEFAULT_CONFIG
         val encrypted = SecureConfigCipher.encrypt(config)
-        check(configPrefs.edit().putString(KEY_CONFIG, encrypted).commit()) {
+        check(configPrefs.edit().putString(KEY_CONFIG, encrypted)
+            .putInt(KEY_TLS_POLICY_REVISION, sourceRevision).commit()) {
             "Unable to migrate runtime config into isolated storage"
         }
         Log.i(TAG, "Migrated runtime config into isolated storage")
         return config
+    }
+
+    private fun validatedRestoredConfig(config: String, sourceRevision: Int): String {
+        if (RuntimeTlsPolicy.validationError(config, sourceRevision) == null) return config
+        // Keep the encrypted bytes and profile data. The app must rebuild the
+        // runtime from originalInput; a stripped legacy pin cannot be recovered here.
+        Log.w(TAG, "Saved TLS runtime needs profile revalidation before auto-restore")
+        return DEFAULT_CONFIG
     }
 
     private fun decodeStoredConfig(

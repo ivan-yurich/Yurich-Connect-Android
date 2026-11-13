@@ -1,6 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import com.tecclub.flutter_singbox.Application
@@ -19,6 +20,7 @@ object DefaultNetworkMonitor {
     private const val INTERFACE_RETRY_DELAY_MS = 60L
     private val monitorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val updateGeneration = AtomicLong(0)
+    private val observerGeneration = AtomicLong(0)
 
     @Volatile
     var defaultNetwork: Network? = null
@@ -27,10 +29,12 @@ object DefaultNetworkMonitor {
     private var listener: InterfaceUpdateListener? = null
 
     @Volatile
-    private var networkChangeObserver: ((Network?) -> Unit)? = null
+    private var networkChangeObserver: ((Network?, DefaultNetworkTransition) -> Unit)? = null
 
     suspend fun start() {
         Log.d(TAG, "Starting network monitor")
+        val generation = observerGeneration.incrementAndGet()
+        val observer = networkChangeObserver
         defaultNetwork = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Application.connectivity.activeNetwork.also {
                 Log.d(TAG, "Pre-start active network: $it")
@@ -39,18 +43,21 @@ object DefaultNetworkMonitor {
             null
         }
 
-        var callbackObserved = false
+        val tracker = DefaultNetworkTransitionTracker<Network>()
         DefaultNetworkListener.start(this) callback@{ network ->
-            val previous = defaultNetwork
-            if (callbackObserved && previous == network) {
-                Log.v(TAG, "Ignoring duplicate callback for unchanged default network")
-                return@callback
+            if (generation != observerGeneration.get()) return@callback
+            val transition = tracker.observe(network, physicalValidation(network)) ?: return@callback
+            if (generation != observerGeneration.get()) return@callback
+            if (transition == DefaultNetworkTransition.Changed) {
+                defaultNetwork = network
             }
-            callbackObserved = true
-            Log.d(TAG, "Network changed callback: $network")
-            defaultNetwork = network
-            scheduleDefaultInterfaceUpdate(network)
-            runCatching { networkChangeObserver?.invoke(network) }
+            if (transition == DefaultNetworkTransition.Changed ||
+                transition == DefaultNetworkTransition.Validated
+            ) {
+                scheduleDefaultInterfaceUpdate(network)
+            }
+            if (generation != observerGeneration.get() || networkChangeObserver !== observer) return@callback
+            runCatching { observer?.invoke(network, transition) }
                 .onFailure { error -> Log.e(TAG, "Network change observer failed", error) }
         }
 
@@ -98,8 +105,19 @@ object DefaultNetworkMonitor {
         scheduleDefaultInterfaceUpdate(defaultNetwork)
     }
 
-    fun setNetworkChangeObserver(observer: ((Network?) -> Unit)?) {
+    internal fun setNetworkChangeObserver(observer: ((Network?, DefaultNetworkTransition) -> Unit)?) {
         networkChangeObserver = observer
+    }
+
+    internal fun isValidatedPhysical(network: Network?): Boolean = physicalValidation(network) == true
+
+    private fun physicalValidation(network: Network?): Boolean? {
+        if (network == null) return false
+        val caps = runCatching { Application.connectivity.getNetworkCapabilities(network) }.getOrNull()
+            ?: return null
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+            !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
     }
 
     private fun scheduleDefaultInterfaceUpdate(newNetwork: Network?) {
@@ -159,6 +177,7 @@ object DefaultNetworkMonitor {
     }
 
     private fun resetState() {
+        observerGeneration.incrementAndGet()
         listener = null
         networkChangeObserver = null
         defaultNetwork = null

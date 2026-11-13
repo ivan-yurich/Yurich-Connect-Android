@@ -257,24 +257,31 @@ class SmartRouteRules {
   ];
 
   static List<String> ruBypassPackages(Iterable<String> installedPackages) {
+    // Deliberately use only the curated allowlist, never a package-name prefix
+    // or a partial launcher-app inventory. Native Android ignores absent apps.
+    return _ruBypassPackages;
+  }
+
+  static final _ruBypassPackages = _compileBypassPackages();
+
+  static List<String> _compileBypassPackages() {
     final denied = ruBypassDenyPackageNames.toSet();
     final packages = <String>{...ruDirectPackageNames};
     packages.removeAll(denied);
     final sorted = packages.toList()..sort();
-    return sorted;
+    return List<String>.unmodifiable(sorted);
   }
 
   static const ruDirectDomainSuffixes = [
-    'ru',
-    'su',
-    'рф',
+    // A country-code suffix alone is not an allowlist of trusted services.
+    'yandex.ru',
+    'ya.ru',
     'mos.ru',
     'gov.ru',
     'gosuslugi.ru',
     'yandex.net',
     'yastatic.net',
     'yandex.st',
-    'yandexcloud.net',
     'vk.com',
     'vkuser.net',
     'userapi.com',
@@ -319,6 +326,10 @@ class SmartRouteRules {
     'mail.ru',
     'yandex.ru',
     'ya.ru',
+    // Public search only. Other Rambler subdomains are not implicitly trusted.
+    'r0.ru',
+    'nova.rambler.ru',
+    'images.rambler.ru',
     'sberbank.ru',
     'sber.ru',
     'vtb.ru',
@@ -345,4 +356,103 @@ class SmartRouteRules {
     'kinopoisk.ru',
     '2gis.ru',
   ];
+
+  // Compile once per isolate, then share immutable lists across reconnects and
+  // both VPN engines. Proxy rules always precede the direct allowlist.
+  static final proxyDomainRules = SmartRouteDomainRules.compile(
+    domains: globalProxyDomains,
+    domainSuffixes: globalProxyDomainSuffixes,
+  );
+
+  static final directDomainRules = SmartRouteDomainRules.compile(
+    domains: ruDirectDomains,
+    domainSuffixes: ruDirectDomainSuffixes,
+  );
+
+  /// Domain policy only: Android per-app exclusions and private LAN IP rules
+  /// are separate. An invalid/unknown name never becomes a direct exception.
+  static String domainOutbound(String host, {bool enabled = true}) {
+    if (!enabled || proxyDomainRules.matchesHost(host)) return 'proxy';
+    return directDomainRules.matchesHost(host) ? 'direct' : 'proxy';
+  }
+}
+
+/// A compact domain policy; removes only entries covered by the same route.
+final class SmartRouteDomainRules {
+  SmartRouteDomainRules._(List<String> domains, List<String> domainSuffixes)
+    : domains = List.unmodifiable(domains),
+      domainSuffixes = List.unmodifiable(domainSuffixes),
+      _exactSet = Set.unmodifiable(domains),
+      _suffixSet = Set.unmodifiable(domainSuffixes),
+      xrayDomains = List.unmodifiable([
+        for (final domain in domains) 'full:$domain',
+        for (final suffix in domainSuffixes) 'domain:$suffix',
+      ]);
+
+  factory SmartRouteDomainRules.compile({
+    required Iterable<String> domains,
+    required Iterable<String> domainSuffixes,
+  }) {
+    final suffixes = domainSuffixes.map(_normalize).toSet();
+    final exact = domains.map(_normalize).toSet();
+    for (final name in {...suffixes, ...exact}) {
+      if (!_isDomain(name)) {
+        throw ArgumentError.value(name, 'domain', 'Expected a service domain');
+      }
+    }
+    final compactSuffixes =
+        suffixes.where((name) => !_hasParentSuffix(name, suffixes)).toList()
+          ..sort();
+    final compactDomains =
+        exact
+            .where(
+              (name) =>
+                  !suffixes.contains(name) && !_hasParentSuffix(name, suffixes),
+            )
+            .toList()
+          ..sort();
+    return SmartRouteDomainRules._(compactDomains, compactSuffixes);
+  }
+
+  final List<String> domains;
+  final List<String> domainSuffixes;
+  final List<String> xrayDomains;
+  final Set<String> _exactSet;
+  final Set<String> _suffixSet;
+
+  static final _validLabel = RegExp(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$');
+  static final _ipv4Literal = RegExp(r'^\d+\.\d+\.\d+\.\d+$');
+
+  static bool _isDomain(String name) =>
+      name.length <= 253 &&
+      name.contains('.') &&
+      !_ipv4Literal.hasMatch(name) &&
+      name.split('.').every((label) => _validLabel.hasMatch(label));
+
+  bool matchesHost(String host) {
+    final name = _normalize(host);
+    if (!_isDomain(name)) return false;
+    if (_exactSet.contains(name) || _suffixSet.contains(name)) return true;
+    return _hasParentSuffix(name, _suffixSet);
+  }
+
+  static String _normalize(String name) {
+    final normalized = name.trim().toLowerCase();
+    return normalized.endsWith('.')
+        ? normalized.substring(0, normalized.length - 1)
+        : normalized;
+  }
+
+  static bool _hasParentSuffix(String name, Set<String> suffixes) {
+    for (
+      var dot = name.indexOf('.');
+      dot >= 0;
+      dot = name.indexOf('.', dot + 1)
+    ) {
+      if (suffixes.contains(name.substring(dot + 1))) {
+        return true;
+      }
+    }
+    return false;
+  }
 }

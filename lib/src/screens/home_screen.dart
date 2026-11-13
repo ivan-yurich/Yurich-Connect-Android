@@ -16,7 +16,12 @@ import '../models/profile_network_stability.dart';
 import '../models/profile_stability.dart';
 import '../models/vpn_profile.dart';
 import '../services/app_update_service.dart';
-import '../services/first_successful_future.dart';
+import '../services/auto_failover_order.dart';
+import '../services/direct_latency_probe.dart';
+import '../services/local_connection_incidents.dart';
+import '../services/local_proxy_health_probe.dart';
+import '../services/kill_switch_service.dart';
+import '../services/kill_switch_http_policy.dart';
 import '../services/fixed_size_batches.dart';
 import '../services/power_manager_service.dart';
 import '../services/preferred_first.dart';
@@ -31,8 +36,12 @@ import '../services/sensitive_data_redactor.dart';
 import '../services/soak_counter_publish_cadence.dart';
 import '../services/on_device_diagnostics.dart';
 import '../services/protocol_display_mapper.dart';
+import '../services/protocol_test_metadata.dart';
+import '../services/proxy_server_probe.dart';
 import '../services/sing_box_log_filter.dart';
 import '../services/smart_route_rules.dart';
+import '../services/smart_route_apps_service.dart';
+import '../services/tls_pin_policy.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
 import '../services/vpn_reconnect_policy.dart';
@@ -43,22 +52,15 @@ import '../theme/yurich_theme.dart';
 import '../utils/traffic_formatter.dart';
 import 'qr_scan_screen.dart';
 import 'diagnostics_panel.dart';
+import 'kill_switch_panel.dart';
+import 'smart_route_apps_dialog.dart';
 import 'tv_home_screen.dart';
 
 part 'home_screen_widgets.dart';
 part 'home_screen_strings.dart';
+part 'home_screen_mobile.dart';
+part 'home_screen_hermes_settings.dart';
 
-const _gold = YurichColors.accentBlue;
-const _goldSoft = YurichColors.accentSoft;
-const _danger = YurichColors.danger;
-const _dangerSoft = YurichColors.dangerSoft;
-const _ink = YurichColors.background;
-const _surface = YurichColors.surfaceSolid;
-const _surfaceMetric = YurichColors.surfaceMetric;
-const _mutedGold = YurichColors.textSecondary;
-const _cyanGlow = YurichColors.accentCyan;
-const _deepGlow = YurichColors.backgroundDeep;
-const Animation<double> _staticGlowPulse = AlwaysStoppedAnimation<double>(0);
 const _appName = 'Yurich Connect';
 const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
@@ -66,6 +68,7 @@ const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
 const _appVersionFallback = '1.0.108';
 const _nativeShortTimeout = Duration(seconds: 3);
+const _autoPassBudget = Duration(minutes: 3);
 const _nativeConfigTimeout = Duration(seconds: 10);
 const _subscriptionReminderWindow = Duration(days: 5);
 const _tunnelHealthProbeInterval = Duration(seconds: 105);
@@ -120,8 +123,6 @@ enum _AppLanguage {
   }
 }
 
-enum _ProfileTab { all, vless, naive, hysteria }
-
 enum _SupportTab { help, community }
 
 class _ProfileConnectionBlocked implements Exception {
@@ -133,19 +134,22 @@ class _ProfileConnectionBlocked implements Exception {
   String toString() => message;
 }
 
-_ProfileTab _profileTabForKind(VpnProfileKind kind) {
-  return switch (kind) {
-    VpnProfileKind.vlessReality ||
-    VpnProfileKind.vlessXhttp ||
-    VpnProfileKind.vlessTls => _ProfileTab.vless,
-    VpnProfileKind.naive => _ProfileTab.naive,
-    VpnProfileKind.hysteria2 || VpnProfileKind.hysteria => _ProfileTab.hysteria,
-    VpnProfileKind.vlessMkcp || VpnProfileKind.singBoxConfig => _ProfileTab.all,
-  };
+typedef _AutoPhysicalNetwork = ({String key, String type, bool confirmed});
+
+final class _AutoNetworkChanged implements Exception {
+  const _AutoNetworkChanged();
 }
 
-bool _profileMatchesTab(VpnProfile profile, _ProfileTab tab) {
-  return tab == _ProfileTab.all || _profileTabForKind(profile.kind) == tab;
+final class _AutoCandidateUnavailable implements Exception {
+  const _AutoCandidateUnavailable();
+}
+
+final class _AutoPassExhausted implements Exception {
+  const _AutoPassExhausted();
+}
+
+final class _AutoNetworkUnavailable implements Exception {
+  const _AutoNetworkUnavailable();
 }
 
 List<VpnProfile> _clientSupportedProfiles(List<VpnProfile> profiles) {
@@ -173,6 +177,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _autoSelector = const ProfileAutoSelector();
   final _updateService = AppUpdateService();
   final _powerManagerService = PowerManagerService();
+  final _localIncidents = const LocalConnectionIncidentsService();
   final _geoService = ProfileGeoService();
   final _sessionController = VpnSessionController();
   final _soakCounterPublishCadence = SoakCounterPublishCadence();
@@ -202,18 +207,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<VpnProfile> _profiles = const [];
   List<VpnProfile> _storedProfiles = const [];
   final _profilePingMs = <String, int>{};
-  final _profilePingText = <String, String>{};
+  final _profileProbeResults = <String, ServerProbeResult>{};
   final _profilePingBusy = <String, bool>{};
-  final _profilePingError = <String, String>{};
   final _profilePingCheckedAt = <String, DateTime>{};
+  final _activeProfileProbeCancels = <VoidCallback>{};
+  int _profileProbeEpoch = 0;
   final _lastSuccessfulPlanByProfileId = <String, String>{};
   Map<String, ProfileStabilityStats> _profileStabilityStats = const {};
   Map<String, Map<String, ProfileNetworkStabilityStats>>
   _profileNetworkStabilityStats = const {};
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
-  _ProfileTab _profileTab = _ProfileTab.all;
-  bool _profilesExpanded = false;
+  bool _automaticProfileSelection = true;
+  bool? _directLatencyAllowed;
+  VpnSessionOperation? _autoConnectPreparation;
+  bool get _preparingAutoConnect => _autoConnectPreparation != null;
+  bool _stopProtectionCheck = false;
+  bool _directConsentVisible = false;
+  DirectLatencyProbe? _directLatencyProbe;
+  final _directReadings =
+      <String, ({DirectLatencyReading reading, String network, DateTime at})>{};
+  String? _probePhysicalNetwork;
+  _MobilePage _mobilePage = _MobilePage.home;
+  String? _unconfirmedSwitchProfileId;
   _SupportTab _supportTab = _SupportTab.help;
   String _status = AurumVpnStatus.stopped;
   String _uplink = '0 B/s';
@@ -224,6 +240,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _appBuildNumber = '';
   AppDistributionChannel _distributionChannel = AppDistributionChannel.unknown;
   String? _lastError;
+  // A failed VPN command can finish with native status Stopped. Keep that
+  // distinct from an intentional disconnect on the mobile power button.
+  bool _vpnUiCommandFailed = false;
+  String? _lastVpnFailureCategory;
   bool _busy = false;
   bool _updateBusy = false;
   bool _subscriptionRefreshBusy = false;
@@ -236,6 +256,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _manualDisconnectRequested = false;
   bool _pingAllInFlight = false;
   bool _countryResolveInFlight = false;
+  Future<void> _profilePersistTail = Future<void>.value();
   bool _runtimeReconcileInFlight = false;
   bool _runtimeReconciled = false;
   bool _nativeRecoveryStarting = false;
@@ -253,10 +274,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _updateNoticeCheckInFlight = false;
   final _updateNoticeClock = Stopwatch()..start();
   Duration? _lastUpdateNoticeAttempt;
-  bool _batteryOptimizationIgnored = true;
+  bool? _batteryOptimizationIgnored;
   bool _batteryOptimizationCheckInFlight = false;
-  bool _batteryOptimizationPromptShown = false;
+  LocalIncidentState _localIncidentState = const LocalIncidentState.disabled();
+  bool _localIncidentSettingsBusy = false;
   bool _smartRouteRuDirect = false;
+  bool _smartRoutePreferenceLoaded = false;
+  bool _smartRouteSettingsBusy = false;
+  late final Future<void> _initialSettingsLoad;
+  final _smartRouteApps = const SmartRouteAppsService();
+  final _killSwitchService = const KillSwitchService();
+  KillSwitchState _killSwitchState = const KillSwitchState();
+  bool _killSwitchApplying = false;
   DnsProtectionMode _dnsProtectionMode = DnsProtectionMode.stable;
   DateTime? _nextTunnelHealthCheckAt;
   DateTime? _networkChangingUntil;
@@ -292,39 +321,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return duration.isNegative ? Duration.zero : duration;
   }
 
-  String get _keeperStatusLabel {
-    if (!_autoRecoveryArmed) {
-      return s.keeperIdle;
-    }
-    if (_status == AurumVpnStatus.starting && _autoRecoveryArmed) {
-      return s.keeperReconnecting;
-    }
-    if (_tunnelHealthCheckInFlight) {
-      return s.keeperChecking;
-    }
-    if (_connectionDegraded) {
-      return s.keeperDegraded;
-    }
-    return s.keeperActive;
-  }
-
-  String get _lastHealthStatusLabel {
-    final lastHealthyAt = _lastHealthyAt;
-    if (lastHealthyAt == null) {
-      return s.lastCheckNever;
-    }
-    return s.lastCheckAgo(_clockNow.difference(lastHealthyAt));
-  }
-
-  String get _autoRecoveryStatusLabel =>
-      _autoRecoveryArmed ? s.autoRecoveryOn : s.autoRecoveryOff;
-
-  String get _healthFailuresStatusLabel => _tunnelHealthFailures == 0
-      ? s.healthFailuresNone
-      : s.healthFailuresCount(_tunnelHealthFailures);
-
   bool get _networkChanging => _isNetworkChanging(DateTime.now());
   bool get _connectionQueueActive => _sessionController.hasPendingOperations;
+  bool get _userStopQueued =>
+      _connectionQueueActive &&
+      _manualDisconnectRequested &&
+      !_sessionController.desiredRunning;
+  bool get _pendingNativeStart => _connectionQueueActive
+      ? _sessionController.desiredRunning
+      : !_manualDisconnectRequested && _status == AurumVpnStatus.starting;
+  bool get _canCancelVpnStart => _preparingAutoConnect || _pendingNativeStart;
 
   String get _networkTypeLabel {
     return switch (_networkType) {
@@ -335,14 +341,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       'unknown' => 'Неизвестно',
       _ => _networkType,
     };
-  }
-
-  String get _idleKeeperStatusLabel {
-    final lastIdleAt = _lastIdleHealthCheckAt;
-    if (lastIdleAt == null) {
-      return s.idleKeeperReady;
-    }
-    return '${s.idleKeeperActive} · ${s.lastCheckAgo(_clockNow.difference(lastIdleAt))}';
   }
 
   VpnProfile? get _selectedProfile {
@@ -369,6 +367,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   bool get _connected =>
       _status == AurumVpnStatus.started || _status == AurumVpnStatus.starting;
+
+  bool get _smartRoutePausedByKillSwitch =>
+      _killSwitchState.requested ||
+      _killSwitchState.alwaysOn ||
+      _killSwitchState.lockdown ||
+      _killSwitchState.strictRuntime;
 
   bool get _nativeOwnsTunnelHealth =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -529,6 +533,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _networkFingerprint.isNotEmpty &&
         nextFingerprint != _networkFingerprint;
     final changed = generationChanged || fingerprintChanged;
+    final probePath = snapshot['probePhysicalNetwork'] as String?;
+    final probePathChanged =
+        probePath != null && _probePhysicalNetwork != probePath;
 
     void apply() {
       _networkType = nextType;
@@ -538,8 +545,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (nextFingerprint.isNotEmpty) {
         _networkFingerprint = nextFingerprint;
       }
+      if (probePathChanged || changed) {
+        _cancelDirectLatency(clearReadings: true);
+        _probePhysicalNetwork = probePath ?? _probePhysicalNetwork;
+      }
       _lastNetworkSnapshotAt = now;
       if (changed) {
+        _invalidateProfileProbes();
         _networkChangingUntil = now.add(_networkChangingSettleWindow);
         _lastNetworkEvent = '$source:$nextType#g$_networkGenerationId';
         _lastNetworkStatsTrafficBytes = _lastSessionTrafficBytes;
@@ -549,7 +561,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
     }
 
-    if (mounted && changed) {
+    if (mounted && (changed || probePathChanged)) {
       setState(apply);
     } else {
       apply();
@@ -597,7 +609,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       countryName: _profileCountryName(profile),
       countryCode: _profileCountryCode(profile),
       pingMs: profile == null ? null : _profilePingMs[profile.id],
-      latencyLabel: profile == null ? null : _profilePingText[profile.id],
+      latencyLabel: profile == null ? null : _profilePingLabel(profile),
       uploadSpeed: _uplink,
       downloadSpeed: _downlink,
       totalTraffic: _sessionTotal,
@@ -652,8 +664,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (_uiForeground) {
       _startUptimeTimer();
     }
-    _startBootTask('load', _load, timeout: const Duration(seconds: 12));
-    _startBootTask('init-vpn', _initVpn, timeout: const Duration(seconds: 8));
+    _initialSettingsLoad = _startBootTask(
+      'load',
+      _load,
+      timeout: const Duration(seconds: 12),
+    );
+    unawaited(
+      _startBootTask('init-vpn', _initVpn, timeout: const Duration(seconds: 8)),
+    );
+    if (!widget.tvMode && _localIncidents.available) {
+      unawaited(_loadLocalIncidentState());
+    }
+    unawaited(
+      _startBootTask(
+        'kill-switch',
+        _refreshKillSwitchState,
+        timeout: const Duration(seconds: 4),
+      ),
+    );
     if (_uiForeground) {
       _startStatusWatchdog();
     }
@@ -661,9 +689,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       const Duration(hours: 6),
       (_) => unawaited(_showSubscriptionRenewalReminder(_profiles)),
     );
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_refreshBatteryOptimizationStatus(prompt: true));
-    });
   }
 
   void _startUptimeTimer() {
@@ -676,31 +701,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _startStatusWatchdog() {
-    _statusWatchdogTimer ??= Timer.periodic(
-      const Duration(seconds: 20),
-      (_) => unawaited(_refreshStatusWatchdog()),
-    );
+    _statusWatchdogTimer ??= Timer.periodic(const Duration(seconds: 20), (_) {
+      unawaited(_refreshStatusWatchdog());
+      unawaited(_refreshKillSwitchState());
+    });
   }
 
-  void _startBootTask(
+  Future<void> _startBootTask(
     String label,
     Future<void> Function() task, {
     required Duration timeout,
-  }) {
-    unawaited(() async {
-      try {
-        await task().timeout(timeout);
-      } on Object catch (error, stackTrace) {
-        final errorText = _redactSensitive('$error');
-        _recordStabilityEvent('boot-task-error:$label:$errorText');
-        _queueLog('Boot task failed [$label]: $errorText');
-        _queueLog(_redactSensitive(stackTrace.toString().split('\n').first));
-      }
-    }());
+  }) async {
+    try {
+      await task().timeout(timeout);
+    } on Object catch (error, stackTrace) {
+      final errorText = _redactSensitive('$error');
+      _recordStabilityEvent('boot-task-error:$label:$errorText');
+      _queueLog('Boot task failed [$label]: $errorText');
+      _queueLog(_redactSensitive(stackTrace.toString().split('\n').first));
+    }
   }
 
   @override
   void dispose() {
+    _invalidateProfileProbes();
+    _geoService.close();
     _soakBridgeChannel.setMethodCallHandler(null);
     WidgetsBinding.instance.removeObserver(this);
     _statusSubscription?.cancel();
@@ -726,11 +751,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _startStatusWatchdog();
       setState(() => _clockNow = DateTime.now());
       _lastNetworkEvent = 'app-resume';
-      unawaited(_refreshBatteryOptimizationStatus());
+      if (_mobilePage == _MobilePage.settings) {
+        unawaited(_refreshBatteryOptimizationStatus());
+      }
+      unawaited(_refreshKillSwitchState(applyIfNeeded: true));
       unawaited(_refreshNetworkSnapshot('app-resume'));
       unawaited(_handleResumeRecovery());
       unawaited(_checkLatestUpdateNotice());
     } else {
+      KillSwitchHttpPolicy.cancelDirectRequests();
+      _cancelDirectLatency(clearReadings: true);
       _uptimeTimer?.cancel();
       _uptimeTimer = null;
       _statusWatchdogTimer?.cancel();
@@ -802,6 +832,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _load() async {
     final appInfo = await _loadAppInfo();
+    final smartRouteRuDirect = await _store.loadSmartRouteRuDirect(
+      installTime: widget.tvMode ? null : appInfo.installTime,
+      updateTime: widget.tvMode ? null : appInfo.updateTime,
+    );
     final distributionChannel = await _loadDistributionChannel();
     final storedProfiles = await _store.loadProfiles();
     final profiles = _clientSupportedProfiles(storedProfiles);
@@ -809,8 +843,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final loadedNetworkStabilityStats = await _store
         .loadProfileNetworkStabilityStats();
     final selectedId = await _store.loadSelectedProfileId();
+    final autoSelection = await _store.loadAutomaticProfileSelection();
+    final directLatencyAllowed = await _store.loadDirectLatencyAllowed();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
-    final smartRouteRuDirect = await _store.loadSmartRouteRuDirect();
     final dnsProtectionMode = await _store.loadDnsProtectionMode();
     final storedManualDisconnectRequested = await _store
         .loadManualDisconnectRequested();
@@ -866,7 +901,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _profileStabilityStats = stabilityStats;
       _profileNetworkStabilityStats = networkStabilityStats;
       _selectedProfileId = resolvedSelectedId;
+      _automaticProfileSelection = autoSelection ?? (selectedId == null);
+      _directLatencyAllowed = directLatencyAllowed;
       _smartRouteRuDirect = smartRouteRuDirect;
+      _smartRoutePreferenceLoaded = true;
       _dnsProtectionMode = dnsProtectionMode;
       _manualDisconnectRequested = manualDisconnectRequested;
       _message = profiles.isEmpty
@@ -887,13 +925,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _persistProfiles(List<VpnProfile> profiles) async {
+  Future<void> _persistProfiles(List<VpnProfile> profiles) {
+    _invalidateProfileProbes();
     final snapshot = List<VpnProfile>.unmodifiable(profiles);
-    await _store.saveProfiles(snapshot);
-    _storedProfiles = snapshot;
+    final saved = _profilePersistTail.catchError((_) {}).then((_) async {
+      await _store.saveProfiles(snapshot);
+      _storedProfiles = snapshot;
+    });
+    _profilePersistTail = saved;
+    return saved;
   }
 
-  Future<({String version, String buildNumber})> _loadAppInfo() async {
+  Future<
+    ({
+      String version,
+      String buildNumber,
+      DateTime? installTime,
+      DateTime? updateTime,
+    })
+  >
+  _loadAppInfo() async {
     try {
       final info = await PackageInfo.fromPlatform();
       return (
@@ -901,9 +952,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ? _appVersionFallback
             : info.version,
         buildNumber: info.buildNumber,
+        installTime: info.installTime,
+        updateTime: info.updateTime,
       );
     } on Object {
-      return (version: _appVersionFallback, buildNumber: '');
+      return (
+        version: _appVersionFallback,
+        buildNumber: '',
+        installTime: null,
+        updateTime: null,
+      );
     }
   }
 
@@ -1021,6 +1079,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
           final status = event['status'] as String?;
           if (status != null && mounted) {
+            if (status != AurumVpnStatus.started && status != _status) {
+              _invalidateProfileProbes();
+            }
+            if (status == AurumVpnStatus.starting ||
+                status == AurumVpnStatus.started) {
+              KillSwitchHttpPolicy.cancelDirectRequests();
+            }
+            unawaited(_refreshKillSwitchState());
             if (_stoppingByUser && status == AurumVpnStatus.started) {
               _queueLog(
                 'Native Started status ignored during stop transition.',
@@ -1036,6 +1102,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     status == AurumVpnStatus.stopped);
             final nativeManualStart =
                 nativeManualState == false &&
+                !_userStopQueued &&
                 (status == AurumVpnStatus.starting ||
                     status == AurumVpnStatus.started);
             final rawSessionReason = event['sessionReason'];
@@ -1045,7 +1112,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             final isNativeRecoveryStart =
                 status == AurumVpnStatus.starting &&
                 (sessionReason?.startsWith('watchdog:') == true ||
-                    sessionReason?.startsWith('readiness:') == true);
+                    sessionReason?.startsWith('readiness:') == true ||
+                    sessionReason == 'network-rebind');
             if (isNativeRecoveryStart) {
               _nativeRecoveryStarting = true;
             }
@@ -1078,6 +1146,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 _manualDisconnectRequested = true;
                 _autoRecoveryArmed = false;
                 _lastError = null;
+                _vpnUiCommandFailed = false;
                 _lastRecoverySource = null;
                 if (status == AurumVpnStatus.stopped) {
                   _connectedSince = null;
@@ -1095,6 +1164,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 _nativeRecoveryStarting = false;
                 _clearRecoveredStopMessage();
                 _lastError = null;
+                if (!_busy &&
+                    !_connectionQueueActive &&
+                    _unconfirmedSwitchProfileId == null &&
+                    !_stoppingByUser) {
+                  _vpnUiCommandFailed = false;
+                }
                 if (_nativeOwnsTunnelHealth) {
                   _tunnelHealthFailures = 0;
                 }
@@ -1125,6 +1200,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             });
             if (status == AurumVpnStatus.started) {
               _dismissConnectionErrorSnack();
+              final selected = _explicitSelectedProfile;
+              if (selected != null && !_busy && !_connectionQueueActive) {
+                unawaited(_pingProfile(selected));
+              }
             }
             if (status == AurumVpnStatus.started &&
                 _manualDisconnectRequested &&
@@ -1272,6 +1351,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
       if (mounted) {
         setState(() {
+          if (_status != status) _invalidateProfileProbes();
           _status = status;
           if (status == AurumVpnStatus.started) {
             _clearRecoveredStopMessage();
@@ -1368,6 +1448,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           return await _executeSoakReconnect(requestId);
         case 'stop':
           return await _executeSoakStop(requestId);
+        case 'probe':
+          final target = _soakProfileForToken(
+            '${arguments['profileToken'] ?? ''}',
+          );
+          if (target == null) {
+            return jsonEncode({
+              'ok': false,
+              'requestId': requestId,
+              'error': 'invalid_profile_token',
+            });
+          }
+          await _pingProfile(target.profile, force: true);
+          return jsonEncode({
+            'ok': true,
+            'requestId': requestId,
+            'profileToken': target.token,
+            'latency': _profilePingLabel(target.profile),
+            'probeState': _profileProbeResults[target.profile.id]?.state.name,
+            'measurementPath': 'current_vpn_only',
+          });
         default:
           return jsonEncode({
             'ok': false,
@@ -1394,6 +1494,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
     }
     final profile = target.profile;
+    if (ProtocolTestMetadata.profile(profile)['offlineMarked'] == true) {
+      return jsonEncode({
+        'ok': false,
+        'requestId': requestId,
+        'profileToken': target.token,
+        'error': 'offline_profile_skipped',
+      });
+    }
     if (_profileConnectBlockReason(profile) != null) {
       return jsonEncode({
         'ok': false,
@@ -1487,6 +1595,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       'runnable': _profileConnectBlockReason(profile) == null,
       'latency': _profilePingLabel(profile),
       'latencyChecked': _profilePingCheckedAt.containsKey(profile.id),
+      ...ProtocolTestMetadata.profile(profile),
     };
   }
 
@@ -1519,6 +1628,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       'uplink': _uplink,
       'downlink': _downlink,
       'sessionTotal': _sessionTotal,
+      'errorCategory': ProtocolTestMetadata.failure([
+        _lastError,
+        _message,
+        ..._logs.reversed.take(20),
+      ]),
     };
   }
 
@@ -1639,9 +1753,32 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _notificationSyncInFlight = true;
     _lastNotificationSyncAt = now;
     try {
+      final state = _connectionUiState;
+      final payload = state.toJson();
+      // Never publish a cached direct measurement or a previous server's RTT.
+      payload['pingMs'] = null;
+      final selected = _explicitSelectedProfile;
+      final checkedAt = _profilePingCheckedAt[selected?.id];
+      final probe = _profileProbeResults[selected?.id];
+      final age = checkedAt == null ? null : now.difference(checkedAt);
+      if ((state.status == ConnectionStatus.connected ||
+              state.status == ConnectionStatus.idle) &&
+          !_busy &&
+          !_connectionQueueActive &&
+          !_stopProtectionCheck &&
+          _unconfirmedSwitchProfileId == null &&
+          age != null &&
+          !age.isNegative &&
+          age < const Duration(minutes: 1) &&
+          probe != null &&
+          probe.milliseconds != null &&
+          probe.state == ServerProbeState.tunnelHealthy) {
+        payload['pingMs'] = probe.milliseconds;
+        payload['pingObservedAtMs'] = checkedAt!.millisecondsSinceEpoch;
+      }
       await _bestEffortNative(
         'updateConnectionNotification',
-        _vpnEngine.updateConnectionNotification(_connectionUiState.toJson()),
+        _vpnEngine.updateConnectionNotification(payload),
         timeout: const Duration(seconds: 2),
       );
     } finally {
@@ -1654,40 +1791,153 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _refreshBatteryOptimizationStatus({bool prompt = false}) async {
-    if (!Platform.isAndroid || _batteryOptimizationCheckInFlight) {
+  Future<void> _refreshBatteryOptimizationStatus() async {
+    if (!_powerManagerService.supported || _batteryOptimizationCheckInFlight) {
       return;
     }
     _batteryOptimizationCheckInFlight = true;
     try {
       final ignored = await _powerManagerService
           .isIgnoringBatteryOptimizations()
-          .timeout(const Duration(seconds: 2), onTimeout: () => true);
-      if (!mounted) {
-        return;
-      }
-      setState(() => _batteryOptimizationIgnored = ignored);
-      if (!ignored && prompt && !_batteryOptimizationPromptShown) {
-        _batteryOptimizationPromptShown = true;
-        _showSnack(
-          s.batteryOptimizationSnack,
-          action: SnackBarAction(
-            label: s.backgroundModeRequest,
-            onPressed: () => unawaited(_requestBackgroundPowerAccess()),
-          ),
-        );
+          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+      if (mounted && _batteryOptimizationIgnored != ignored) {
+        setState(() => _batteryOptimizationIgnored = ignored);
       }
     } finally {
       _batteryOptimizationCheckInFlight = false;
     }
   }
 
-  Future<void> _requestBackgroundPowerAccess() async {
-    await _powerManagerService.requestIgnoreBatteryOptimizations();
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-    await _refreshBatteryOptimizationStatus();
-    if (mounted) {
-      _showSnack(s.batteryOptimizationOpened);
+  Future<void> _openBackgroundPowerSettings() async {
+    final opened = await _powerManagerService.openAppBatterySettings();
+    if (mounted && !opened) _showSnack(s.batterySettingsFallback);
+  }
+
+  Future<void> _loadLocalIncidentState() async {
+    if (!mounted || _localIncidentSettingsBusy) return;
+    setState(() => _localIncidentSettingsBusy = true);
+    try {
+      final state = await _localIncidents.state();
+      if (mounted && state != null) setState(() => _localIncidentState = state);
+    } finally {
+      if (mounted) setState(() => _localIncidentSettingsBusy = false);
+    }
+  }
+
+  bool _hermesDeliverySettingsOpen = false;
+
+  void _updateHermesLocalSettings({LocalIncidentState? state, bool? busy}) {
+    if (!mounted) return;
+    setState(() {
+      if (state != null) _localIncidentState = state;
+      if (busy != null) _localIncidentSettingsBusy = busy;
+    });
+  }
+
+  Future<void> _showHermesPreview() async {
+    if (!_localIncidents.hermesPreviewAvailable) return;
+    final raw = await _localIncidents.hermesPreview();
+    if (!mounted || _mobilePage != _MobilePage.settings) return;
+    var example = s.hermesPreviewUnavailable;
+    if (raw != null && utf8.encode(raw).length <= 1024) {
+      try {
+        final payload = jsonDecode(raw);
+        if (payload is Map<String, Object?>) {
+          example = const JsonEncoder.withIndent('  ').convert(payload);
+        }
+      } on FormatException {
+        // A missing preview must not affect local consent or VPN.
+      }
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Theme(
+        data: YurichTheme.mobile,
+        child: AlertDialog(
+          title: Text(s.hermesPreviewTitle),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_hermesPreviewDescription),
+                const SizedBox(height: 12),
+                SelectableText(
+                  example,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(s.close),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _changeLocalIncidentConsent(bool enabled) async {
+    if (_localIncidentSettingsBusy || !_localIncidents.available) return;
+    setState(() {
+      _localIncidentSettingsBusy = true;
+      // Do not queue anything while revocation is being persisted.
+      if (!enabled) _localIncidentState = const LocalIncidentState.disabled();
+    });
+    try {
+      if (enabled) {
+        final consent = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(s.localIncidentTitle),
+            content: SingleChildScrollView(child: Text(s.localIncidentConsent)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: Text(s.localIncidentKeepOff),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(s.localIncidentEnable),
+              ),
+            ],
+          ),
+        );
+        if (!mounted || consent != true) return;
+      }
+      final state = await _localIncidents.setEnabled(enabled);
+      if (!mounted) return;
+      if (state == null || state.enabled != enabled) {
+        _showSnack(s.localIncidentSaveFailed);
+      } else {
+        setState(() => _localIncidentState = state);
+      }
+    } finally {
+      if (mounted) setState(() => _localIncidentSettingsBusy = false);
+    }
+  }
+
+  Future<void> _queueTerminalIncident(
+    LocalConnectionIncidentAttempt attempt,
+    VpnSessionOperation operation,
+  ) async {
+    final payload = attempt.takeTerminal(
+      current:
+          mounted &&
+          !_localIncidentSettingsBusy &&
+          _sessionController.isCurrent(operation),
+      consentEpoch: _localIncidentState.epoch,
+    );
+    if (payload == null) return;
+    final state = await _localIncidents.record(payload);
+    if (mounted &&
+        state != null &&
+        !_localIncidentSettingsBusy &&
+        _localIncidentState.epoch == attempt.epoch) {
+      setState(() => _localIncidentState = state);
     }
   }
 
@@ -1712,6 +1962,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _showImportSheet() async {
+    if (_preparingAutoConnect) return;
     if (widget.tvMode) {
       final input = await showTvImportDialog(
         context,
@@ -1720,99 +1971,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (input != null && mounted) await _importText(input);
       return;
     }
-    await showDialog<void>(
+    final action = await showDialog<_MobileImportAction>(
       context: context,
-      builder: (context) {
-        final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
-        return AnimatedPadding(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          padding: EdgeInsets.fromLTRB(18, 24, 18, 24 + bottomInset),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 520),
-              child: Material(
-                color: _surface,
-                elevation: 18,
-                shadowColor: YurichColors.shadow,
-                borderRadius: BorderRadius.circular(YurichRadii.card),
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              s.addProfile,
-                              style: Theme.of(context).textTheme.titleLarge,
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: s.close,
-                            onPressed: () => Navigator.of(context).pop(),
-                            icon: const Icon(Icons.close),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: _manualController,
-                        minLines: 3,
-                        maxLines: 6,
-                        decoration: InputDecoration(hintText: s.importHint),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 10,
-                        children: [
-                          FilledButton.icon(
-                            onPressed: _busy
-                                ? null
-                                : () {
-                                    Navigator.of(context).pop();
-                                    unawaited(_importManual());
-                                  },
-                            icon: const Icon(Icons.add_link),
-                            label: Text(s.importAction),
-                          ),
-                          OutlinedButton.icon(
-                            onPressed: _busy
-                                ? null
-                                : () {
-                                    Navigator.of(context).pop();
-                                    unawaited(_importFromClipboard());
-                                  },
-                            icon: const Icon(Icons.content_paste),
-                            label: Text(s.clipboard),
-                          ),
-                          OutlinedButton.icon(
-                            onPressed: _busy
-                                ? null
-                                : () {
-                                    Navigator.of(context).pop();
-                                    unawaited(_importFromQr());
-                                  },
-                            icon: const Icon(Icons.qr_code_scanner),
-                            label: const Text('QR'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
+      builder: (context) => Theme(
+        data: YurichTheme.mobile,
+        child: _MobileImportDialog(
+          controller: _manualController,
+          strings: s,
+          enabled: !_busy,
+        ),
+      ),
     );
+    if (!mounted || _busy || _preparingAutoConnect) return;
+    switch (action) {
+      case _MobileImportAction.input:
+        await _importManual();
+      case _MobileImportAction.clipboard:
+        await _importFromClipboard();
+      case _MobileImportAction.qr:
+        await _importFromQr();
+      case null:
+        break;
+    }
   }
 
   Future<void> _importText(String text) async {
+    // An immediate import must not look like restored settings during the
+    // install check or be overwritten by the startup profile snapshot.
+    await _initialSettingsLoad;
+    if (!mounted) return;
     await _runBusy(() async {
       final subscriptionSource = ProfileStore.subscriptionSourceKeyFromText(
         text,
@@ -1842,6 +2029,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 .profiles;
 
       await _persistProfiles(merged);
+      if (!widget.tvMode && _automaticProfileSelection) {
+        // Do not let the first selected profile turn Auto into manual on reboot.
+        await _store.saveAutomaticProfileSelection(true);
+      }
       await _store.saveSelectedProfileId(importedWithCachedData.first.id);
       _manualController.clear();
 
@@ -1851,7 +2042,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() {
         _profiles = merged;
         _selectedProfileId = importedWithCachedData.first.id;
-        _profileTab = _profileTabForKind(importedWithCachedData.first.kind);
+        _cancelDirectLatency(clearReadings: true);
         _message = s.imported(imported.length);
       });
       unawaited(_pingProfiles(merged));
@@ -1927,7 +2118,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshSubscriptions() async {
-    if (_busy || _subscriptionRefreshBusy) {
+    if (_busy || _subscriptionRefreshBusy || _preparingAutoConnect) {
       return;
     }
 
@@ -1996,6 +2187,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       setState(() {
         _profiles = merged;
+        _cancelDirectLatency(clearReadings: true);
         _selectedProfileId = selectedId;
         _message = s.subscriptionsUpdated(visibleImported.length);
       });
@@ -2125,27 +2317,61 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleVpn() async {
-    if (_connected) {
-      await _disconnect();
+    if (_stopProtectionCheck || _userStopQueued) return;
+    if (_preparingAutoConnect) {
+      // Selection has not issued a native start; cancelling its generation is enough.
+      _sessionController.beginDisconnect();
+      _dismissConnectionErrorSnack();
+      setState(() {
+        _cancelAutoConnectPreparation();
+        _message = s.vpnStopped;
+      });
+    } else if (_connected || _pendingNativeStart) {
+      final pending = _pendingNativeStart;
+      final generation = _sessionController.generation;
+      setState(() => _stopProtectionCheck = true);
+      try {
+        await _refreshKillSwitchState();
+        if (!mounted || _sessionController.generation != generation) return;
+        if (_killSwitchState.known && _killSwitchState.alwaysOn) {
+          await _openKillSwitchSettings();
+          return;
+        }
+        await _disconnect(invalidatePendingStart: pending);
+      } finally {
+        if (mounted) setState(() => _stopProtectionCheck = false);
+      }
     } else {
-      await _connect();
+      await _connect(reportTerminalIncident: true);
     }
   }
 
+  void _cancelAutoConnectPreparation() {
+    if (!_preparingAutoConnect) return;
+    _autoConnectPreparation = null;
+    _cancelDirectLatency();
+  }
+
   Future<void> _selectProfile(VpnProfile profile) async {
+    _dismissConnectionErrorSnack();
     final vpnTransitionInFlight = _connectionQueueActive;
     if (_busy && !vpnTransitionInFlight) {
       return;
     }
-
+    final wasAutomatic = !widget.tvMode && _automaticProfileSelection;
     final current = _explicitSelectedProfile;
-    if (current?.id == profile.id && !vpnTransitionInFlight) {
+    if (current?.id == profile.id &&
+        !vpnTransitionInFlight &&
+        !_preparingAutoConnect &&
+        !wasAutomatic &&
+        !_pendingNativeStart) {
       return;
     }
 
-    final shouldKeepRunning =
-        _connected ||
-        (vpnTransitionInFlight && _sessionController.desiredRunning);
+    final replacingPendingStart = _pendingNativeStart;
+    final shouldKeepRunning = vpnTransitionInFlight
+        ? _sessionController.desiredRunning
+        : !_userStopQueued && (_connected || _canCancelVpnStart);
 
     final blockReason = _profileConnectBlockReason(profile);
     if (shouldKeepRunning && blockReason != null) {
@@ -2159,9 +2385,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (!shouldKeepRunning) {
       setState(() {
+        if (wasAutomatic) _automaticProfileSelection = false;
         _selectedProfileId = profile.id;
+        _unconfirmedSwitchProfileId = null;
+        _vpnUiCommandFailed = false;
         _message = blockReason ?? s.selectedProfile(profile.name);
       });
+      if (!widget.tvMode) await _store.saveAutomaticProfileSelection(false);
+      if (!mounted || _selectedProfileId != profile.id) return;
       await _store.saveSelectedProfileId(profile.id);
       unawaited(_pingProfile(profile, force: true));
       if (blockReason != null) {
@@ -2172,90 +2403,326 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     final operation = _sessionController.beginProfileSwitch();
     final crossEngineRestart =
+        replacingPendingStart ||
         current != null &&
-        ProfileEngineSelector.select(current).engine !=
-            ProfileEngineSelector.select(profile).engine;
+            ProfileEngineSelector.select(current).engine !=
+                ProfileEngineSelector.select(profile).engine;
     if (mounted) {
       setState(() {
+        _cancelAutoConnectPreparation();
+        if (wasAutomatic) _automaticProfileSelection = false;
         _selectedProfileId = profile.id;
+        _unconfirmedSwitchProfileId = profile.id;
         _message = s.switchingProfile;
       });
     }
     await _runQueuedBusy(operation, () async {
+      if (!widget.tvMode) await _store.saveAutomaticProfileSelection(false);
+      _sessionController.ensureCurrent(operation);
       await _startVpnCore(
         profile,
         operation: operation,
         rapidRestart: true,
         crossEngineRestart: crossEngineRestart,
+        invalidatePendingStart: replacingPendingStart,
       );
     }, message: s.switchingProfile);
   }
 
-  Future<void> _connect() async {
-    if (!await _ensureVpnDisclosureConsent() || !mounted) {
+  Future<void> _connect({bool reportTerminalIncident = false}) async {
+    final requestedGeneration = _sessionController.generation;
+    if (!_smartRoutePreferenceLoaded ||
+        _busy ||
+        _connectionQueueActive ||
+        _preparingAutoConnect ||
+        !await _ensureVpnDisclosureConsent() ||
+        !mounted ||
+        requestedGeneration != _sessionController.generation ||
+        _busy ||
+        _connectionQueueActive ||
+        _preparingAutoConnect) {
       return;
     }
-    final profile = _explicitSelectedProfile ?? _autoConnectProfile();
+    final automatic = !widget.tvMode && _automaticProfileSelection;
+    if (automatic && _subscriptionRefreshBusy) {
+      _showSnack(s.refreshingSubscriptions);
+      return;
+    }
+    final operation = _sessionController.beginConnect();
+    final candidates = automatic
+        ? await _chooseAutomaticProfiles(operation)
+        : null;
+    if (!mounted ||
+        !_sessionController.isCurrent(operation) ||
+        _connected ||
+        _connectionQueueActive) {
+      return;
+    }
+    final profile = automatic
+        ? candidates?.firstOrNull
+        : (_explicitSelectedProfile ?? _autoConnectProfile());
     if (profile == null) {
+      _sessionController.beginDisconnect();
+      if (automatic && _profiles.isNotEmpty) {
+        setState(() => _message = s.noAutoServer);
+      }
       _showSnack(
-        _profiles.isEmpty ? s.importFirst : s.autoConnectNoStableProfile,
+        _profiles.isEmpty
+            ? s.importFirst
+            : automatic
+            ? s.noAutoServer
+            : s.autoConnectNoStableProfile,
       );
       return;
     }
 
     final blockReason = _profileConnectBlockReason(profile);
     if (blockReason != null) {
+      _sessionController.beginDisconnect();
       _queueLog('Connection blocked for ${profile.kind.label}: $blockReason');
       setState(() {
         _lastError = blockReason;
+        _vpnUiCommandFailed = true;
+        _rememberVpnFailure(blockReason, 'connect');
         _message = blockReason;
       });
-      _showSnack(blockReason);
+      _connectionErrorSnackBar = _showSnack(
+        widget.tvMode
+            ? blockReason
+            : s.vpnFailureMessage(_lastVpnFailureCategory),
+        duration: const Duration(seconds: 3),
+      );
       return;
     }
 
-    final operation = _sessionController.beginConnect();
-    await _store.saveManualDisconnectRequested(false);
-    if (!mounted) {
-      return;
-    }
+    final incidentEpoch = _localIncidentState.epoch;
+    final incident =
+        reportTerminalIncident && !widget.tvMode && incidentEpoch != null
+        ? LocalConnectionIncidentAttempt(incidentEpoch)
+        : null;
     setState(() {
       _manualDisconnectRequested = false;
     });
-    unawaited(_refreshBatteryOptimizationStatus(prompt: true));
     _autoRecoveryArmed = true;
-    await _runQueuedBusy(operation, () async {
-      try {
-        if (_selectedProfileId != profile.id) {
-          setState(() {
-            _selectedProfileId = profile.id;
-            _profileTab = _profileTabForKind(profile.kind);
-            _message = s.autoSelectedProfile(profile.name);
-          });
-          await _store.saveSelectedProfileId(profile.id);
+    await _runQueuedBusy(
+      operation,
+      () async {
+        await _store.saveManualDisconnectRequested(false);
+        _sessionController.ensureCurrent(operation);
+        try {
+          if (automatic) {
+            await _runAutomaticPass(
+              operation,
+              initialOrder: candidates!,
+              measuredNetwork: _probePhysicalNetwork,
+              incident: incident,
+            );
+          } else {
+            await _startVpnCore(
+              profile,
+              operation: operation,
+              incident: incident,
+            );
+          }
+        } on VpnSessionCancelled {
+          rethrow;
+        } on Object catch (error) {
+          _sessionController.ensureCurrent(operation);
+          if (!automatic) {
+            unawaited(
+              _recordProfileStability(
+                profile,
+                (stats) => stats.recordStartFailure(_redactSensitive('$error')),
+              ),
+            );
+            unawaited(
+              _recordProfileNetworkStability(
+                profile,
+                (stats) => stats.recordHealthFailure(
+                  'start:${_redactSensitive('$error')}',
+                ),
+              ),
+            );
+          }
+          _autoRecoveryArmed = false;
+          rethrow;
         }
-        await _startVpnCore(profile, operation: operation, rapidRestart: false);
-      } on VpnSessionCancelled {
-        rethrow;
-      } on Object catch (error) {
-        _autoRecoveryArmed = false;
-        unawaited(
-          _recordProfileStability(
-            profile,
-            (stats) => stats.recordStartFailure(_redactSensitive('$error')),
-          ),
-        );
-        unawaited(
-          _recordProfileNetworkStability(
-            profile,
-            (stats) => stats.recordHealthFailure(
-              'start:${_redactSensitive('$error')}',
-            ),
-          ),
-        );
-        rethrow;
+      },
+      message: automatic ? s.choosingAutoServer : s.connectingTo(profile.name),
+      incident: incident,
+    );
+  }
+
+  Future<_AutoPhysicalNetwork?> _readAutoPhysicalNetwork(
+    VpnSessionOperation operation, {
+    _AutoPhysicalNetwork? expected,
+  }) async {
+    _sessionController.ensureCurrent(operation);
+    try {
+      final snapshot = await _sessionController.cancelWhenSuperseded(
+        operation,
+        _vpnEngine.getNetworkSnapshot().timeout(_nativeShortTimeout),
+      );
+      _sessionController.ensureCurrent(operation);
+      final key = snapshot['probePhysicalNetwork'];
+      final type = _networkTypeFromSnapshot(snapshot);
+      final confirmed = snapshot['autoPhysicalRouteConfirmed'] == true;
+      final validatedKeys = snapshot['autoValidatedPhysicalKeys'];
+      if (!confirmed &&
+          expected != null &&
+          validatedKeys is List &&
+          validatedKeys.contains(expected.key)) {
+        return (key: expected.key, type: expected.type, confirmed: false);
       }
-    }, message: s.connectingTo(profile.name));
+      if (snapshot['validated'] != true ||
+          key is! String ||
+          key.isEmpty ||
+          (type != 'wifi' && type != 'cellular' && type != 'ethernet')) {
+        return null;
+      }
+      _applyNetworkSnapshot(snapshot, source: 'auto-network');
+      return (key: key, type: type, confirmed: confirmed);
+    } on VpnSessionCancelled {
+      rethrow;
+    } on Object {
+      _sessionController.ensureCurrent(operation);
+      return null;
+    }
+  }
+
+  Future<void> _ensureAutoPhysicalNetwork(
+    VpnSessionOperation operation,
+    _AutoPhysicalNetwork expected,
+  ) async {
+    final first = await _readAutoPhysicalNetwork(operation, expected: expected);
+    if (first?.key == expected.key) return;
+    await _delayForOperation(const Duration(milliseconds: 350), operation);
+    final second = await _readAutoPhysicalNetwork(
+      operation,
+      expected: expected,
+    );
+    if (second?.key != expected.key) throw const _AutoNetworkChanged();
+  }
+
+  Future<void> _runAutomaticPass(
+    VpnSessionOperation operation, {
+    required List<VpnProfile> initialOrder,
+    required String? measuredNetwork,
+    LocalConnectionIncidentAttempt? incident,
+  }) async {
+    final clock = Stopwatch()..start();
+    final attemptedByPath = <String, Set<String>>{};
+    _AutoPhysicalNetwork? lastPath;
+    List<VpnProfile> ranked = const [];
+    var waiting = false;
+    while (clock.elapsed < _autoPassBudget) {
+      _sessionController.ensureCurrent(operation);
+      final path = await _readAutoPhysicalNetwork(operation);
+      if (path == null) {
+        waiting = true;
+        incident?.nextCandidate();
+        if (mounted && _message != s.autoWaitingForNetwork) {
+          setState(() => _message = s.autoWaitingForNetwork);
+        }
+        await _delayForOperation(const Duration(seconds: 1), operation);
+        continue;
+      }
+      if (path != lastPath || waiting) {
+        // Wait for one more snapshot when the physical route changes. This
+        // keeps a fleeting Wi-Fi/cellular edge from spending a server attempt.
+        await _delayForOperation(const Duration(milliseconds: 350), operation);
+        if (await _readAutoPhysicalNetwork(operation) != path) continue;
+        ranked = path.key == measuredNetwork
+            ? initialOrder
+            : _rankAutomaticProfiles(_profiles, networkType: path.type);
+        lastPath = path;
+        waiting = false;
+      }
+      final attempted = attemptedByPath.putIfAbsent(path.key, () => <String>{});
+      final candidate = ranked
+          .where(
+            (profile) =>
+                !attempted.contains(profile.id) &&
+                _profiles.any(
+                  (current) => _sameAutomaticProfile(current, profile),
+                ) &&
+                _profileConnectBlockReason(profile) == null &&
+                !ProtocolTestMetadata.isOfflineMarked(profile) &&
+                !(profile.subscriptionExpiresAt?.isBefore(DateTime.now()) ??
+                    false),
+          )
+          .firstOrNull;
+      if (candidate == null) throw const _AutoPassExhausted();
+      if (clock.elapsed >= _autoPassBudget) break;
+      incident?.nextCandidate();
+      if (mounted) {
+        setState(() {
+          _selectedProfileId = candidate.id;
+          _unconfirmedSwitchProfileId = candidate.id;
+          _message = s.autoTryingServer(attempted.length + 1, ranked.length);
+        });
+      }
+      try {
+        await _startVpnCore(
+          candidate,
+          operation: operation,
+          incident: incident,
+          autoNetwork: path,
+        );
+        return;
+      } on _AutoNetworkChanged {
+        incident?.nextCandidate();
+        await _confirmAutoAttemptStopped(
+          operation,
+          invalidatePendingStart: true,
+        );
+        lastPath = null;
+      } on _AutoCandidateUnavailable {
+        _sessionController.ensureCurrent(operation);
+        final current = await _readAutoPhysicalNetwork(operation);
+        if (current?.key != path.key) {
+          incident?.nextCandidate();
+          lastPath = null;
+          continue;
+        }
+        attempted.add(candidate.id);
+        if (path.confirmed && current?.confirmed == true) {
+          unawaited(
+            _recordProfileNetworkStability(
+              candidate,
+              (stats) => stats.recordHealthFailure('auto-attempt-unavailable'),
+              networkType: path.type,
+            ).catchError((Object _) {}),
+          );
+        }
+      }
+    }
+    if (waiting) throw const _AutoNetworkUnavailable();
+    throw const _AutoPassExhausted();
+  }
+
+  bool _sameAutomaticProfile(VpnProfile current, VpnProfile planned) =>
+      identical(current, planned) ||
+      (current.id == planned.id &&
+          current.kind == planned.kind &&
+          current.originalInput == planned.originalInput &&
+          current.server == planned.server &&
+          current.port == planned.port &&
+          current.rawConfig == planned.rawConfig &&
+          current.subscriptionExpiresAt == planned.subscriptionExpiresAt &&
+          jsonEncode(current.outbound) == jsonEncode(planned.outbound));
+
+  Future<void> _confirmAutoAttemptStopped(
+    VpnSessionOperation operation, {
+    bool invalidatePendingStart = false,
+  }) async {
+    if (!await _stopVpnCore(
+      updateMessage: false,
+      operation: operation,
+      invalidatePendingStart: invalidatePendingStart,
+    )) {
+      throw TimeoutException(s.vpnStopTimeout(_status));
+    }
   }
 
   Future<bool> _ensureVpnDisclosureConsent() async {
@@ -2267,6 +2734,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     final isRussian = _language == _AppLanguage.ru;
+    final smartRouteDisclosure = !_smartRouteRuDirect
+        ? ''
+        : isRussian
+        ? 'При включённом Smart Route выбранные приложения и известные сервисы могут идти напрямую и видеть обычный IP сети. Это можно изменить в «Настройки → Smart Route». Kill Switch имеет приоритет.\n\n'
+        : 'With Smart Route enabled, selected apps and known services can connect directly and see your regular network IP. You can change this in Settings → Smart Route. Kill Switch takes precedence.\n\n';
     final accepted = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -2278,9 +2750,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           child: Text(
             isRussian
                 ? 'Yurich Connect использует системный Android VpnService, чтобы направлять трафик устройства через выбранный вами VPN-сервер и шифровать соединение до конечной точки туннеля.\n\n'
+                      '$smartRouteDisclosure'
                       'Для маршрутизации и диагностики приложение локально обрабатывает DNS-запросы, адреса назначений, объём трафика и состояние соединения. Эти диагностические данные автоматически не отправляются разработчику и не используются для рекламы. Оператор выбранного VPN-сервера может обрабатывать сетевой трафик согласно своей политике.\n\n'
                       'Подключение не начнётся без вашего явного согласия.'
                 : 'Yurich Connect uses Android VpnService to route device traffic through the VPN server you select and encrypt the connection to the tunnel endpoint.\n\n'
+                      '$smartRouteDisclosure'
                       'For routing and diagnostics, the app locally processes DNS requests, destination addresses, traffic totals, and connection state. Diagnostic data is not automatically sent to the developer or used for advertising. The selected VPN server operator may process network traffic under its own policy.\n\n'
                       'The VPN will not connect without your explicit consent.',
           ),
@@ -2313,8 +2787,259 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _profiles,
       selectedProfileId: _selectedProfileId,
       pingMs: _profilePingMs,
-      offlineProfileIds: _profilePingError.keys.toSet(),
+      // A failed TLS diagnostic is not proof that a VPN protocol is offline.
+      offlineProfileIds: {
+        for (final profile in _profiles)
+          if (ProtocolTestMetadata.profile(profile)['offlineMarked'] == true)
+            profile.id,
+      },
       stabilityStats: _profileStabilityStats,
+    );
+  }
+
+  bool get _canMeasureDirectLatency =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.android &&
+      _uiForeground &&
+      _status == AurumVpnStatus.stopped &&
+      !_busy &&
+      !_connectionQueueActive &&
+      _killSwitchState.supported &&
+      _killSwitchState.known &&
+      !_killSwitchState.vpnActive &&
+      !_smartRoutePausedByKillSwitch;
+
+  void _cancelDirectLatency({bool clearReadings = false}) {
+    _directLatencyProbe?.close();
+    _directLatencyProbe = null;
+    if (clearReadings) _directReadings.clear();
+  }
+
+  Future<bool> _confirmDirectLatency({bool fromSettings = false}) async {
+    if (_directLatencyAllowed == true) return true;
+    if (_directConsentVisible ||
+        (!fromSettings && _directLatencyAllowed == false)) {
+      return false;
+    }
+    _directConsentVisible = true;
+    try {
+      final choice = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(s.directLatencySetting),
+          content: Text(s.directLatencyConsent),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(s.withoutDirectLatency),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(s.allowDirectLatency),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || choice == null) return false;
+      final saved = await _saveDirectLatencyChoice(choice);
+      if (!mounted) return false;
+      setState(() => _directLatencyAllowed = saved && choice);
+      return saved && choice;
+    } finally {
+      _directConsentVisible = false;
+    }
+  }
+
+  Future<void> _changeDirectLatency(bool enabled) async {
+    if (enabled) {
+      await _confirmDirectLatency(fromSettings: true);
+    } else {
+      setState(() {
+        _directLatencyAllowed = false;
+        _cancelDirectLatency(clearReadings: true);
+      });
+      await _saveDirectLatencyChoice(false);
+    }
+  }
+
+  Future<bool> _saveDirectLatencyChoice(bool enabled) async {
+    try {
+      if (await _store.saveDirectLatencyAllowed(enabled)) return true;
+    } on Object {
+      // No probe is allowed if consent persistence failed.
+    }
+    if (mounted) _showSnack(s.directLatencySaveFailed);
+    return false;
+  }
+
+  Future<void> _chooseAutomaticMode() async {
+    if (_preparingAutoConnect || _automaticProfileSelection) return;
+    await _store.saveAutomaticProfileSelection(true);
+    if (!mounted) return;
+    setState(() {
+      _automaticProfileSelection = true;
+      _vpnUiCommandFailed = false;
+      if (!_connected) _message = s.automaticServerHint;
+    });
+  }
+
+  Future<Map<String, int>> _measureDirectLatency(
+    List<VpnProfile> profiles, {
+    required bool automatic,
+  }) async {
+    if (!_canMeasureDirectLatency ||
+        _directLatencyAllowed != true ||
+        _directLatencyProbe != null) {
+      return const {};
+    }
+    final now = DateTime.now();
+    final candidates = profiles
+        .where(
+          (profile) =>
+              DirectLatencyProbe.eligible(profile) &&
+              !ProtocolTestMetadata.isOfflineMarked(profile) &&
+              !(profile.subscriptionExpiresAt?.isBefore(now) ?? false),
+        )
+        .take(automatic ? 48 : 64)
+        .toList(growable: false);
+    if (candidates.isEmpty) return const {};
+
+    final probe = DirectLatencyProbe();
+    final readings = <String, DirectLatencyReading>{};
+    final generation = _sessionController.generation;
+    bool current() =>
+        mounted &&
+        identical(_directLatencyProbe, probe) &&
+        _sessionController.generation == generation &&
+        _canMeasureDirectLatency &&
+        _directLatencyAllowed == true;
+    setState(() => _directLatencyProbe = probe);
+    try {
+      final network = await probe.network();
+      if (network == null || !current()) return const {};
+      final clock = Stopwatch()..start();
+      final budget = automatic
+          ? const Duration(seconds: 5)
+          : const Duration(seconds: 12);
+      var index = 0;
+      Future<void> worker() async {
+        while (current() &&
+            clock.elapsed < budget &&
+            index < candidates.length) {
+          final profile = candidates[index++];
+          final reading = await probe.check(
+            profile,
+            networkKey: network,
+            stillAllowed: current,
+          );
+          if (current() && reading != null && clock.elapsed <= budget) {
+            readings[profile.id] = reading;
+          }
+        }
+      }
+
+      await Future.wait(List.generate(8, (_) => worker())).timeout(
+        budget,
+        onTimeout: () {
+          probe.close();
+          return <void>[];
+        },
+      );
+      final gate = DirectLatencyProbe();
+      final stillOnNetwork = await gate.network() == network;
+      gate.close();
+      if (!current() || !stillOnNetwork) return const {};
+      setState(() {
+        if (_probePhysicalNetwork != network) _directReadings.clear();
+        _probePhysicalNetwork = network;
+        for (final profile in candidates) {
+          final value = readings[profile.id];
+          if (value == null) {
+            _directReadings.remove(profile.id);
+          } else {
+            _directReadings[profile.id] = (
+              reading: value,
+              network: network,
+              at: DateTime.now(),
+            );
+          }
+        }
+      });
+      return readings.map((id, value) => MapEntry(id, value.milliseconds));
+    } finally {
+      probe.close();
+      if (mounted && identical(_directLatencyProbe, probe)) {
+        setState(() => _directLatencyProbe = null);
+      }
+    }
+  }
+
+  Future<List<VpnProfile>> _chooseAutomaticProfiles(
+    VpnSessionOperation operation,
+  ) async {
+    setState(() {
+      _autoConnectPreparation = operation;
+      _message = s.choosingAutoServer;
+      _vpnUiCommandFailed = false;
+    });
+    try {
+      final originalProfiles = _profiles;
+      final initial = _rankAutomaticProfiles(originalProfiles);
+      final measurements =
+          initial.isNotEmpty &&
+              _canMeasureDirectLatency &&
+              await _confirmDirectLatency() &&
+              _sessionController.isCurrent(operation)
+          ? await _measureDirectLatency(initial, automatic: true)
+          : const <String, int>{};
+      if (!mounted ||
+          !_sessionController.isCurrent(operation) ||
+          !_uiForeground ||
+          !_automaticProfileSelection) {
+        return const [];
+      }
+      final currentProfiles = _profiles;
+      final currentMeasurements = identical(originalProfiles, currentProfiles)
+          ? measurements
+          : const <String, int>{};
+      return _rankAutomaticProfiles(
+        currentProfiles,
+        measurements: currentMeasurements,
+      );
+    } finally {
+      if (mounted && identical(_autoConnectPreparation, operation)) {
+        setState(() => _autoConnectPreparation = null);
+      }
+    }
+  }
+
+  List<VpnProfile> _rankAutomaticProfiles(
+    List<VpnProfile> profiles, {
+    Map<String, int> measurements = const {},
+    String? networkType,
+  }) {
+    final eligible = profiles
+        .where((profile) => _profileConnectBlockReason(profile) == null)
+        .toList(growable: false);
+    return orderAutoFailoverCandidates(
+      _autoSelector.rankForLatency(
+        eligible,
+        preferCurrentNetwork: true,
+        directLatencyMs: measurements,
+        offlineProfileIds: {
+          for (final profile in eligible)
+            if (ProtocolTestMetadata.isOfflineMarked(profile)) profile.id,
+        },
+        networkStats: {
+          for (final profile in eligible)
+            profile.id: _profileNetworkStabilityFor(
+              profile.id,
+              networkType: networkType,
+            ),
+        },
+        lastProfileId: _selectedProfileId,
+      ),
+      locationOf: _profileCountryCode,
     );
   }
 
@@ -2448,7 +3173,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     VpnProfile profile, {
     required VpnSessionOperation operation,
     bool rapidRestart = false,
+    bool allowInProcessReload = true,
     bool crossEngineRestart = false,
+    bool invalidatePendingStart = false,
+    LocalConnectionIncidentAttempt? incident,
+    _AutoPhysicalNetwork? autoNetwork,
   }) async {
     _sessionController.ensureCurrent(operation);
     final blockReason = _profileConnectBlockReason(profile);
@@ -2461,23 +3190,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       engine: engineSelection.engine,
       rapidRestart: rapidRestart,
       crossEngineRestart: crossEngineRestart,
+      automaticFailover: autoNetwork != null,
     );
 
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
-    final status = await _refreshVpnStatus(
-      operation: operation,
-      allowCachedOnError: false,
-    );
+    final status = invalidatePendingStart
+        ? AurumVpnStatus.stopping
+        : await _refreshVpnStatus(
+            operation: operation,
+            allowCachedOnError: false,
+          );
     var useInProcessReload =
-        rapidRestart && !crossEngineRestart && status == AurumVpnStatus.started;
-    if (status != AurumVpnStatus.stopped && !useInProcessReload) {
+        rapidRestart &&
+        allowInProcessReload &&
+        !crossEngineRestart &&
+        !invalidatePendingStart &&
+        status == AurumVpnStatus.started;
+    if (invalidatePendingStart ||
+        (status != AurumVpnStatus.stopped && !useInProcessReload)) {
+      incident?.observedStart(
+        profile,
+        _networkChanging ? 'unknown' : _networkType,
+      );
       final stopped = await _stopVpnCore(
         updateMessage: false,
         operation: operation,
         stopCallTimeout: reconnectPolicy.stopCallTimeout,
         stopStatusTimeout: reconnectPolicy.stopStatusTimeout,
+        invalidatePendingStart: invalidatePendingStart,
       );
       if (!stopped) {
+        incident?.signal = IncidentSignal.stopTimeout;
         throw TimeoutException(
           s.vpnStopTimeout(_status),
           reconnectPolicy.stopStatusTimeout,
@@ -2510,6 +3253,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _idleRecoveryCount = 0;
     _tunnelHealthFailures = 0;
     await _bestEffortNative('clearLogs', _vpnEngine.clearLogs());
+    _sessionController.ensureCurrent(operation);
 
     if (!reconnectPolicy.isRapid) {
       await _bestEffortNative(
@@ -2529,6 +3273,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     ).take(reconnectPolicy.maxPlans).toList(growable: false);
     final smartRouteBypassPackages = await _smartRouteBypassPackages();
     _sessionController.ensureCurrent(operation);
+    final managedSmartRoute =
+        _smartRouteRuDirect && SmartRouteAppsService.managedProfile(profile);
+    final managedHermes =
+        _localIncidents.hermesDeliveryAvailable &&
+        !widget.tvMode &&
+        profile.kind == VpnProfileKind.vlessXhttp &&
+        profile.rawConfig == null &&
+        engineSelection.engine == VpnCoreEngine.xray;
+    Future<void> saveRuntimeConfig(
+      String config,
+      Duration timeout, {
+      String label = 'saveConfig',
+    }) async {
+      _sessionController.ensureCurrent(operation);
+      final saved = await _nativeCall(
+        label,
+        managedSmartRoute || managedHermes
+            ? _smartRouteApps.saveManagedConfig(
+                config,
+                smartRouteApps: managedSmartRoute,
+                hermesManagedXhttp: managedHermes,
+              )
+            : _vpnEngine.saveConfig(config),
+        timeout: timeout,
+      );
+      _sessionController.ensureCurrent(operation);
+      if (!saved) throw StateError(s.configSaveFailed);
+    }
 
     for (
       var planIndex = 0;
@@ -2536,6 +3308,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       planIndex += 1
     ) {
       _sessionController.ensureCurrent(operation);
+      incident?.signal = IncidentSignal.unknown;
       final attemptClock = Stopwatch()..start();
       final plan = plans[planIndex];
       final config = _buildRuntimeConfig(
@@ -2547,18 +3320,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         config,
         target: _vpnEngine.configTarget,
       );
-      final saved = await _nativeCall(
-        'saveConfig',
-        _vpnEngine.saveConfig(config),
-        timeout: _reconnectPhaseTimeout(
-          reconnectPolicy,
-          attemptClock,
-          reconnectPolicy.configTimeout,
-        ),
-      );
-      if (!saved) {
-        throw StateError(s.configSaveFailed);
+      if (autoNetwork != null) {
+        await _ensureAutoPhysicalNetwork(operation, autoNetwork);
       }
+      final configTimeout = _reconnectPhaseTimeout(
+        reconnectPolicy,
+        attemptClock,
+        reconnectPolicy.configTimeout,
+      );
+      await saveRuntimeConfig(config, configTimeout);
 
       for (
         var attempt = 1;
@@ -2570,9 +3340,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           setState(() {
             _selectedProfileId = profile.id;
             _lastError = null;
-            _message = plans.length > 1
-                ? '${s.connectingStatus(profile.name)} · ${plan.label}'
-                : s.connectingStatus(profile.name);
+            if (autoNetwork == null) {
+              _message = plans.length > 1
+                  ? '${s.connectingStatus(profile.name)} · ${plan.label}'
+                  : s.connectingStatus(profile.name);
+            }
             _uplink = '0 B/s';
             _downlink = '0 B/s';
             _sessionTotal = '0 B';
@@ -2582,21 +3354,47 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
         final reloadInProcess = useInProcessReload;
         useInProcessReload = false;
+        if (autoNetwork != null) {
+          await _ensureAutoPhysicalNetwork(operation, autoNetwork);
+        }
+        final startTimeout = _reconnectPhaseTimeout(
+          reconnectPolicy,
+          attemptClock,
+          reconnectPolicy.startCallTimeout,
+        );
+        incident?.observedStart(
+          profile,
+          _networkChanging ? 'unknown' : _networkType,
+        );
         bool started;
         try {
           started = await _nativeCall(
             reloadInProcess ? 'reloadVPN' : 'startVPN',
             reloadInProcess ? _vpnEngine.reloadVPN() : _vpnEngine.startVPN(),
-            timeout: _reconnectPhaseTimeout(
-              reconnectPolicy,
-              attemptClock,
-              reconnectPolicy.startCallTimeout,
-            ),
+            timeout: startTimeout,
           );
           _sessionController.ensureCurrent(operation);
+          if (!started) incident?.signal = IncidentSignal.startFailed;
         } on VpnSessionCancelled {
           rethrow;
         } on Object catch (error) {
+          _sessionController.ensureCurrent(operation);
+          incident?.observedStartError(error);
+          if (autoNetwork != null) {
+            // An Android permission/command error is not an unavailable
+            // server. Do not rotate or keep re-prompting the user.
+            if (error is! PlatformException ||
+                (error.code != 'VPN_PERMISSION_DENIED' &&
+                    error.code != 'VPN_PERMISSION_PENDING' &&
+                    error.code != 'STOP_IN_PROGRESS' &&
+                    error.code != 'START_CANCELLED')) {
+              await _confirmAutoAttemptStopped(
+                operation,
+                invalidatePendingStart: true,
+              );
+            }
+            rethrow;
+          }
           started = false;
           lastStartError = _redactSensitive('$error');
         }
@@ -2608,6 +3406,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               elapsed: attemptClock.elapsed,
             ),
             operation: operation,
+            autoNetwork: autoNetwork,
           );
           if (finalStatus == AurumVpnStatus.started) {
             _sessionController.ensureCurrent(operation);
@@ -2624,15 +3423,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               reconnectPolicy.startupProbeTimeout,
               elapsed: attemptClock.elapsed,
             );
-            final probePassed = await _sessionController.cancelWhenSuperseded(
-              operation,
-              _probeLocalMixedProxy(attempts: 1).timeout(
-                probeTimeout,
-                onTimeout: () {
-                  _queueLog('Startup proxy probe timed out.');
-                  return false;
-                },
-              ),
+            final probePassed = await _probeLocalMixedProxy(
+              attempts: 1,
+              timeout: probeTimeout,
+              operation: operation,
             );
             _sessionController.ensureCurrent(operation);
             if (probePassed) {
@@ -2640,6 +3434,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               successfulPlanLabel = plan.label;
               break;
             } else {
+              incident?.signal = IncidentSignal.trafficCheckFailed;
               lastStartError = s.vpnStartFailed;
               _queueLog(
                 'Startup proxy probe failed for ${profile.kind.name}; '
@@ -2647,6 +3442,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               );
             }
           } else {
+            incident?.signal = IncidentSignal.startTimeout;
             lastStartError = s.vpnNotConnected(finalStatus);
           }
         } else {
@@ -2663,8 +3459,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             operation: operation,
             stopCallTimeout: reconnectPolicy.stopCallTimeout,
             stopStatusTimeout: reconnectPolicy.stopStatusTimeout,
+            // A start that did not become ready can still have a late native
+            // command or recovery pending. Fence it even if status is Stopped.
+            invalidatePendingStart: true,
           );
           if (!stopped) {
+            incident?.signal = IncidentSignal.stopTimeout;
             throw TimeoutException(
               s.vpnStopTimeout(_status),
               reconnectPolicy.stopStatusTimeout,
@@ -2672,14 +3472,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           }
           if (attempt < reconnectPolicy.maxAttemptsPerPlan) {
             await _delayForOperation(reconnectPolicy.retryDelay, operation);
-            await _bestEffortNative(
-              'saveConfig retry',
-              _vpnEngine.saveConfig(config),
-              timeout: _reconnectPhaseTimeout(
-                reconnectPolicy,
-                attemptClock,
-                _nativeConfigTimeout,
-              ),
+            final retryConfigTimeout = _reconnectPhaseTimeout(
+              reconnectPolicy,
+              attemptClock,
+              _nativeConfigTimeout,
+            );
+            // Saving through the unmanaged path clears the per-app binding.
+            await saveRuntimeConfig(
+              config,
+              retryConfigTimeout,
+              label: 'saveConfig retry',
             );
           }
           _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 14));
@@ -2693,26 +3495,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     if (!connected) {
+      if (autoNetwork != null) throw const _AutoCandidateUnavailable();
       throw StateError('${lastStartError ?? s.vpnStartFailed}');
     }
+    if (autoNetwork != null) {
+      await _ensureAutoPhysicalNetwork(operation, autoNetwork);
+    }
+    // A later local preference write is not a connection failure.
+    incident?.observedSuccess();
     if (successfulPlanLabel != null) {
       _lastSuccessfulPlanByProfileId[profile.id] = successfulPlanLabel;
     }
 
     _sessionController.ensureCurrent(operation);
     await _delayForOperation(
-      rapidRestart
-          ? const Duration(milliseconds: 100)
+      reconnectPolicy.isRapid
+          ? Duration.zero
           : const Duration(milliseconds: 250),
       operation,
     );
     _sessionController.ensureCurrent(operation);
     await _store.saveSelectedProfileId(profile.id);
+    _sessionController.ensureCurrent(operation);
     if (mounted) {
       final connectedAt = DateTime.now();
       setState(() {
         _selectedProfileId = profile.id;
+        _unconfirmedSwitchProfileId = null;
         _lastError = null;
+        _vpnUiCommandFailed = false;
         _tunnelHealthFailures = 0;
         _autoRecoveryArmed = true;
         _connectedSince = connectedAt;
@@ -2734,7 +3545,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         (stats) => stats.recordStartSuccess(),
       ),
     );
-    unawaited(_refreshConnectedCountry(profile.id));
+    unawaited(_refreshConnectedCountry(profile.id, operation));
   }
 
   String? _profileConnectBlockReason(VpnProfile profile) {
@@ -2746,21 +3557,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return s.unsupportedProtocol(profile.kind);
     }
 
-    return null;
+    return TlsPinPolicy.profileError(profile);
   }
 
-  Future<void> _disconnect() async {
+  Future<void> _disconnect({bool invalidatePendingStart = false}) async {
     final operation = _sessionController.beginDisconnect();
     _autoRecoveryArmed = false;
-    await _store.saveManualDisconnectRequested(true);
-    if (!mounted) {
-      return;
-    }
     setState(() {
       _manualDisconnectRequested = true;
+      _message = s.disconnectingVpn;
     });
     await _runQueuedBusy(operation, () async {
-      await _stopVpnCore(operation: operation);
+      await _store.saveManualDisconnectRequested(true);
+      _sessionController.ensureCurrent(operation);
+      await _stopVpnCore(
+        operation: operation,
+        invalidatePendingStart: invalidatePendingStart,
+      );
     }, message: s.disconnectingVpn);
   }
 
@@ -2793,7 +3606,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     bool updateMessage = true,
     VpnSessionOperation? operation,
     Duration stopCallTimeout = const Duration(seconds: 5),
-    Duration stopStatusTimeout = const Duration(seconds: 20),
+    Duration stopStatusTimeout = VpnReconnectPolicy.nativeStopStatusTimeout,
+    bool invalidatePendingStart = false,
   }) async {
     if (operation != null) {
       _sessionController.ensureCurrent(operation);
@@ -2804,22 +3618,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() => _lastError = null);
     }
     try {
-      final status = await _refreshVpnStatus(
-        operation: operation,
-        allowCachedOnError: false,
-      );
+      // A forced cancellation must send stop even before Android reports a
+      // service. The authoritative status check follows the stop request.
+      final status = invalidatePendingStart
+          ? AurumVpnStatus.stopping
+          : await _refreshVpnStatus(
+              operation: operation,
+              allowCachedOnError: false,
+            );
       if (operation != null) {
         _sessionController.ensureCurrent(operation);
       }
       var nativeStopped = status == AurumVpnStatus.stopped;
-      if (status != AurumVpnStatus.stopped) {
-        await _vpnEngine.stopVPN().timeout(
-          stopCallTimeout,
-          onTimeout: () {
-            _queueLog('Native call timeout [stopVPN]');
-            return true;
-          },
-        );
+      if (invalidatePendingStart || status != AurumVpnStatus.stopped) {
+        try {
+          await _vpnEngine.stopVPN().timeout(
+            stopCallTimeout,
+            onTimeout: () {
+              _queueLog('Native call timeout [stopVPN]');
+              return true;
+            },
+          );
+        } on PlatformException catch (error) {
+          if (error.code != 'STOP_VPN_ERROR') rethrow;
+          // Native requested cleanup even if its acknowledgement failed.
+          // Only the later authoritative Stopped result permits another start.
+          _queueLog(
+            'VPN stop acknowledgement failed; waiting for service exit',
+          );
+        }
         if (operation != null) {
           _sessionController.ensureCurrent(operation);
         }
@@ -2835,6 +3662,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             final error = s.vpnStopTimeout(stoppedStatus);
             setState(() {
               _lastError = error;
+              _vpnUiCommandFailed = true;
+              _rememberVpnFailure(error, 'disconnect');
               _message = error;
             });
           }
@@ -2842,7 +3671,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
         // Stopped is emitted only after the native runtime has released the
         // active tunnel. A short guard is enough before saving the next config.
-        await Future<void>.delayed(const Duration(milliseconds: 150));
+        if (operation != null) {
+          await _delayForOperation(
+            const Duration(milliseconds: 150),
+            operation,
+          );
+        } else {
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        }
       }
 
       if (nativeStopped && mounted) {
@@ -2867,6 +3703,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           }
           _lastError = null;
           if (updateMessage) {
+            _vpnUiCommandFailed = false;
             _message = s.vpnStopped;
           }
         });
@@ -2914,6 +3751,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               (status == AurumVpnStatus.started &&
                   _lastRecoverySource != null))) {
         setState(() {
+          if (_status != status) _invalidateProfileProbes();
           _status = status;
           if (status == AurumVpnStatus.started) {
             _clearRecoveredStopMessage();
@@ -2947,13 +3785,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     Set<String> expected, {
     required Duration timeout,
     VpnSessionOperation? operation,
+    _AutoPhysicalNetwork? autoNetwork,
   }) async {
     if (operation != null) {
       _sessionController.ensureCurrent(operation);
     }
     final deadline = DateTime.now().add(timeout);
+    final routeClock = Stopwatch()..start();
+    var nextRouteCheck = Duration.zero;
     var latest = _status;
     while (DateTime.now().isBefore(deadline)) {
+      if (autoNetwork != null &&
+          operation != null &&
+          routeClock.elapsed >= nextRouteCheck) {
+        await _ensureAutoPhysicalNetwork(operation, autoNetwork);
+        nextRouteCheck = routeClock.elapsed + const Duration(seconds: 1);
+      }
       latest = await _refreshVpnStatus(
         operation: operation,
         allowCachedOnError: operation == null,
@@ -3108,6 +3955,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     setState(() {
       _lastError = s.vpnStoppedUnexpectedly;
       _lastRecoverySource = source;
+      _rememberVpnFailure('unexpected-stop', 'runtime');
       _message = profile == null
           ? s.openLogsMessage
           : '${s.vpnStoppedUnexpectedly}. ${s.connectingStatus(profile.name)}';
@@ -3320,78 +4168,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<bool> _probeLocalMixedProxy({
     int attempts = 2,
     bool logFailures = true,
+    Duration? timeout,
+    VpnSessionOperation? operation,
   }) async {
-    final endpoints = <({Uri uri, int expectedStatus})>[
-      (
-        uri: Uri.https('www.cloudflare.com', '/cdn-cgi/trace'),
-        expectedStatus: 200,
-      ),
-      (
-        uri: Uri.https('connectivitycheck.gstatic.com', '/generate_204'),
-        expectedStatus: 204,
-      ),
-      (uri: Uri.https('www.google.com', '/generate_204'), expectedStatus: 204),
-    ];
+    final probe = LocalProxyHealthProbe(
+      proxyPort: SingBoxConfigBuilder.localMixedProxyPort,
+      userAgent: 'YurichConnect/$_appVersion',
+      onFailure: logFailures
+          ? (message) => _queueLog(_redactSensitive(message))
+          : null,
+    );
 
-    for (var attempt = 1; attempt <= attempts; attempt += 1) {
-      final healthy = await firstSuccessfulFuture(
-        endpoints.map(
-          (endpoint) =>
-              _probeLocalMixedProxyEndpoint(endpoint, logFailures: logFailures),
-        ),
-      );
-      if (healthy) {
-        return true;
-      }
-
-      if (attempt < attempts) {
-        await Future<void>.delayed(const Duration(milliseconds: 700));
-      }
-    }
-
-    return false;
-  }
-
-  Future<bool> _probeLocalMixedProxyEndpoint(
-    ({Uri uri, int expectedStatus}) endpoint, {
-    required bool logFailures,
-  }) async {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 5)
-      ..findProxy = (_) =>
-          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
     try {
-      final request = await client
-          .getUrl(endpoint.uri)
-          .timeout(const Duration(seconds: 5));
-      request.headers.set(
-        HttpHeaders.userAgentHeader,
-        'YurichConnect/$_appVersion',
-      );
-      request.followRedirects = false;
-      final response = await request.close().timeout(
-        const Duration(seconds: 7),
-      );
-      await response.drain<void>().timeout(
-        const Duration(seconds: 3),
-        onTimeout: () {},
-      );
-      if (response.statusCode == endpoint.expectedStatus) {
-        return true;
+      for (var attempt = 1; attempt <= attempts; attempt += 1) {
+        if (operation != null) _sessionController.ensureCurrent(operation);
+        final check = probe.check(timeout: timeout);
+        final healthy = operation == null
+            ? await check
+            : await _sessionController.cancelWhenSuperseded(operation, check);
+        if (healthy) return true;
+
+        if (attempt < attempts) {
+          if (operation == null) {
+            await Future<void>.delayed(const Duration(milliseconds: 700));
+          } else {
+            await _delayForOperation(
+              const Duration(milliseconds: 700),
+              operation,
+            );
+          }
+        }
       }
-      if (logFailures) {
-        _queueLog(
-          'VPN health probe HTTP ${response.statusCode}: ${endpoint.uri}',
-        );
-      }
-    } on Object catch (error) {
-      if (logFailures) {
-        _queueLog('VPN health probe failed: ${_redactSensitive('$error')}');
-      }
+      return false;
     } finally {
-      client.close(force: true);
+      probe.close();
     }
-    return false;
   }
 
   Future<void> _pingProfiles(
@@ -3399,6 +4210,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     bool force = false,
   }) async {
     if (_pingAllInFlight || profiles.isEmpty) {
+      return;
+    }
+    if (_status != AurumVpnStatus.started || _busy || _connectionQueueActive) {
+      if (force) {
+        _showSnack(
+          _language == _AppLanguage.ru
+              ? 'Для проверки нужен работающий VPN.'
+              : 'Connect to a working VPN first.',
+        );
+      }
       return;
     }
     if (_connected && !force) {
@@ -3427,10 +4248,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return aSelected ? -1 : 1;
       });
 
+    final epoch = _profileProbeEpoch;
     _pingAllInFlight = true;
     try {
       for (final batch in fixedSizeBatches(orderedProfiles, size: 4)) {
-        if (!mounted) {
+        if (!mounted || epoch != _profileProbeEpoch) {
           return;
         }
         await Future.wait(
@@ -3443,115 +4265,100 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _invalidateProfileProbes() {
+    _cancelDirectLatency();
+    _profileProbeEpoch += 1;
+    for (final cancel in _activeProfileProbeCancels.toList(growable: false)) {
+      cancel();
+    }
+    _activeProfileProbeCancels.clear();
+    _profilePingMs.clear();
+    _profileProbeResults.clear();
+    _profilePingCheckedAt.clear();
+    _profilePingBusy.clear();
+  }
+
   Future<void> _pingProfile(VpnProfile profile, {bool force = false}) async {
-    final server = profile.server?.trim();
-    final port = profile.port ?? 443;
-    if (server == null || server.isEmpty || port <= 0) {
+    if (!mounted || _profilePingBusy[profile.id] == true) return;
+    if (_status != AurumVpnStatus.started || _busy || _connectionQueueActive) {
       return;
     }
-    if (_profilePingBusy[profile.id] == true) {
-      return;
-    }
-    if (_connected && !force) {
-      if (mounted) {
-        setState(() {
-          _profilePingBusy.remove(profile.id);
-          _profilePingError.remove(profile.id);
-        });
-      }
+    // Custom runtime routes cannot attest that the loopback inbound is proxied.
+    if (_explicitSelectedProfile?.kind.isClientSupported != true ||
+        _selectedProfileId == _unconfirmedSwitchProfileId) {
       return;
     }
     final checkedAt = _profilePingCheckedAt[profile.id];
+    final previous = _profileProbeResults[profile.id];
+    final cacheTtl = previous?.milliseconds != null
+        ? _profilePingCacheTtl
+        : const Duration(seconds: 30);
     if (!force &&
         checkedAt != null &&
-        DateTime.now().difference(checkedAt) < _profilePingCacheTtl) {
+        DateTime.now().difference(checkedAt) < cacheTtl) {
       return;
     }
-
-    if (mounted) {
-      setState(() {
-        _profilePingBusy[profile.id] = true;
-        _profilePingError.remove(profile.id);
-      });
+    final epoch = _profileProbeEpoch;
+    final generation = _sessionController.generation;
+    final selectedId = _selectedProfileId;
+    bool current() =>
+        mounted &&
+        epoch == _profileProbeEpoch &&
+        generation == _sessionController.generation &&
+        selectedId == _selectedProfileId &&
+        _status == AurumVpnStatus.started;
+    setState(() => _profilePingBusy[profile.id] = true);
+    final stopwatch = Stopwatch()..start();
+    final probe = ProxyServerProbe(
+      proxyPort: SingBoxConfigBuilder.localMixedProxyPort,
+    );
+    final health = LocalProxyHealthProbe(
+      proxyPort: SingBoxConfigBuilder.localMixedProxyPort,
+      userAgent: 'YurichConnect/ServerCheck',
+    );
+    void cancel() {
+      probe.close();
+      health.close();
     }
 
-    final stopwatch = Stopwatch()..start();
-    Socket? socket;
+    _activeProfileProbeCancels.add(cancel);
     try {
-      if (_usesUdpEndpoint(profile)) {
-        final addresses = await InternetAddress.lookup(
-          server,
-        ).timeout(const Duration(seconds: 4));
-        if (addresses.isEmpty) {
-          throw const SocketException('DNS lookup returned no addresses');
-        }
-        stopwatch.stop();
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _profilePingMs.remove(profile.id);
-          _profilePingText[profile.id] = stopwatch.elapsedMilliseconds <= 1
-              ? 'DNS ok'
-              : 'DNS ${stopwatch.elapsedMilliseconds} ms';
-          _profilePingError.remove(profile.id);
-        });
-        if (profile.id == _selectedProfileId) {
-          unawaited(_syncConnectionNotification());
-        }
-        return;
+      ServerProbeResult result;
+      if (ProtocolTestMetadata.profile(profile)['offlineMarked'] == true) {
+        result = const ServerProbeResult(ServerProbeState.offlineMarked);
+      } else if (profile.id == selectedId) {
+        // Measure a real HTTPS request through the active tunnel. A separate
+        // TLS handshake to the VPN endpoint is not a test of this tunnel.
+        final healthy = await health.check(timeout: const Duration(seconds: 8));
+        result = healthy
+            ? ServerProbeResult(
+                ServerProbeState.tunnelHealthy,
+                stopwatch.elapsedMilliseconds.clamp(1, 8000),
+              )
+            : const ServerProbeResult(ServerProbeState.noResponse);
+      } else if (ServerProbeTarget.usesUdp(profile)) {
+        result = const ServerProbeResult(ServerProbeState.needsConnection);
+      } else {
+        final target = ServerProbeTarget.fromProfile(profile);
+        result = target == null
+            ? const ServerProbeResult(ServerProbeState.unsupported)
+            : await probe.check(target);
       }
-
-      Object? connectError;
-      for (var attempt = 0; attempt < 2; attempt++) {
-        stopwatch
-          ..reset()
-          ..start();
-        try {
-          socket = await Socket.connect(
-            server,
-            port,
-            timeout: const Duration(seconds: 4),
-          );
-          connectError = null;
-          break;
-        } on Object catch (error) {
-          connectError = error;
-          socket?.destroy();
-          socket = null;
-          if (attempt == 0) {
-            await Future<void>.delayed(const Duration(milliseconds: 300));
-          }
-        }
-      }
-      if (socket == null) {
-        throw connectError ?? const SocketException('TCP probe failed');
-      }
-      stopwatch.stop();
-      if (!mounted) {
-        return;
-      }
+      if (!current() || result.state == ServerProbeState.cancelled) return;
       setState(() {
-        _profilePingMs[profile.id] = stopwatch.elapsedMilliseconds;
-        _profilePingText.remove(profile.id);
-        _profilePingError.remove(profile.id);
+        _profileProbeResults[profile.id] = result;
+        _profilePingCheckedAt[profile.id] = DateTime.now();
+        _profilePingMs.remove(profile.id);
+        final milliseconds = result.milliseconds;
+        if (milliseconds != null) _profilePingMs[profile.id] = milliseconds;
       });
       if (profile.id == _selectedProfileId) {
         unawaited(_syncConnectionNotification());
       }
-    } on Object catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _profilePingMs.remove(profile.id);
-        _profilePingText.remove(profile.id);
-        _profilePingError[profile.id] = _redactSensitive('$error');
-      });
     } finally {
-      socket?.destroy();
-      _profilePingCheckedAt[profile.id] = DateTime.now();
-      if (mounted) {
+      cancel();
+      _activeProfileProbeCancels.remove(cancel);
+      if (current()) {
         setState(() => _profilePingBusy[profile.id] = false);
       }
     }
@@ -3561,32 +4368,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (_profilePingBusy[profile.id] == true) {
       return '...';
     }
-    final text = _profilePingText[profile.id];
-    if (text != null) {
-      return text;
-    }
-    final ms = _profilePingMs[profile.id];
-    if (ms != null) {
-      return '$ms ms';
-    }
-    if (_profilePingError.containsKey(profile.id)) {
+    if (ProtocolTestMetadata.profile(profile)['offlineMarked'] == true) {
       return 'offline';
     }
-    return 'ping';
-  }
-
-  bool _usesUdpEndpoint(VpnProfile profile) {
-    if (profile.kind == VpnProfileKind.hysteria ||
-        profile.kind == VpnProfileKind.hysteria2) {
-      return true;
+    if (_status != AurumVpnStatus.started) {
+      return const ServerProbeResult(
+        ServerProbeState.needsVpn,
+      ).label(russian: _language == _AppLanguage.ru);
     }
-
-    final outbound = profile.outbound;
-    if (outbound == null) {
-      return false;
-    }
-    final type = outbound['type']?.toString().toLowerCase();
-    return type == 'hysteria' || type == 'hysteria2' || type == 'hy2';
+    return (_profileProbeResults[profile.id] ??
+            const ServerProbeResult(ServerProbeState.cancelled))
+        .label(russian: _language == _AppLanguage.ru);
   }
 
   Future<void> _resolveProfileCountries(List<VpnProfile> profiles) async {
@@ -3600,8 +4392,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (!mounted) {
           return;
         }
-        if (_leadingFlag(profile.name) != null ||
-            (profile.countryCode ?? '').trim().isNotEmpty) {
+        if (ProfileCountryResolver.hasDeclaredCountry(profile) ||
+            ProfileGeo.countryCodeToFlag(profile.countryCode) != null) {
           continue;
         }
 
@@ -3616,58 +4408,73 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _refreshConnectedCountry(String profileId) async {
-    await Future<void>.delayed(const Duration(milliseconds: 1400));
-    if (!mounted || _status != AurumVpnStatus.started) {
+  Future<void> _refreshConnectedCountry(
+    String profileId,
+    VpnSessionOperation operation,
+  ) async {
+    bool isCurrent() =>
+        mounted &&
+        _status == AurumVpnStatus.started &&
+        _selectedProfileId == profileId &&
+        _sessionController.isCurrent(operation);
+    final index = _profiles.indexWhere((profile) => profile.id == profileId);
+    if (index < 0 ||
+        ProfileCountryResolver.hasDeclaredCountry(_profiles[index])) {
       return;
     }
-
-    final geo = await _geoService.resolveExitCountryThroughTunnel();
-    if (geo != null) {
-      final index = _profiles.indexWhere((profile) => profile.id == profileId);
-      final profile = index < 0 ? null : _profiles[index];
-      if (profile != null &&
-          ProfileCountryResolver.hasDeclaredCountry(profile)) {
-        _queueLog(
-          'Geo: exit country ${geo.countryCode}'
-          '${geo.ip == null ? '' : ' via ${geo.ip}'}; '
-          'profile country preserved',
-        );
-        return;
-      }
-
-      await _saveProfileCountry(profileId, geo);
-      _queueLog(
-        'Geo: exit country ${geo.countryCode}'
-        '${geo.ip == null ? '' : ' via ${geo.ip}'}',
+    final source = _profiles[index].originalInput;
+    final cancellation = ProfileGeoCancellation();
+    try {
+      await _delayForOperation(const Duration(milliseconds: 1400), operation);
+      if (!isCurrent()) return;
+      final geo = await _sessionController.cancelWhenSuperseded(
+        operation,
+        _geoService.resolveExitCountryThroughTunnel(cancellation: cancellation),
       );
+      if (!isCurrent() || geo == null) return;
+      final current = _profiles.indexWhere(
+        (profile) => profile.id == profileId,
+      );
+      if (current < 0 || _profiles[current].originalInput != source) return;
+      await _saveProfileCountry(profileId, geo);
+      _queueLog('Geo: exit country ${geo.countryCode}');
+    } on VpnSessionCancelled {
+      // A different profile owns the tunnel now; close only this lookup.
+    } finally {
+      cancellation.cancel();
     }
   }
 
   Future<void> _saveProfileCountry(String profileId, ProfileGeo geo) async {
+    if (!mounted) return;
     final index = _profiles.indexWhere((profile) => profile.id == profileId);
     if (index < 0) {
       return;
     }
 
     final current = _profiles[index];
+    if (ProfileCountryResolver.hasDeclaredCountry(current)) return;
+    final countryName = ProfileCountryResolver.countryNameForGeo(geo);
     if (current.countryCode == geo.countryCode &&
-        current.countryName == geo.countryName) {
+        current.countryName == countryName) {
       return;
     }
 
     final next = [..._profiles];
     next[index] = current.copyWith(
       countryCode: geo.countryCode,
-      countryName: geo.countryName,
+      countryName: countryName,
     );
-    await _persistProfiles(next);
-    if (!mounted) {
-      return;
-    }
     setState(() {
       _profiles = next;
     });
+    try {
+      await _persistProfiles(next);
+    } on Object catch (error) {
+      // Cosmetic metadata must not fail an otherwise healthy VPN session.
+      _queueLog('Geo: metadata persistence unavailable (${error.runtimeType})');
+    }
+    if (!mounted) return;
     if (profileId == _selectedProfileId) {
       unawaited(_syncConnectionNotification());
     }
@@ -3720,31 +4527,165 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _setSmartRouteRuDirect(bool enabled) async {
-    if (_smartRouteRuDirect == enabled || _busy) {
+    // The persisted decision must finish loading before the first edit. A
+    // slow boot must not apply its stale snapshot over a user's new choice.
+    if (!_smartRoutePreferenceLoaded) return;
+    if (_smartRoutePausedByKillSwitch) {
+      _showSnack(
+        _language == _AppLanguage.ru
+            ? 'Smart Route приостановлен строгим kill switch. Настройка сохранена.'
+            : 'Strict kill switch suspends Smart Route. Your preference is preserved.',
+      );
+      return;
+    }
+    if (_smartRouteRuDirect == enabled ||
+        _busy ||
+        _connectionQueueActive ||
+        _smartRouteSettingsBusy) {
       return;
     }
 
     final profile = _selectedProfile;
-    final shouldRestart = _connected && profile != null;
-    await _store.saveSmartRouteRuDirect(enabled);
-    if (!mounted) {
-      return;
+    Future<void> persist() async {
+      // Revoke the association even when no TUN is running: a native
+      // background restore must not reuse a previously enabled config.
+      if (!enabled) await _smartRouteApps.clearBinding();
+      await _store.saveSmartRouteRuDirect(enabled);
+      if (!mounted) return;
+      setState(() {
+        _smartRouteRuDirect = enabled;
+        _message = enabled ? s.smartRouteEnabled : s.smartRouteDisabled;
+      });
     }
 
-    setState(() {
-      _smartRouteRuDirect = enabled;
-      _message = enabled ? s.smartRouteEnabled : s.smartRouteDisabled;
-    });
-
-    if (!shouldRestart) {
+    if (!_connected ||
+        profile == null ||
+        !SmartRouteAppsService.managedProfile(profile)) {
+      await _runBusy(persist, message: s.smartRouteApplying);
       return;
     }
 
     final operation = _sessionController.beginProfileSwitch();
     await _runQueuedBusy(operation, () async {
-      await _stopVpnCore(updateMessage: false, operation: operation);
+      // Do not commit "off" while a TUN with the old exclusions still exists.
+      if (!enabled &&
+          !await _stopVpnCore(updateMessage: false, operation: operation)) {
+        throw StateError(s.vpnStopTimeout(_status));
+      }
+      await persist();
+      _sessionController.ensureCurrent(operation);
       await _startVpnCore(profile, operation: operation, rapidRestart: true);
     }, message: s.smartRouteApplying);
+  }
+
+  Future<void> _editSmartRouteApps() async {
+    if (!_smartRoutePreferenceLoaded ||
+        _smartRouteSettingsBusy ||
+        _busy ||
+        _connectionQueueActive) {
+      return;
+    }
+    _smartRouteSettingsBusy = true;
+    try {
+      final snapshot = await _smartRouteApps.read();
+      if (!mounted) return;
+      final ru = _language == _AppLanguage.ru;
+      if (snapshot.candidates.isEmpty) {
+        _showSnack(
+          ru ? 'Список приложений недоступен.' : 'App choices are unavailable.',
+        );
+        return;
+      }
+      final currentProfile = _selectedProfile;
+      final builtIn = SmartRouteRules.ruBypassPackages(const []).toSet();
+      final selection = await showDialog<Set<String>>(
+        context: context,
+        builder: (_) => SmartRouteAppsDialog(
+          snapshot: snapshot,
+          builtInPackages: builtIn,
+          smartRouteEnabled: _smartRouteRuDirect,
+          managedProfile:
+              currentProfile != null &&
+              SmartRouteAppsService.managedProfile(currentProfile),
+          vpnActive: _status == AurumVpnStatus.started,
+          russian: ru,
+        ),
+      );
+      if (!mounted || selection == null || _busy || _connectionQueueActive) {
+        return;
+      }
+      final previousChoices = snapshot.selected.difference(builtIn);
+      if (setEquals(previousChoices, selection)) return;
+      final profile = _selectedProfile;
+      final protect = await _killSwitchService.read();
+      if (!mounted || _busy || _connectionQueueActive) return;
+      bool canApplyAppRoutes(KillSwitchState state) =>
+          state.supported &&
+          state.known &&
+          !state.requested &&
+          !state.alwaysOn &&
+          !state.lockdown &&
+          !state.strictRuntime;
+
+      Future<void> persist() async {
+        await _smartRouteApps.saveSelection(selection);
+        if (mounted) {
+          setState(() {
+            _message = ru
+                ? 'Выбор приложений сохранён на устройстве.'
+                : 'App choices saved on this device.';
+          });
+        }
+      }
+
+      if (!_smartRouteRuDirect ||
+          !_connected ||
+          snapshot.protected ||
+          !snapshot.protectionKnown ||
+          !canApplyAppRoutes(protect) ||
+          !snapshot.supported ||
+          snapshot.legacyAppMode ||
+          profile == null ||
+          !SmartRouteAppsService.managedProfile(profile)) {
+        await _runBusy(persist, message: s.working);
+        return;
+      }
+
+      final operation = _sessionController.beginProfileSwitch();
+      await _runQueuedBusy(operation, () async {
+        // Protection can change in Android settings while this command is
+        // queued. Never tear down a protected tunnel just to apply app routes.
+        final latestProtection = await _killSwitchService.read();
+        _sessionController.ensureCurrent(operation);
+        if (!canApplyAppRoutes(latestProtection)) {
+          await persist();
+          return;
+        }
+        final blockReason = _profileConnectBlockReason(profile);
+        if (blockReason != null) throw _ProfileConnectionBlocked(blockReason);
+        // Android app exclusions are installed when the TUN is established.
+        // Reload only acknowledges a broadcast; use the fenced stop and a
+        // fresh start on the same profile for additions as well as removals.
+        if (!await _stopVpnCore(
+          updateMessage: false,
+          operation: operation,
+          invalidatePendingStart: true,
+        )) {
+          throw StateError(s.vpnStopTimeout(_status));
+        }
+        _sessionController.ensureCurrent(operation);
+        await persist();
+        _sessionController.ensureCurrent(operation);
+        await _startVpnCore(
+          profile,
+          operation: operation,
+          rapidRestart: true,
+          allowInProcessReload: false,
+        );
+      }, message: s.smartRouteApplying);
+    } finally {
+      _smartRouteSettingsBusy = false;
+    }
   }
 
   Future<void> _setDnsLeakProtection(bool enabled) async {
@@ -3778,6 +4719,159 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }, message: s.dnsLeakGuardApplying);
   }
 
+  Future<void> _refreshKillSwitchState({bool applyIfNeeded = false}) async {
+    final state = await _killSwitchService.read();
+    if (!mounted) return;
+    if (KillSwitchHttpPolicy.requiresProxy(state)) {
+      KillSwitchHttpPolicy.cancelDirectRequests();
+      _cancelDirectLatency(
+        clearReadings:
+            !state.known ||
+            state.requested ||
+            state.alwaysOn ||
+            state.lockdown ||
+            state.strictRuntime,
+      );
+    }
+    setState(() => _killSwitchState = state);
+    if (applyIfNeeded &&
+        state.systemEnforced &&
+        state.runtimeKnown &&
+        state.vpnActive &&
+        !state.strictRuntime &&
+        _connected &&
+        !_busy) {
+      await _applyKillSwitchRoutes();
+    }
+  }
+
+  Future<void> _applyKillSwitchRoutes() async {
+    final profile = _selectedProfile;
+    if (_busy ||
+        _killSwitchApplying ||
+        !_connected ||
+        profile == null ||
+        !_killSwitchState.systemEnforced) {
+      return;
+    }
+    if (!_killSwitchState.runtimeKnown || !_killSwitchState.vpnActive) {
+      return;
+    }
+    _killSwitchApplying = true;
+    try {
+      // Preserve strict intent before closing the TUN: VpnService's public
+      // flags may temporarily return false until the next establish().
+      KillSwitchHttpPolicy.cancelDirectRequests();
+      _cancelDirectLatency(clearReadings: true);
+      await _killSwitchService.setRequested(true);
+      final operation = _sessionController.beginProfileSwitch();
+      await _runQueuedBusy(
+        operation,
+        () async {
+          await _stopVpnCore(updateMessage: false, operation: operation);
+          await _startVpnCore(
+            profile,
+            operation: operation,
+            rapidRestart: true,
+          );
+        },
+        message: _language == _AppLanguage.ru
+            ? 'Применяем строгий kill switch...'
+            : 'Applying strict kill switch...',
+      );
+    } on Object {
+      if (mounted) {
+        _showSnack(
+          _language == _AppLanguage.ru
+              ? 'Не удалось применить строгий режим. Защиту Android не отключали.'
+              : 'Unable to apply strict mode. Android protection was not disabled.',
+        );
+      }
+    } finally {
+      _killSwitchApplying = false;
+      await _refreshKillSwitchState();
+    }
+  }
+
+  Future<void> _openKillSwitchSettings() async {
+    final ru = _language == _AppLanguage.ru;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Kill switch Android'),
+        content: Text(
+          ru
+              ? 'Включи для Yurich Connect «Постоянная VPN» и «Блокировать соединения без VPN». На HONOR: удерживай строку Yurich Connect → «Изменить» → «Разрешить соединение только через VPN». Без VPN интернет пропадёт. Строгий режим отключает Smart Route, LAN и исключения, не удаляя настройки. Для обычного режима сначала отключи защиту Android, затем нажми «Обычные маршруты» в приложении.'
+              : 'Enable Always-on VPN and Block connections without VPN for Yurich Connect. On HONOR, long-press the VPN entry, then Edit. Internet will be unavailable without VPN. Strict mode suspends Smart Route, LAN and app exceptions without deleting preferences. For normal mode, disable Android protection first, then choose Normal routes in this app.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(ru ? 'Отмена' : 'Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(ru ? 'Открыть настройки' : 'Open settings'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    KillSwitchHttpPolicy.cancelDirectRequests();
+    _cancelDirectLatency(clearReadings: true);
+    try {
+      await _killSwitchService.setRequested(true);
+      await _killSwitchService.openSettings();
+    } on Object {
+      if (mounted) {
+        _showSnack(
+          ru
+              ? 'Открой настройки Android → VPN → Yurich Connect.'
+              : 'Open Android Settings → VPN → Yurich Connect.',
+        );
+      }
+    }
+  }
+
+  Future<void> _useNormalKillSwitchRoutes() async {
+    if (_busy) return;
+    final ru = _language == _AppLanguage.ru;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(ru ? 'Обычные маршруты?' : 'Use normal routes?'),
+        content: Text(
+          ru
+              ? 'Строгий режим отключится. Smart Route, LAN и исключения снова будут применяться после переподключения. Сначала отключи защиту в Android. Для проверки держи VPN подключённым; приложение не меняет системную блокировку.'
+              : 'Strict routing will be disabled. Smart Route, LAN and exceptions resume after reconnection. Disable Android protection first and keep VPN connected for verification. This app does not change system lockdown.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(ru ? 'Отмена' : 'Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(ru ? 'Обычные маршруты' : 'Normal routes'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    try {
+      await _killSwitchService.setRequested(false);
+      await _refreshKillSwitchState();
+    } on Object {
+      if (mounted) {
+        _showSnack(
+          ru
+              ? 'Сначала отключи защиту Android и проверь состояние при подключённом VPN.'
+              : 'Disable Android protection first and verify with VPN connected.',
+        );
+      }
+    }
+  }
+
   Future<List<String>> _smartRouteBypassPackages() async {
     return _smartRouteRuDirect
         ? SmartRouteRules.ruBypassPackages(const [])
@@ -3785,7 +4879,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _deleteProfile(VpnProfile profile) async {
-    if (_busy) {
+    if (_busy || _preparingAutoConnect) {
       return;
     }
 
@@ -3815,14 +4909,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() {
         _profiles = next;
         _selectedProfileId = nextSelectedId;
+        _directReadings.remove(profile.id);
         _profilePingMs.remove(profile.id);
         _lastSuccessfulPlanByProfileId.remove(profile.id);
         _profilePingBusy.remove(profile.id);
-        _profilePingError.remove(profile.id);
-        if (next.isEmpty ||
-            !next.any((item) => _profileMatchesTab(item, _profileTab))) {
-          _profileTab = _ProfileTab.all;
-        }
+        _profileProbeResults.remove(profile.id);
+        _profilePingCheckedAt.remove(profile.id);
         _message = s.profileDeleted;
       });
     }, message: s.working);
@@ -3907,14 +4999,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     VpnSessionOperation operation,
     Future<void> Function() action, {
     String? message,
+    LocalConnectionIncidentAttempt? incident,
   }) async {
+    _invalidateProfileProbes();
     try {
       await _sessionController.enqueue(
         operation,
-        () => _runBusy(action, message: message, operation: operation),
+        () => _runBusy(
+          action,
+          message: message,
+          operation: operation,
+          incident: incident,
+        ),
       );
     } on VpnSessionCancelled catch (error) {
       _queueLog('VPN command cancelled: $error');
+    }
+    if (mounted &&
+        _sessionController.isCurrent(operation) &&
+        _status == AurumVpnStatus.started &&
+        !_busy &&
+        !_connectionQueueActive) {
+      final selected = _explicitSelectedProfile;
+      if (selected != null) unawaited(_pingProfile(selected));
     }
   }
 
@@ -3922,6 +5029,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     Future<void> Function() action, {
     String? message,
     VpnSessionOperation? operation,
+    LocalConnectionIncidentAttempt? incident,
   }) async {
     if (_busy) {
       return;
@@ -3929,8 +5037,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (operation != null) {
       _dismissConnectionErrorSnack();
     }
+    final command = operation?.command;
+    final vpnCommand =
+        command != null && command != VpnSessionCommand.maintenance;
     setState(() {
       _busy = true;
+      if (vpnCommand) _vpnUiCommandFailed = false;
       _message = message ?? s.working;
     });
     try {
@@ -3938,22 +5050,47 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     } on VpnSessionCancelled catch (error) {
       _queueLog('VPN command superseded: $error');
     } on Object catch (error) {
-      final errorText = _redactSensitive('$error');
+      final errorText = error is _AutoPassExhausted
+          ? s.autoExhausted
+          : _redactSensitive('$error');
       if (operation != null && !_sessionController.isCurrent(operation)) {
         _queueLog('Ignored error from superseded VPN command: $errorText');
         return;
       }
       if (mounted) {
+        if (error is _AutoNetworkUnavailable) {
+          setState(() {
+            _lastError = null;
+            _vpnUiCommandFailed = false;
+            _message = s.autoNetworkWaitExpired;
+          });
+          return;
+        }
         setState(() {
           _lastError = errorText;
+          if (command != null && command != VpnSessionCommand.maintenance) {
+            _vpnUiCommandFailed = true;
+            _rememberVpnFailure(errorText, command.name);
+          }
           _message = errorText;
         });
+        if (operation != null &&
+            command == VpnSessionCommand.connect &&
+            incident != null) {
+          unawaited(_queueTerminalIncident(incident, operation));
+        }
+        final brief = vpnCommand && !widget.tvMode;
         final errorSnack = _showSnack(
-          errorText,
-          action: SnackBarAction(
-            label: s.report,
-            onPressed: () => unawaited(_emailDeveloper()),
-          ),
+          brief && error is! _AutoPassExhausted
+              ? s.vpnFailureMessage(_lastVpnFailureCategory)
+              : errorText,
+          duration: brief ? const Duration(seconds: 3) : null,
+          action: brief
+              ? null
+              : SnackBarAction(
+                  label: s.report,
+                  onPressed: () => unawaited(_emailDeveloper()),
+                ),
         );
         if (operation != null) {
           _connectionErrorSnackBar = errorSnack;
@@ -3966,6 +5103,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _rememberVpnFailure(String message, String operation) {
+    final category = message == 'unexpected-stop'
+        ? 'unexpected_stop'
+        : ProtocolTestMetadata.failure([message]);
+    _lastVpnFailureCategory = category;
+    final profile = _explicitSelectedProfile;
+    final protocol = profile == null
+        ? 'unknown'
+        : ProtocolDisplayMapper.mapProfile(profile);
+    _recordStabilityEvent(
+      'vpn-failure: operation=$operation protocol=$protocol category=$category',
+    );
+  }
+
   void _dismissConnectionErrorSnack() {
     final errorSnack = _connectionErrorSnackBar;
     _connectionErrorSnackBar = null;
@@ -3975,6 +5126,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _showSnack(
     String text, {
     SnackBarAction? action,
+    Duration? duration,
   }) {
     if (!mounted) {
       return null;
@@ -3982,7 +5134,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _connectionErrorSnackBar = null;
     final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
     final snack = messenger.showSnackBar(
-      SnackBar(content: Text(text), action: action),
+      SnackBar(
+        content: Text(text),
+        action: action,
+        duration: duration ?? const Duration(seconds: 4),
+      ),
     );
     unawaited(
       snack.closed.then((_) {
@@ -4256,7 +5412,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       'dns_protection_mode: ${_dnsProtectionMode.storageValue}',
       'smart_route_enabled: $_smartRouteRuDirect',
       if (_smartRouteRuDirect) ...[
-        'smart_route_mode: ru-apps-direct/global-vpn',
+        'smart_route_mode: service-allowlist-direct/default-vpn',
+        'smart_route_compiled_direct_domains: ${SmartRouteRules.directDomainRules.domains.length + SmartRouteRules.directDomainRules.domainSuffixes.length}',
+        'smart_route_domain_control: yandex=${SmartRouteRules.domainOutbound('yandex.ru')}, google=${SmartRouteRules.domainOutbound('google.ru')}, unknown=${SmartRouteRules.domainOutbound('unknown.example.ru')}',
         'smart_route_global_packages: ${SmartRouteRules.globalProxyPackageNames.length}',
         'smart_route_ru_packages_builtin: ${SmartRouteRules.ruDirectPackageNames.length}',
         'smart_route_global_domains: ${SmartRouteRules.globalProxyDomains.length + SmartRouteRules.globalProxyDomainSuffixes.length}',
@@ -4421,7 +5579,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final smartRouteEnabled = routeRules.any(
         (rule) =>
             rule['outbound'] == 'direct' &&
-            (rule['domain_suffix'] as List?)?.contains('ru') == true,
+            (rule['domain_suffix'] as List?)?.contains('gosuslugi.ru') == true,
       );
       final smartRouteProxyRules = routeRules
           .where(
@@ -4544,7 +5702,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final smartRouteEnabled = routeRules.any(
       (rule) =>
           rule['outboundTag'] == 'direct' &&
-          (rule['domain'] as List?)?.contains('domain:ru') == true,
+          (rule['domain'] as List?)?.contains('domain:gosuslugi.ru') == true,
     );
 
     return [
@@ -4566,17 +5724,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _setLogsExpanded(bool expanded) async {
-    if (_logsExpanded == expanded) {
+    if (!mounted || _logsExpanded == expanded) {
       return;
     }
-    _logsExpanded = expanded;
+    setState(() => _logsExpanded = expanded);
 
     if (!expanded) {
-      await _logSubscription?.cancel();
+      final subscription = _logSubscription;
       _logSubscription = null;
       _pendingLogs.clear();
       _logFlushTimer?.cancel();
       _logFlushTimer = null;
+      await subscription?.cancel();
       return;
     }
 
@@ -4688,8 +5847,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final explicitSelected = _explicitSelectedProfile;
     final connectCandidate = _connected
         ? selected
-        : (_autoConnectProfile() ?? selected);
-    final panelProfile = explicitSelected ?? selected;
+        : (explicitSelected ?? _autoConnectProfile() ?? selected);
     final selectedProfileId = _connected
         ? (_selectedProfileId ?? selected?.id)
         : (_selectedProfileId ?? selected?.id ?? connectCandidate?.id);
@@ -4746,143 +5904,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        flexibleSpace: const _AppBarGradient(),
-        title: const Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.all(Radius.circular(8)),
-              child: Image(
-                image: AssetImage('assets/images/app_icon.png'),
-                width: 36,
-                height: 36,
-                fit: BoxFit.cover,
-              ),
-            ),
-            SizedBox(width: 10),
-            Expanded(
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Text(_appName),
-              ),
-            ),
-          ],
-        ),
-      ),
-      body: DecoratedBox(
-        decoration: const BoxDecoration(gradient: YurichGradients.background),
-        child: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                child: _StatusPanel(
-                  pulse: _staticGlowPulse,
-                  strings: s,
-                  status: _status,
-                  connectionState: _connectionUiState,
-                  degraded: _connectionDegraded,
-                  message: _message,
-                  uplink: _uplink,
-                  downlink: _downlink,
-                  uptime: _formatDuration(_connectedDuration),
-                  total: _sessionTotal,
-                  onToggle: _toggleVpn,
-                  toggleEnabled: !_busy && _profiles.isNotEmpty,
-                ),
-              ),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                  children: [
-                    _ProfilePanel(
-                      pulse: _staticGlowPulse,
-                      strings: s,
-                      profiles: _profiles,
-                      selectedProfile: panelProfile,
-                      selectedId: selectedProfileId,
-                      activeProfileId: activeProfileId,
-                      selectedTab: _profileTab,
-                      profilesExpanded: _profilesExpanded,
-                      onTabChanged: (tab) => setState(() {
-                        _profileTab = tab;
-                      }),
-                      onProfilesExpandedChanged: (expanded) =>
-                          setState(() => _profilesExpanded = expanded),
-                      onSelect: _selectProfile,
-                      onAdd: _showImportSheet,
-                      onCopy: selected == null ? null : _copySelected,
-                      onQr: selected == null ? null : _showQr,
-                      onDeleteProfile: (profile) =>
-                          unawaited(_deleteProfile(profile)),
-                      onRefreshSubscriptions: () =>
-                          unawaited(_refreshSubscriptions()),
-                      hasSubscriptionSources: _profiles.isNotEmpty,
-                      subscriptionRefreshBusy: _subscriptionRefreshBusy,
-                      subscriptionStatus: _subscriptionTileStatus,
-                      subscriptionNeedsAttention: _subscriptionNeedsAttention,
-                      batteryOptimizationIgnored: _batteryOptimizationIgnored,
-                      smartRouteRuDirect: _smartRouteRuDirect,
-                      dnsLeakProtectionEnabled:
-                          _dnsProtectionMode.protectsAgainstLeaks,
-                      keeperStatus: _keeperStatusLabel,
-                      idleKeeperStatus: _idleKeeperStatusLabel,
-                      lastHealthStatus: _lastHealthStatusLabel,
-                      autoRecoveryStatus: _autoRecoveryStatusLabel,
-                      healthFailuresStatus: _healthFailuresStatusLabel,
-                      stabilityNeedsAttention:
-                          _connectionDegraded || !_batteryOptimizationIgnored,
-                      kindLabel: ProtocolDisplayMapper.mapProfile,
-                      displayName: _profileDisplayName,
-                      countryFlag: _profileCountryFlag,
-                      pingLabel: _profilePingLabel,
-                      profileStabilityLabel: _profileStabilityLabel,
-                      onPingAll: () =>
-                          unawaited(_pingProfiles(_profiles, force: true)),
-                      onPing: (profile) =>
-                          unawaited(_pingProfile(profile, force: true)),
-                      onRequestBackgroundAccess: () =>
-                          unawaited(_requestBackgroundPowerAccess()),
-                      onSmartRouteChanged: (enabled) =>
-                          unawaited(_setSmartRouteRuDirect(enabled)),
-                      onDnsLeakProtectionChanged: (enabled) =>
-                          unawaited(_setDnsLeakProtection(enabled)),
-                    ),
-                    const SizedBox(height: 16),
-                    _AppCenterPanel(
-                      strings: s,
-                      selectedTab: _supportTab,
-                      onTabChanged: (tab) => setState(() => _supportTab = tab),
-                      language: _language,
-                      onLanguageChanged: (language) =>
-                          unawaited(_setLanguage(language)),
-                      onSupport: () => _openUrl(_telegramUrl),
-                      onTelegram: () => _openUrl(_telegramUrl),
-                      onVk: () => _openUrl(_vkUrl),
-                      onDonate: () => _openUrl(_donateUrl),
-                      onDeveloper: _emailDeveloper,
-                      currentVersion: _appVersion,
-                      distributionChannel: _distributionChannel,
-                      availableVersion: _availableUpdate?.version,
-                      updateMessage: _updateMessage,
-                      updateBusy: _updateBusy,
-                      updateProgress: _updateProgress,
-                      onCheck: _checkAndInstallUpdate,
-                      logs: _logs,
-                      onExpansionChanged: (expanded) =>
-                          unawaited(_setLogsExpanded(expanded)),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+    return _buildMobile(selected, explicitSelected, connectCandidate);
+  }
+
+  void _navigateMobile(_MobilePage page) {
+    if (_mobilePage == page) return;
+    _dismissConnectionErrorSnack();
+    if (page != _MobilePage.settings && _logsExpanded) {
+      unawaited(_setLogsExpanded(false));
+    }
+    setState(() => _mobilePage = page);
+    if (page == _MobilePage.settings) {
+      unawaited(_refreshBatteryOptimizationStatus());
+    }
+  }
+
+  void _changeMobileSupportTab(_SupportTab tab) {
+    if (_supportTab != tab) setState(() => _supportTab = tab);
   }
 }

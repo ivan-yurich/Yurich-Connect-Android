@@ -1,0 +1,335 @@
+{
+  "verified_at": "2026-11-12",
+  "scope": "Официальные публичные Android-приложения с точным идентификатором. Наличие карточки установки не подтверждает работу сервиса. Браузеры и поисковые оболочки общего назначения не включаются.",
+  "verified_android_candidates": [
+    {
+      "package_id": "ru.naoplus.mfcnao",
+      "name": "МФЦ Ненецкого АО",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.naoplus.mfcnao",
+      "publisher_url": "https://mfcnao.ru/press-center/news/177446"
+    },
+    {
+      "package_id": "ru.netvoxlab.mydocapp",
+      "name": "Мои документы — Белгородская, Костромская и Тамбовская области",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.netvoxlab.mydocapp"
+    },
+    {
+      "package_id": "ru.evolenta.mfc16",
+      "name": "МФЦ Татарстана",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.evolenta.mfc16"
+    },
+    {
+      "package_id": "website.copyandpaste.MFCRO",
+      "name": "МФЦ Ростовской области",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/website.copyandpaste.MFCRO",
+      "note": "Точный ID чувствителен к регистру."
+    },
+    {
+      "package_id": "com.sc.mfckbr",
+      "name": "Мои документы КБР",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.sc.mfckbr"
+    },
+    {
+      "package_id": "com.skatcloud.mfc",
+      "name": "МФЦ Краснодарского края",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.skatcloud.mfc",
+      "publisher_url": "https://gorkluch.ru/about/info/anounces/35694/"
+    },
+    {
+      "package_id": "ru.evolenta.mobile.mfc63",
+      "name": "МФЦ Самарской области",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.evolenta.mobile.mfc63"
+    },
+    {
+      "package_id": "ru.artsofte.mfc_svo",
+      "name": "МФЦ Свердловской области",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.artsofte.mfc_svo"
+    },
+    {
+      "package_id": "com.sc.mfcur",
+      "name": "МФЦ Удмуртской Республики",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.sc.mfcur"
+    },
+    {
+      "package_id": "com.sc.mfckomi",
+      "name": "МФЦ Республики Коми",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.sc.mfckomi"
+    },
+    {
+      "package_id": "ru.tularegion.arsenal",
+      "name": "Арсенал услуг (Тульская область)",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.tularegion.arsenal"
+    },
+    {
+      "package_id": "ru.rosreestr.mobile",
+      "name": "Росреестр",
+      "category": "government",
+      "source_url": "https://play.google.com/store/apps/details?id=ru.rosreestr.mobile",
+      "note": "RuStore упомянут в сообщении ведомства, но скачивание из RuStore отдельно не перепроверено."
+    },
+    {
+      "package_id": "ru.trudvsem.mobile",
+      "name": "Работа в России",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.trudvsem.mobile"
+    },
+    {
+      "package_id": "es.hol.ing.zagsr",
+      "name": "Реестр ЗАГС",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/es.hol.ing.zagsr"
+    },
+    {
+      "package_id": "ru.tatarstan",
+      "name": "Услуги РТ 2.0",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.tatarstan",
+      "publisher_url": "https://uslugi.tatarstan.ru/start/mobile-apps"
+    },
+    {
+      "package_id": "ru.nso.karta",
+      "name": "Карта жителя НСО",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.nso.karta"
+    },
+    {
+      "package_id": "ru.mos.polls",
+      "name": "Активный гражданин (Москва)",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mos.polls"
+    },
+    {
+      "package_id": "com.programmisty.emiasapp",
+      "name": "ЕМИАС.ИНФО (Москва)",
+      "category": "government",
+      "source_url": "https://www.rustore.ru/catalog/app/com.programmisty.emiasapp"
+    },
+    {
+      "package_id": "com.octopod.russianpost.client.android",
+      "name": "Почта России",
+      "category": "state_company",
+      "source_url": "https://www.rustore.ru/catalog/app/com.octopod.russianpost.client.android",
+      "note": "Сервис госкомпании, не приложение ведомства."
+    },
+    {
+      "package_id": "com.looky.app",
+      "name": "LOOKY",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.looky.app"
+    },
+    {
+      "package_id": "com.marinin.nowapp",
+      "name": "Now",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.marinin.nowapp"
+    },
+    {
+      "package_id": "ru.ritmmedia.yappy",
+      "name": "Yappy",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.ritmmedia.yappy"
+    },
+    {
+      "package_id": "ru.mirtesen.mobile",
+      "name": "Мт.ру / МирТесен",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.mirtesen.mobile"
+    },
+    {
+      "package_id": "com.drive2",
+      "name": "DRIVE2",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.drive2"
+    },
+    {
+      "package_id": "com.preggieapp.preggie",
+      "name": "Мамлайф",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.preggieapp.preggie"
+    },
+    {
+      "package_id": "ru.cmtt.dtf",
+      "name": "DTF",
+      "category": "social",
+      "source_url": "https://play.google.com/store/apps/details?id=ru.cmtt.dtf"
+    },
+    {
+      "package_id": "ru.artrobot.siliconrus",
+      "name": "vc.ru",
+      "category": "social",
+      "source_url": "https://play.google.com/store/apps/details?id=ru.artrobot.siliconrus"
+    },
+    {
+      "package_id": "ru.swc.yaplakalcom",
+      "name": "ЯПлакалъ",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.swc.yaplakalcom",
+      "note": "Карточка издателя доступна для установки через RuStore; отмечена загрузка из внешнего источника."
+    },
+    {
+      "package_id": "ru.goodgame.goodgame2",
+      "name": "GoodGame",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.goodgame.goodgame2"
+    },
+    {
+      "package_id": "ru.hub.tach",
+      "name": "Tach",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.hub.tach"
+    },
+    {
+      "package_id": "com.livejournal.android",
+      "name": "Живой Журнал",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.livejournal.android"
+    },
+    {
+      "package_id": "com.rossgram",
+      "name": "Россграм",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.rossgram",
+      "note": "Карточка доступна для установки; последний найденный релиз Android — 2024, работа сервиса не подтверждена."
+    },
+    {
+      "package_id": "com.planet.forme",
+      "name": "Planet for me",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.planet.forme"
+    },
+    {
+      "package_id": "com.thirtyfivephoto.app",
+      "name": "35ФОТО",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.thirtyfivephoto.app"
+    },
+    {
+      "package_id": "com.svetomir.radar",
+      "name": "РаДар",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/com.svetomir.radar"
+    },
+    {
+      "package_id": "co.median.android.dmedbx",
+      "name": "ITgram",
+      "category": "social",
+      "source_url": "https://www.rustore.ru/catalog/app/co.median.android.dmedbx",
+      "note": "Стабильный ID отдельного приложения; не подменять другим WebAPK."
+    },
+    {
+      "package_id": "com.vk.love",
+      "name": "VK Знакомства",
+      "category": "related",
+      "source_url": "https://www.rustore.ru/catalog/app/com.vk.love"
+    },
+    {
+      "package_id": "ru.photostrana.mobile",
+      "name": "Фотострана",
+      "category": "related",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.photostrana.mobile"
+    },
+    {
+      "package_id": "to.boosty.mobile",
+      "name": "Boosty",
+      "category": "related",
+      "source_url": "https://www.rustore.ru/catalog/app/to.boosty.mobile"
+    },
+    {
+      "package_id": "com.blinkmap.rs",
+      "name": "Blink",
+      "category": "related",
+      "source_url": "https://www.rustore.ru/catalog/app/com.blinkmap.rs"
+    },
+    {
+      "package_id": "com.vk.calls",
+      "name": "VK Звонки",
+      "category": "related",
+      "source_url": "https://www.rustore.ru/catalog/app/com.vk.calls"
+    },
+    {
+      "package_id": "ru.yandex.yandexmaps",
+      "name": "Яндекс Карты",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.yandex.yandexmaps"
+    },
+    {
+      "package_id": "ru.yandex.yandexnavi",
+      "name": "Яндекс Навигатор",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.yandex.yandexnavi"
+    },
+    {
+      "package_id": "ru.yandex.translate",
+      "name": "Яндекс Переводчик",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.yandex.translate"
+    },
+    {
+      "package_id": "ru.yandex.weatherplugin",
+      "name": "Яндекс Погода",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.yandex.weatherplugin"
+    },
+    {
+      "package_id": "ru.beru.android",
+      "name": "Яндекс Маркет",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.beru.android"
+    },
+    {
+      "package_id": "ru.yandex.metro",
+      "name": "Яндекс Метро",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.yandex.metro"
+    },
+    {
+      "package_id": "ru.yandex.telemost",
+      "name": "Яндекс Телемост",
+      "category": "service",
+      "source_url": "https://www.rustore.ru/catalog/app/ru.yandex.telemost"
+    }
+  ],
+  "excluded_or_deferred": [
+    {
+      "package_id": "com.sc.mfcnso",
+      "source_url": "https://www.rustore.ru/catalog/app/com.sc.mfcnso",
+      "reason": "МФЦ Новосибирской области: карточка RuStore помечена недоступной для скачивания."
+    },
+    {
+      "package_id": "ru.fns.billchecker",
+      "source_url": "https://www.nalog.gov.ru/rn77/about_fts/el_usl/el_usl_m/",
+      "reason": "Альтернативный ID проверки чеков ФНС: в каталоге уже есть актуальная отдельная сборка RuStore; альтернативная установка не подтверждена."
+    },
+    {
+      "package_id": "com.bastion",
+      "source_url": "https://www.rustore.ru/catalog/developer/112491c5",
+      "reason": "Служебный аутентификатор ФНС, не приложение для граждан."
+    },
+    {
+      "package_id": "ru.nalog.rmr.client",
+      "source_url": "https://www.rustore.ru/catalog/developer/112491c5",
+      "reason": "Служебное рабочее место ФНС, не приложение для граждан."
+    },
+    {
+      "package_id": "ru.habrahabr",
+      "source_url": "https://play.google.com/store/apps/details?id=ru.habrahabr",
+      "reason": "Хабр: издатель текущей Android-карточки — Habr Europe OU, Эстония."
+    },
+    {
+      "package_id": "ru.ok.messages",
+      "source_url": "https://tamtam.chat/news_ru/AZxS0zGsKGU",
+      "reason": "ТамТам: сервис сообщил о закрытии, несмотря на индексируемую карточку RuStore."
+    }
+  ]
+}

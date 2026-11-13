@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'kill_switch_http_policy.dart';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
@@ -129,7 +130,9 @@ class _UpdateLookupScope {
     HttpClient client,
     Uri uri, {
     bool head = false,
-  }) {
+  }) async {
+    ensureActive();
+    await wait(KillSwitchHttpPolicy.protect(client));
     ensureActive();
     return wait(
       (head ? client.headUrl(uri) : client.getUrl(uri)).then((request) {
@@ -204,7 +207,7 @@ class AppUpdateService {
     Uri? githubReleasePageUri,
     Duration downloadIdleTimeout = _updateDownloadIdleTimeout,
     Duration metadataEndpointTimeout = _updateMetadataEndpointTimeout,
-  }) : _client = client ?? HttpClient(),
+  }) : _httpClient = client ?? HttpClient(),
        _downloadIdleTimeout = downloadIdleTimeout,
        _metadataEndpointTimeout = metadataEndpointTimeout,
        _testingReleaseUri = testingReleaseApiUri ?? _testingReleaseApiUri,
@@ -224,7 +227,13 @@ class AppUpdateService {
     '$_githubReleaseAssetName',
   );
 
-  final HttpClient _client;
+  HttpClient _httpClient;
+  HttpClient get _client {
+    if (KillSwitchHttpPolicy.isRevoked(_httpClient)) {
+      _httpClient = HttpClient()..connectionTimeout = _updateConnectTimeout;
+    }
+    return _httpClient;
+  }
   final Duration _downloadIdleTimeout;
   final Duration _metadataEndpointTimeout;
   final List<Uri> _releaseApiUris;
@@ -414,7 +423,9 @@ class AppUpdateService {
     void Function(double? progress) onProgress,
   ) async {
     _validateRemoteUpdateUri(url);
-    final request = await _client.getUrl(url);
+    final client = _client;
+    await KillSwitchHttpPolicy.protect(client);
+    final request = await client.getUrl(url);
     request.headers.set(HttpHeaders.userAgentHeader, _updaterUserAgent);
     request.headers.set(
       HttpHeaders.acceptHeader,

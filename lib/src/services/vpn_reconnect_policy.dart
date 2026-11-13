@@ -1,14 +1,22 @@
 import '../models/vpn_profile.dart';
 import 'profile_engine_selector.dart';
 
-enum VpnReconnectMode { initial, rapidSameEngine, rapidCrossEngine }
+enum VpnReconnectMode {
+  initial,
+  rapidSameEngine,
+  rapidCrossEngine,
+  autoCandidate,
+}
 
-/// Bounds reconnect work without changing the more tolerant cold-start path.
+/// Bounds connection work while keeping protocol-specific readiness windows.
 ///
 /// Rapid switches use bounded attempts and a protocol-aware readiness
 /// budget so a bad profile cannot occupy the command queue for several
-/// minutes. The cold-start path keeps its tolerant retries.
+/// minutes. Cold starts keep retries where the native runtime needs them.
 final class VpnReconnectPolicy {
+  // Android may need 25 s graceful stop, 4 s forced stop and 2 s to confirm
+  // process exit. This is a ceiling, not a delay on a successful stop.
+  static const nativeStopStatusTimeout = Duration(seconds: 35);
   const VpnReconnectPolicy({
     required this.mode,
     required this.maxPlans,
@@ -50,20 +58,45 @@ final class VpnReconnectPolicy {
     required VpnCoreEngine engine,
     required bool rapidRestart,
     required bool crossEngineRestart,
+    bool automaticFailover = false,
   }) {
+    if (automaticFailover) {
+      final slowReadiness =
+          engine == VpnCoreEngine.xray ||
+          kind == VpnProfileKind.hysteria2 ||
+          kind == VpnProfileKind.hysteria;
+      return VpnReconnectPolicy(
+        mode: VpnReconnectMode.autoCandidate,
+        maxPlans: 1,
+        maxAttemptsPerPlan: 1,
+        configTimeout: const Duration(seconds: 4),
+        startCallTimeout: const Duration(seconds: 7),
+        statusTimeout: Duration(seconds: slowReadiness ? 40 : 24),
+        startupProbeTimeout: const Duration(seconds: 6),
+        stopCallTimeout: const Duration(seconds: 5),
+        stopStatusTimeout: nativeStopStatusTimeout,
+        startSettleDelay: Duration.zero,
+        retryDelay: Duration.zero,
+        fallbackDelay: Duration.zero,
+        attemptBudget: Duration(seconds: slowReadiness ? 51 : 35),
+      );
+    }
     if (!rapidRestart) {
+      final isXray = engine == VpnCoreEngine.xray;
       return VpnReconnectPolicy(
         mode: VpnReconnectMode.initial,
         maxPlans: kind == VpnProfileKind.naive ? 2 : 1,
-        maxAttemptsPerPlan: 2,
+        // Xray already probes and recovers within the native startup window.
+        // Restarting the same config from Flutter adds another full 40 s wait.
+        maxAttemptsPerPlan: isXray ? 1 : 2,
         configTimeout: const Duration(seconds: 10),
         startCallTimeout: const Duration(seconds: 8),
         statusTimeout: const Duration(seconds: 40),
         startupProbeTimeout: const Duration(seconds: 12),
         stopCallTimeout: const Duration(seconds: 5),
-        stopStatusTimeout: const Duration(seconds: 20),
+        stopStatusTimeout: nativeStopStatusTimeout,
         startSettleDelay: const Duration(seconds: 1),
-        retryDelay: const Duration(milliseconds: 1200),
+        retryDelay: isXray ? Duration.zero : const Duration(milliseconds: 1200),
         fallbackDelay: const Duration(milliseconds: 800),
         attemptBudget: null,
       );
@@ -76,13 +109,14 @@ final class VpnReconnectPolicy {
     final isNaive = kind == VpnProfileKind.naive;
     final isHysteria2 = kind == VpnProfileKind.hysteria2;
 
-    // QUIC readiness can outlive the native 30-second startup grace. Match the
-    // cold-start window, retaining a bounded clean retry if readiness still fails.
-    final statusTimeout = Duration(seconds: isHysteria2 ? 40 : 16);
+    // Both QUIC and Xray readiness can outlive a 16-second UI deadline while
+    // native startup still has its legitimate 30-second grace. Match cold-start
+    // readiness; a successful status completes immediately, without a fixed wait.
+    final statusTimeout = Duration(seconds: isHysteria2 || isXray ? 40 : 16);
     final extendedStart = crossEngineRestart || isXray;
     // Cleanup between attempts consumes this budget. Final cleanup may exceed
     // it so the next profile cannot overlap a stopping service.
-    final attemptBudget = isHysteria2
+    final attemptBudget = isHysteria2 || isXray
         ? const Duration(seconds: 65)
         : extendedStart
         ? const Duration(seconds: 32)
@@ -97,10 +131,11 @@ final class VpnReconnectPolicy {
       statusTimeout: statusTimeout,
       startupProbeTimeout: Duration(seconds: isXray ? 16 : 4),
       stopCallTimeout: const Duration(seconds: 3),
-      // Native service cleanup can legitimately take about 17.5 seconds.
       // Never start the next runtime while the previous one is still Stopping.
-      stopStatusTimeout: const Duration(seconds: 20),
-      startSettleDelay: Duration(milliseconds: crossEngineRestart ? 650 : 120),
+      stopStatusTimeout: nativeStopStatusTimeout,
+      // A restart already awaits native stop/cleanup; reload has its own
+      // native readiness gate. Do not add a second, fixed settle delay.
+      startSettleDelay: Duration.zero,
       retryDelay: isHysteria2
           ? const Duration(milliseconds: 500)
           : Duration.zero,

@@ -1,4 +1,5 @@
 import java.io.FileInputStream
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -16,6 +17,28 @@ if (keystorePropertiesFile.exists()) {
 val hasReleaseSigning = keystorePropertiesFile.exists() &&
     listOf("keyAlias", "keyPassword", "storeFile", "storePassword")
         .all { keystoreProperties[it]?.toString()?.isNotBlank() == true }
+// Flutter passes the same compile flags to Dart and to Gradle as Base64 tokens.
+// Do not log build defines. Missing, malformed or conflicting flags fail closed.
+val hermesPilotKeys = listOf("YURICH_LOCAL_INCIDENT_PILOT", "YURICH_HERMES_PILOT")
+val hermesIncidentPilot = providers.gradleProperty("dart-defines")
+    .map { encoded ->
+        runCatching {
+            val defines = encoded.split(',').map { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
+            hermesPilotKeys.all { key ->
+                defines.filter { it.substringBefore('=') == key } == listOf("$key=true")
+            }
+        }.getOrDefault(false)
+    }.orElse(false)
+val hermesDeliveryPilot = providers.gradleProperty("dart-defines").map { encoded ->
+    hermesIncidentPilot.get() && runCatching {
+        encoded.split(',').map { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
+            .filter { it.substringBefore('=') == "YURICH_HERMES_DELIVERY_PILOT" } ==
+            listOf("YURICH_HERMES_DELIVERY_PILOT=true")
+    }.getOrDefault(false)
+}.orElse(false)
+
+val hermesReleaseKeepFile = if (hermesDeliveryPilot.get())
+    "proguard-hermes-pilot.pro" else "proguard-hermes-disabled.pro"
 
 android {
     namespace = "online.dnsai.ivanvpn"
@@ -37,6 +60,9 @@ android {
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        buildConfigField("boolean", "HERMES_INCIDENT_PILOT", "false")
+        buildConfigField("boolean", "HERMES_DELIVERY_PILOT", "false")
+        manifestPlaceholders["hermesDeliveryPilot"] = "false"
     }
 
     packaging {
@@ -60,6 +86,9 @@ android {
         create("github") {
             dimension = "distribution"
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"github\"")
+            buildConfigField("boolean", "HERMES_INCIDENT_PILOT", hermesIncidentPilot.get().toString())
+            buildConfigField("boolean", "HERMES_DELIVERY_PILOT", hermesDeliveryPilot.get().toString())
+            manifestPlaceholders["hermesDeliveryPilot"] = hermesDeliveryPilot.get().toString()
         }
         create("tv") {
             dimension = "distribution"
@@ -94,6 +123,7 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
+                hermesReleaseKeepFile,
             )
         }
     }

@@ -175,7 +175,7 @@ void main() {
     final hasProxyDomainRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'proxy' &&
-          (rule['domain'] as List?)?.contains('full:chat.openai.com') == true,
+          (rule['domain'] as List?)?.contains('domain:openai.com') == true,
     );
     final hasProxySuffixRule = rules.any(
       (rule) =>
@@ -185,12 +185,12 @@ void main() {
     final hasDirectDomainRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'direct' &&
-          (rule['domain'] as List?)?.contains('full:vk.com') == true,
+          (rule['domain'] as List?)?.contains('domain:vk.com') == true,
     );
     final hasDirectSuffixRule = rules.any(
       (rule) =>
           rule['outboundTag'] == 'direct' &&
-          (rule['domain'] as List?)?.contains('domain:ru') == true,
+          (rule['domain'] as List?)?.contains('domain:gosuslugi.ru') == true,
     );
 
     expect(hasProxyDomainRule, isTrue);

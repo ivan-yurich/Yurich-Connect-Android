@@ -35,8 +35,9 @@ internal class VpnSessionStateMachine {
         snapshotLocked()
     }
 
-    fun requestReconnect(reason: String): VpnSessionSnapshot? = synchronized(lock) {
-        if (!desiredRunning || phase == VpnSessionPhase.Stopping) {
+    fun requestReconnect(reason: String, expectedGeneration: Long? = null): VpnSessionSnapshot? = synchronized(lock) {
+        if (!desiredRunning || phase == VpnSessionPhase.Stopping ||
+            expectedGeneration != null && expectedGeneration != generation) {
             return@synchronized null
         }
         generation += 1

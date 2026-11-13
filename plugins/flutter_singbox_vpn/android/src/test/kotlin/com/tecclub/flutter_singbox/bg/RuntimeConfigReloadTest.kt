@@ -1,6 +1,7 @@
 package com.tecclub.flutter_singbox.bg
 
 import android.content.Intent
+import com.tecclub.flutter_singbox.config.RuntimeTlsPolicy
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
@@ -19,6 +20,7 @@ class RuntimeConfigReloadTest {
         val config = "{\"profile\":\"new\"}"
         assertSame(intent, RuntimeConfigReload.attach(intent, config))
         verify(intent).putExtra(BoxService.EXTRA_CONFIG_CONTENT, config)
+        verify(intent).putExtra(RuntimeTlsPolicy.INTENT_REVISION_EXTRA, RuntimeTlsPolicy.CURRENT_REVISION)
     }
 
     @Test
@@ -47,5 +49,26 @@ class RuntimeConfigReloadTest {
     fun `cache rejection is not reported as a successful update`() {
         `when`(intent.getStringExtra(BoxService.EXTRA_CONFIG_CONTENT)).thenReturn("{\"profile\":1}")
         assertFalse(RuntimeConfigReload.cacheReceived(intent) { false })
+    }
+
+    @Test
+    fun `legacy insecure reload cannot promote stripped pins to trusted runtime`() {
+        val config = """{"outbounds":[{"type":"hysteria2","tls":{"insecure":true}}]}"""
+        `when`(intent.getStringExtra(BoxService.EXTRA_CONFIG_CONTENT)).thenReturn(config)
+        `when`(intent.getIntExtra(RuntimeTlsPolicy.INTENT_REVISION_EXTRA, 0)).thenReturn(0)
+        var called = false
+        assertFalse(RuntimeConfigReload.cacheReceived(intent) { called = true; true })
+        assertFalse(called)
+        `when`(intent.getIntExtra(RuntimeTlsPolicy.INTENT_REVISION_EXTRA, 0)).thenReturn(RuntimeTlsPolicy.CURRENT_REVISION)
+        assertTrue(RuntimeConfigReload.cacheReceived(intent) { true })
+    }
+
+    @Test
+    fun `new reload still refuses unsupported certificate pins`() {
+        val config = """{"outbounds":[{"tls":{"pinSHA256":"test-only","insecure":true}}]}"""
+        assertFailsWith<IllegalArgumentException> { RuntimeConfigReload.attach(intent, config) }
+        `when`(intent.getStringExtra(BoxService.EXTRA_CONFIG_CONTENT)).thenReturn(config)
+        `when`(intent.getIntExtra(RuntimeTlsPolicy.INTENT_REVISION_EXTRA, 0)).thenReturn(RuntimeTlsPolicy.CURRENT_REVISION)
+        assertFalse(RuntimeConfigReload.cacheReceived(intent) { true })
     }
 }

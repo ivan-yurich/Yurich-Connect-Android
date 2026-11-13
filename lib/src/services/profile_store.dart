@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/dns_protection_mode.dart';
@@ -7,11 +8,14 @@ import '../models/profile_stability.dart';
 import '../models/profile_network_stability.dart';
 import '../models/vpn_profile.dart';
 import 'secure_profile_storage.dart';
+import 'smart_route_apps_service.dart';
 
 class ProfileStore {
   static const _profilesKey = 'profiles';
   static const _secureProfilesKey = 'profiles.v1';
   static const _selectedProfileKey = 'selectedProfileId';
+  static const _automaticProfileKey = 'automaticProfileSelection';
+  static const _directLatencyAllowedKey = 'directLatencyAllowed';
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
   static const _manualDisconnectKey = 'manualDisconnectRequested';
@@ -193,6 +197,29 @@ class ProfileStore {
     }
   }
 
+  Future<bool?> loadAutomaticProfileSelection() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_automaticProfileKey);
+  }
+
+  Future<void> saveAutomaticProfileSelection(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_automaticProfileKey, enabled);
+  }
+
+  Future<bool?> loadDirectLatencyAllowed() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_directLatencyAllowedKey);
+  }
+
+  Future<bool> saveDirectLatencyAllowed(bool allowed) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = await prefs.setBool(_directLatencyAllowedKey, allowed);
+    // Missing consent is also safe; try revoking the old opt-in if the
+    // explicit false value could not be committed.
+    return saved || (!allowed && await prefs.remove(_directLatencyAllowedKey));
+  }
+
   Future<String?> loadLanguageCode() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_languageKey);
@@ -223,9 +250,69 @@ class ProfileStore {
     await prefs.setBool(_manualDisconnectKey, requested);
   }
 
-  Future<bool> loadSmartRouteRuDirect() async {
+  Future<bool> loadSmartRouteRuDirect({
+    DateTime? installTime,
+    DateTime? updateTime,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_smartRouteRuDirectKey) ?? false;
+    if (prefs.containsKey(_smartRouteRuDirectKey)) {
+      return prefs.get(_smartRouteRuDirectKey) == true;
+    }
+    bool hasEarlierPreferences() => prefs.getKeys().any(
+      // Android startup may already have mirrored its default stop flag.
+      (key) => key != _manualDisconnectKey || prefs.get(key) != false,
+    );
+
+    if (kIsWeb ||
+        defaultTargetPlatform != TargetPlatform.android ||
+        installTime == null ||
+        installTime.millisecondsSinceEpoch <= 0 ||
+        updateTime == null ||
+        !installTime.isAtSameMomentAs(updateTime) ||
+        hasEarlierPreferences()) {
+      return false;
+    }
+
+    // Empty settings alone do not mean a fresh install. Even matching Android
+    // timestamps can accompany a device transfer with restored state.
+    try {
+      final secureValues = await Future.wait([
+        _secureStorage.read(_secureProfilesKey),
+        _secureStorage.read(_secureDeletedProfilesKey),
+      ]).timeout(const Duration(seconds: 2));
+      if (secureValues.any((value) => value != null) ||
+          !await const SmartRouteAppsService().initializeInstallDefault()) {
+        return prefs.get(_smartRouteRuDirectKey) == true;
+      }
+    } on Object {
+      return prefs.get(_smartRouteRuDirectKey) == true;
+    }
+    // An explicit choice written during the checks wins; never replace it.
+    if (hasEarlierPreferences()) {
+      return prefs.get(_smartRouteRuDirectKey) == true;
+    }
+    try {
+      if (await prefs.setBool(_smartRouteRuDirectKey, true)) {
+        return prefs.get(_smartRouteRuDirectKey) == true;
+      }
+    } on Object {
+      // Do not activate a default that could not be stored.
+    }
+    // Legacy SharedPreferences updates its cache before the platform confirms
+    // the write. Clear a failed tentative default before another load can see it.
+    if (prefs.get(_smartRouteRuDirectKey) == true) {
+      try {
+        await prefs.remove(_smartRouteRuDirectKey);
+      } on Object {
+        // Reload below is a second attempt to restore the cached value.
+      }
+    }
+    try {
+      await prefs.reload();
+    } on Object {
+      // Storage failure is not permission to bypass the VPN.
+    }
+    return false;
   }
 
   Future<void> saveSmartRouteRuDirect(bool enabled) async {

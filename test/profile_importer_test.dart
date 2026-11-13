@@ -612,43 +612,23 @@ void main() {
         ((config['route'] as Map<String, dynamic>)['rules'] as List)
             .whereType<Map<String, dynamic>>()
             .toList();
-    final globalExactRuleIndex = routeRules.indexWhere(
-      (rule) =>
-          rule['outbound'] == 'proxy' &&
-          (rule['domain'] as List?)?.contains('chat.openai.com') == true &&
-          (rule['domain'] as List?)?.contains('aistudio.google.com') == true &&
-          (rule['domain'] as List?)?.contains('gemini.google.com') == true &&
-          (rule['domain'] as List?)?.contains('accounts.google.com') == true &&
-          (rule['domain'] as List?)?.contains(
-                'generativelanguage.googleapis.com',
-              ) ==
-              true &&
-          (rule['domain'] as List?)?.contains('mtalk.google.com') == true &&
-          (rule['domain'] as List?)?.contains('web.telegram.org') == true &&
-          (rule['domain'] as List?)?.contains('t.me') == true,
-    );
-    expect(globalExactRuleIndex, isNonNegative);
-
     final globalProxyRuleIndex = routeRules.indexWhere(
       (rule) =>
           rule['outbound'] == 'proxy' &&
           (rule['domain_suffix'] as List?)?.contains('chatgpt.com') == true &&
           (rule['domain_suffix'] as List?)?.contains('openai.com') == true &&
-          (rule['domain_suffix'] as List?)?.contains('gemini.google.com') ==
-              true &&
+          (rule['domain_suffix'] as List?)?.contains('google.com') == true &&
           (rule['domain_suffix'] as List?)?.contains('telegram.org') == true &&
           (rule['domain_suffix'] as List?)?.contains('instagram.com') == true &&
           (rule['domain_suffix'] as List?)?.contains('youtube.com') == true &&
           (rule['domain_suffix'] as List?)?.contains('googlevideo.com') == true,
     );
     expect(globalProxyRuleIndex, isNonNegative);
-    expect(globalExactRuleIndex, lessThan(globalProxyRuleIndex));
 
     final ruDirectRuleIndex = routeRules.indexWhere(
       (rule) =>
           rule['outbound'] == 'direct' &&
-          (rule['domain_suffix'] as List?)?.contains('ru') == true &&
-          (rule['domain_suffix'] as List?)?.contains('рф') == true,
+          (rule['domain_suffix'] as List?)?.contains('gosuslugi.ru') == true,
     );
     expect(ruDirectRuleIndex, isNonNegative);
     expect(globalProxyRuleIndex, lessThan(ruDirectRuleIndex));
@@ -665,8 +645,7 @@ void main() {
       routeRules.any(
         (rule) =>
             rule['outbound'] == 'direct' &&
-            (rule['domain_suffix'] as List?)?.contains('ru') == true &&
-            (rule['domain_suffix'] as List?)?.contains('рф') == true,
+            (rule['domain_suffix'] as List?)?.contains('gosuslugi.ru') == true,
       ),
       isTrue,
     );
@@ -674,9 +653,9 @@ void main() {
       routeRules.any(
         (rule) =>
             rule['outbound'] == 'direct' &&
-            (rule['domain'] as List?)?.contains('gosuslugi.ru') == true,
+            (rule['domain_suffix'] as List?)?.contains('ru') == true,
       ),
-      isTrue,
+      isFalse,
     );
     expect(SmartRouteRules.ruDirectPackageNames, isNotEmpty);
   });

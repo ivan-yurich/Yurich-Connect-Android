@@ -38,6 +38,28 @@ class YurichRadii {
   static const double chip = 14;
 }
 
+/// The mobile dashboard has a light surface; TV keeps the dark theme.
+class YurichMobileColors {
+  const YurichMobileColors._();
+
+  static const canvas = Color(0xFFF9F9FC);
+  static const paper = Color(0xFFFFFFFF);
+  static const ink = Color(0xFF172033);
+  static const secondary = Color(0xFF515B6D);
+  static const line = Color(0xFFDDE2EC);
+  static const blue = Color(0xFF075B97);
+  static const blueTint = Color(0xFFE0F2FF);
+  static const blueGlow = Color(0xFF47B9FF);
+  static const powerActive = Color(0xFFA4DFFF);
+  static const powerActiveRing = Color(0xFF1676F3);
+  static const powerActiveHalo = Color(0xC02C9AFF);
+  static const powerError = Color(0xFFFFE3E9);
+  static const powerErrorRing = Color(0xFFF04763);
+  static const powerErrorInk = Color(0xFFA21636);
+  static const warning = Color(0xFF8D5108);
+  static const warningTint = Color(0xFFFFEACD);
+}
+
 class YurichGradients {
   const YurichGradients._();
 
@@ -122,6 +144,49 @@ class YurichGradients {
 
 class YurichTheme {
   const YurichTheme._();
+
+  static final ThemeData mobile = _mobile();
+
+  static ThemeData _mobile() {
+    final scheme = ColorScheme.fromSeed(seedColor: YurichMobileColors.blue)
+        .copyWith(
+          primary: YurichMobileColors.blue,
+          primaryContainer: YurichMobileColors.blueTint,
+          onPrimaryContainer: YurichMobileColors.blue,
+          surface: YurichMobileColors.canvas,
+          onSurface: YurichMobileColors.ink,
+          onSurfaceVariant: YurichMobileColors.secondary,
+          outlineVariant: YurichMobileColors.line,
+        );
+    return ThemeData(
+      colorScheme: scheme,
+      useMaterial3: true,
+      scaffoldBackgroundColor: YurichMobileColors.canvas,
+      appBarTheme: const AppBarTheme(
+        backgroundColor: YurichMobileColors.canvas,
+        foregroundColor: YurichMobileColors.ink,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
+      ),
+      navigationBarTheme: const NavigationBarThemeData(
+        backgroundColor: YurichMobileColors.paper,
+        indicatorColor: YurichMobileColors.blueTint,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+      ),
+      cardTheme: CardThemeData(
+        color: YurichMobileColors.paper,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(YurichRadii.control),
+          side: const BorderSide(color: YurichMobileColors.line),
+        ),
+      ),
+    );
+  }
 
   static ThemeData dark() {
     final colorScheme =
