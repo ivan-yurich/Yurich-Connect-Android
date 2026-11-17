@@ -1,4 +1,4 @@
-import java.io.FileInputStream
+import java.io.File
 import java.util.Base64
 import java.util.Properties
 
@@ -10,13 +10,21 @@ plugins {
 }
 
 val keystoreProperties = Properties()
-val keystorePropertiesFile = rootProject.file("key.properties")
-if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+// Keep signing inputs outside a clean release checkout. Relative storeFile
+// values keep their original android/app base when using an external file.
+val externalSigningProperties = providers.environmentVariable("YURICH_ANDROID_SIGNING_PROPERTIES")
+    .orNull
+    ?.let { rootProject.file(it).canonicalFile }
+val keystorePropertiesFile = externalSigningProperties ?: rootProject.file("key.properties")
+if (keystorePropertiesFile.isFile) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
-val hasReleaseSigning = keystorePropertiesFile.exists() &&
+val hasReleaseSigning = keystorePropertiesFile.isFile &&
     listOf("keyAlias", "keyPassword", "storeFile", "storePassword")
         .all { keystoreProperties[it]?.toString()?.isNotBlank() == true }
+if (externalSigningProperties != null) {
+    require(hasReleaseSigning) { "External Android release signing properties are missing or incomplete" }
+}
 // Flutter passes the same compile flags to Dart and to Gradle as Base64 tokens.
 // Do not log build defines. Missing, malformed or conflicting flags fail closed.
 val hermesPilotKeys = listOf("YURICH_LOCAL_INCIDENT_PILOT", "YURICH_HERMES_PILOT")
@@ -106,7 +114,12 @@ android {
         if (hasReleaseSigning) create("release") {
             keyAlias = keystoreProperties["keyAlias"] as String
             keyPassword = keystoreProperties["keyPassword"] as String
-            storeFile = file(keystoreProperties["storeFile"] as String)
+            val configuredStore = File(keystoreProperties.getProperty("storeFile"))
+            storeFile = if (externalSigningProperties != null && !configuredStore.isAbsolute) {
+                externalSigningProperties.parentFile.resolve("app").resolve(configuredStore)
+            } else {
+                file(configuredStore)
+            }
             storePassword = keystoreProperties["storePassword"] as String
         }
     }
