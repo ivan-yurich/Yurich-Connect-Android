@@ -1,6 +1,6 @@
 part of 'home_screen.dart';
 
-const _automaticSubscriptionRefreshInterval = Duration(hours: 6);
+const _automaticSubscriptionRefreshInterval = Duration(hours: 2);
 const _busySubscriptionRefreshRetry = Duration(minutes: 1);
 
 extension _ScheduledSubscriptionRefresh on _HomeScreenState {

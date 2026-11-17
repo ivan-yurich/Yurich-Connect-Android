@@ -2729,14 +2729,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           validatedKeys.contains(expected.key)) {
         return (key: expected.key, type: expected.type, confirmed: false);
       }
-      if (snapshot['validated'] != true ||
+      final validated = snapshot['validated'];
+      // Native snapshots only select physical networks with INTERNET. A known
+      // LTE route can reach a VPN endpoint even if Android's general Internet
+      // check fails. Keep the same route when VPN temporarily masks the default.
+      final canTryCellular =
+          validated == false &&
+          type == 'cellular' &&
+          (confirmed || (expected?.key == key && expected?.type == type));
+      if ((validated != true && !canTryCellular) ||
           key is! String ||
           key.isEmpty ||
           (type != 'wifi' && type != 'cellular' && type != 'ethernet')) {
         return null;
       }
       _applyNetworkSnapshot(snapshot, source: 'auto-network');
-      return (key: key, type: type, confirmed: confirmed);
+      // An unvalidated route can be tried, but must not be used as confirmed
+      // handover/failure evidence for persistent server scoring.
+      return (key: key, type: type, confirmed: confirmed && validated == true);
     } on VpnSessionCancelled {
       rethrow;
     } on Object {

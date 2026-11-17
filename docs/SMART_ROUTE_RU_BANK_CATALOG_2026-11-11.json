@@ -1,0 +1,60 @@
+{
+  "verified_android_candidates": [
+    {
+      "package_id": "ru.sberbankmobile",
+      "name": "СберБанк Онлайн"
+    },
+    {
+      "package_id": "com.idamob.tinkoff.android",
+      "name": "Т-Банк"
+    },
+    {
+      "package_id": "ru.vtb24.mobilebanking.android",
+      "name": "ВТБ Онлайн"
+    },
+    {
+      "package_id": "ru.alfabank.mobile.android",
+      "name": "Альфа-Банк"
+    },
+    {
+      "package_id": "ru.gazprombank.android.mobilebank.app",
+      "name": "Газпромбанк"
+    },
+    {
+      "package_id": "ru.rshb.dbo",
+      "name": "Мобильный банк РСХБ"
+    },
+    {
+      "package_id": "ru.sovcomcard.halva.v1",
+      "name": "Халва / Совкомбанк"
+    },
+    {
+      "package_id": "logo.com.mbanking",
+      "name": "ПСБ"
+    },
+    {
+      "package_id": "ru.ozon.fintech.finance",
+      "name": "Ozon Банк"
+    },
+    {
+      "package_id": "ru.mkb.mobile",
+      "name": "МКБ Онлайн"
+    },
+    {
+      "package_id": "ru.bspb",
+      "name": "БСПБ"
+    },
+    {
+      "package_id": "ru.bankuralsib.mb.android",
+      "name": "Уралсиб Онлайн"
+    },
+    {
+      "package_id": "com.vkontakte.android",
+      "name": "ВКонтакте"
+    },
+    {
+      "package_id": "ru.oneme.app",
+      "name": "MAX"
+    }
+  ]
+}

@@ -5,8 +5,10 @@ import 'dart:ui' as ui;
 
 import 'package:aurum_vpn/src/app.dart';
 import 'package:aurum_vpn/src/models/vpn_profile.dart';
+import 'package:aurum_vpn/src/screens/home_screen.dart';
 import 'package:aurum_vpn/src/services/local_connection_incidents.dart';
 import 'package:aurum_vpn/src/services/profile_importer.dart';
+import 'package:aurum_vpn/src/services/profile_store.dart';
 import 'package:aurum_vpn/src/theme/yurich_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -17,6 +19,22 @@ import 'package:flutter_singbox_vpn/flutter_singbox_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+final class _ScheduledSubscriptionFixture extends ProfileImporter {
+  _ScheduledSubscriptionFixture(this.profile);
+
+  final VpnProfile profile;
+  final calls = <(String, bool)>[];
+
+  @override
+  Future<List<VpnProfile>> importFromText(
+    String input, {
+    bool currentTunnelOnly = false,
+  }) async {
+    calls.add((input, currentTunnelOnly));
+    return [profile];
+  }
+}
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -246,6 +264,7 @@ void main() {
     List<VpnProfile> extraProfiles = const [],
     Size viewport = const Size(360, 800),
     VpnProfile? initialProfile,
+    Widget? app,
     Map<String, Object> preferences = const {},
   }) async {
     final profile =
@@ -282,7 +301,7 @@ void main() {
     await tester.pumpWidget(
       capture && captureDir != null
           ? const RepaintBoundary(key: captureKey, child: YurichConnectApp())
-          : const YurichConnectApp(),
+          : app ?? const YurichConnectApp(),
     );
     for (var i = 0; i < 12; i++) {
       await tester.pump(const Duration(milliseconds: 250));
@@ -913,6 +932,107 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 10));
   });
+
+  for (final confirmed in [true, false]) {
+    testWidgets(
+      'Auto accepts LTE before Android validates it only with route evidence (confirmed=$confirmed)',
+      (tester) async {
+        networkSnapshot = {
+          'type': 'cellular',
+          'validated': false,
+          'probePhysicalNetwork': '202',
+          'autoPhysicalRouteConfirmed': confirmed,
+          'autoValidatedPhysicalKeys': <String>[],
+        };
+        await launchWithProfile(
+          tester,
+          connected: false,
+          initialProfile: autoFixture('cellular-start', 2443, 'PL'),
+          preferences: const {
+            'automaticProfileSelection': true,
+            'directLatencyAllowed': false,
+            'vpnDisclosureVersion': 1,
+          },
+        );
+        scriptedStarts.add(true);
+        nativeCalls.clear();
+
+        await tester.tap(find.byKey(powerKey));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(getVpnMutations(), isEmpty);
+        if (confirmed) {
+          await pumpUntilNativeCall(tester, 'startVPN');
+          await tester.pump(const Duration(seconds: 2));
+          expect(getVpnMutations(), ['saveConfig', 'startVPN']);
+          expect(find.byKey(activeServerKey), findsOneWidget);
+        } else {
+          await tester.pump(const Duration(seconds: 2));
+          expect(find.text('Жду интернет…'), findsWidgets);
+          expect(getVpnMutations(), isEmpty);
+        }
+        expect(nativeCalls, isNot(contains('getDirectProbeNetwork')));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'Subscription refresh migrates the old deadline and runs while paused',
+    (tester) async {
+      const source = 'https://profiles.example.invalid/background';
+      final old = autoFixture(
+        'before-refresh',
+        2443,
+        'PL',
+      ).copyWith(subscriptionSource: source);
+      final fresh = autoFixture(
+        'after-refresh',
+        3443,
+        'SE',
+      ).copyWith(subscriptionSource: source);
+      final importer = _ScheduledSubscriptionFixture(fresh);
+      var now = DateTime.utc(2026, 11, 17, 10);
+      final previous = now.add(const Duration(hours: 6));
+      final due = now.add(const Duration(hours: 2));
+
+      await launchWithProfile(
+        tester,
+        connected: false,
+        initialProfile: old,
+        preferences: {'nextSubscriptionRefreshAt': previous.toIso8601String()},
+        app: MaterialApp(
+          theme: YurichTheme.dark(),
+          home: HomeScreen(
+            profileImporter: importer,
+            subscriptionRefreshNow: () => now,
+          ),
+        ),
+      );
+      final store = ProfileStore();
+      expect(await store.loadNextSubscriptionRefreshAt(), due);
+      expect(importer.calls, isEmpty);
+      nativeCalls.clear();
+
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      now = due;
+      await tester.pump(const Duration(hours: 2));
+      await tester.pump();
+      expect(importer.calls, [(source, false)]);
+      expect((await store.loadProfiles()).single.id, fresh.id);
+      expect(
+        await store.loadNextSubscriptionRefreshAt(),
+        due.add(const Duration(hours: 2)),
+      );
+      expect(getVpnMutations(), isEmpty);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 3));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('Auto waits without native starts, then follows a new network', (
     tester,
