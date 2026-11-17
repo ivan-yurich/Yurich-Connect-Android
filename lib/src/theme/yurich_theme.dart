@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 
-class YurichColors {
-  const YurichColors._();
-
+abstract final class YurichColors {
   static const background = Color(0xFF03101C);
   static const backgroundMid = Color(0xFF061827);
   static const backgroundDeep = Color(0xFF071D2E);
@@ -29,9 +27,7 @@ class YurichColors {
   static const shadow = Color(0x99000000);
 }
 
-class YurichRadii {
-  const YurichRadii._();
-
+abstract final class YurichRadii {
   static const double card = 24;
   static const double panel = 20;
   static const double control = 16;
@@ -39,9 +35,7 @@ class YurichRadii {
 }
 
 /// The mobile dashboard has a light surface; TV keeps the dark theme.
-class YurichMobileColors {
-  const YurichMobileColors._();
-
+abstract final class YurichMobileColors {
   static const canvas = Color(0xFFF9F9FC);
   static const paper = Color(0xFFFFFFFF);
   static const ink = Color(0xFF172033);
@@ -60,9 +54,7 @@ class YurichMobileColors {
   static const warningTint = Color(0xFFFFEACD);
 }
 
-class YurichGradients {
-  const YurichGradients._();
-
+abstract final class YurichGradients {
   static const background = LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
@@ -142,9 +134,7 @@ class YurichGradients {
   );
 }
 
-class YurichTheme {
-  const YurichTheme._();
-
+abstract final class YurichTheme {
   static final ThemeData mobile = _mobile();
 
   static ThemeData _mobile() {

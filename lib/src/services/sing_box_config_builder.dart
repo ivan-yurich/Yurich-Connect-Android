@@ -55,7 +55,7 @@ class SingBoxConfigBuilder {
       throw UnsupportedError(_encryptedVlessRequiredMessage);
     }
     proxyOutbound['tag'] = 'proxy';
-    final useRemoteDns = _usesRemoteDns(profile, dnsProtectionMode);
+    final useRemoteDns = usesRemoteDnsFor(profile.kind, dnsProtectionMode);
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
     _applyDialStability(profile: profile, proxyOutbound: proxyOutbound);
     final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
@@ -288,11 +288,16 @@ class SingBoxConfigBuilder {
     };
   }
 
-  bool _usesRemoteDns(VpnProfile profile, DnsProtectionMode dnsProtectionMode) {
+  /// DNS policy for generated outbounds, independent of profile validation.
+  /// [build] checks engine support and handles raw configs before using it.
+  static bool usesRemoteDnsFor(
+    VpnProfileKind kind,
+    DnsProtectionMode dnsProtectionMode,
+  ) {
     if (!dnsProtectionMode.protectsAgainstLeaks) {
       return false;
     }
-    return switch (profile.kind) {
+    return switch (kind) {
       VpnProfileKind.hysteria ||
       VpnProfileKind.hysteria2 ||
       VpnProfileKind.vlessReality ||

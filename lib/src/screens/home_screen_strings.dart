@@ -25,13 +25,13 @@ class _Strings {
   String get noAutoServer => this == en
       ? 'No suitable server for Auto. Choose one manually.'
       : 'Для автовыбора нет подходящего сервера. Выберите вручную.';
-  String get autoProfilesChanged => this == en
-      ? 'Profiles changed during Auto selection. Try again.'
-      : 'Профили обновились во время автовыбора. Повторите попытку.';
   String get unknownLocation =>
       this == en ? 'Unknown location' : 'Локация неизвестна';
   String get directLatencySetting =>
       this == en ? 'Direct latency without VPN' : 'Прямой пинг без VPN';
+  String get workingVpnRequired => this == en
+      ? 'Connect to a working VPN first.'
+      : 'Для проверки нужен работающий VPN.';
   String get directLatencyConsent => this == en
       ? 'When VPN and Kill Switch are off, the app can measure latency from this device to servers in your profiles. Those servers will see your regular IP. No location access is used.'
       : 'Когда VPN и Kill Switch выключены, приложение может измерить задержку от телефона до серверов в профилях. Эти серверы увидят ваш обычный IP. Доступ к геолокации не нужен.';
@@ -117,7 +117,6 @@ class _Strings {
       this == en ? 'Cancel connection' : 'Отменить подключение';
   String get activeServer => this == en ? 'Active server' : 'Активный сервер';
   String get refreshServer => this == en ? 'Check server' : 'Проверить сервер';
-  String get checkLatency => this == en ? 'Check latency' : 'Проверить пинг';
   String get appsDirect =>
       this == en ? 'Apps that bypass VPN' : 'Приложения напрямую';
   String get appsDirectHint =>
@@ -433,16 +432,6 @@ class _Strings {
     _ => '$count подписки требуют внимания. Первая: $profileName, $status.',
   };
 
-  String get stabilityNeedsAttention => switch (this) {
-    _Strings.en => 'Needs attention',
-    _ => 'Требует внимания',
-  };
-
-  String get profileStabilityLabel => switch (this) {
-    _Strings.en => 'Profile rating',
-    _ => 'Рейтинг профиля',
-  };
-
   String get profileStabilityGood => switch (this) {
     _Strings.en => 'Stable',
     _ => 'Стабильный',
@@ -463,51 +452,6 @@ class _Strings {
     _ => 'Остывает',
   };
 
-  String get keeperLabel => switch (this) {
-    _Strings.en => 'Keeper',
-    _ => 'Keeper',
-  };
-
-  String get keeperActive => switch (this) {
-    _Strings.en => 'Active',
-    _ => 'Активен',
-  };
-
-  String get keeperIdle => switch (this) {
-    _Strings.en => 'Waiting',
-    _ => 'Ожидает',
-  };
-
-  String get keeperChecking => switch (this) {
-    _Strings.en => 'Checking',
-    _ => 'Проверка',
-  };
-
-  String get keeperReconnecting => switch (this) {
-    _Strings.en => 'Reconnecting',
-    _ => 'Переподключение',
-  };
-
-  String get keeperDegraded => switch (this) {
-    _Strings.en => 'Degraded',
-    _ => 'Нестабильно',
-  };
-
-  String get idleKeeperLabel => switch (this) {
-    _Strings.en => 'Idle keeper',
-    _ => 'Ночной keeper',
-  };
-
-  String get idleKeeperReady => switch (this) {
-    _Strings.en => 'Ready',
-    _ => 'Готов',
-  };
-
-  String get idleKeeperActive => switch (this) {
-    _Strings.en => 'Checked',
-    _ => 'Проверено',
-  };
-
   String get idleConnection => switch (this) {
     _Strings.en => 'Idle',
     _ => 'Ожидание',
@@ -516,72 +460,6 @@ class _Strings {
   String get reconnectingConnection => switch (this) {
     _Strings.en => 'Reconnecting',
     _ => 'Переподключение',
-  };
-
-  String get lastCheckLabel => switch (this) {
-    _Strings.en => 'Last check',
-    _ => 'Проверка',
-  };
-
-  String get lastCheckNever => switch (this) {
-    _Strings.en => 'Not yet',
-    _ => 'Ещё не было',
-  };
-
-  String lastCheckAgo(Duration duration) {
-    final safe = duration.isNegative ? Duration.zero : duration;
-    if (safe.inSeconds < 60) {
-      final seconds = safe.inSeconds.clamp(1, 59);
-      return switch (this) {
-        _Strings.en => '${seconds}s ago',
-        _ => '$seconds сек назад',
-      };
-    }
-    if (safe.inMinutes < 60) {
-      return switch (this) {
-        _Strings.en => '${safe.inMinutes}m ago',
-        _ => '${safe.inMinutes} мин назад',
-      };
-    }
-    return switch (this) {
-      _Strings.en => '${safe.inHours}h ago',
-      _ => '${safe.inHours} ч назад',
-    };
-  }
-
-  String get autoRecoveryLabel => switch (this) {
-    _Strings.en => 'Recovery',
-    _ => 'Автовосстановление',
-  };
-
-  String get autoRecoveryOn => switch (this) {
-    _Strings.en => 'On',
-    _ => 'Включено',
-  };
-
-  String get autoRecoveryOff => switch (this) {
-    _Strings.en => 'Off',
-    _ => 'Выключено',
-  };
-
-  String get healthFailuresLabel => switch (this) {
-    _Strings.en => 'Failures',
-    _ => 'Сбои',
-  };
-
-  String get healthFailuresNone => switch (this) {
-    _Strings.en => 'None',
-    _ => 'Нет',
-  };
-
-  String healthFailuresCount(int count) => switch (this) {
-    _Strings.en => '$count in a row',
-    _ => '$count подряд',
-  };
-
-  String showMoreProfiles(int count) => switch (this) {
-    _Strings.en => 'Show $count more',
-    _ => 'Показать ещё: $count',
   };
 
   String supportTabLabel(_SupportTab tab) => switch (tab) {
@@ -600,19 +478,9 @@ class _Strings {
     _ => 'Выбран профиль: $name',
   };
 
-  String autoSelectedProfile(String name) => switch (this) {
-    _Strings.en => 'Auto selected: $name',
-    _ => 'Автовыбор: $name',
-  };
-
   String serverPickerTitle(int count) => switch (this) {
     _Strings.en => 'Servers: $count',
     _ => 'Серверы: $count',
-  };
-
-  String visibleServers(int count) => switch (this) {
-    _Strings.en => 'In tab: $count',
-    _ => 'В разделе: $count',
   };
 
   String connectingTo(String name) => switch (this) {
@@ -630,28 +498,11 @@ class _Strings {
     _ => 'Подключение: $name',
   };
 
-  String unsupportedProtocol(VpnProfileKind kind) {
-    if (kind == VpnProfileKind.vlessXhttp) {
-      return switch (this) {
-        _Strings.en =>
-          'The bundled Xray core could not start this VLESS XHTTP profile. Check type, mode, path, TLS/Reality parameters, and Xray logs.',
-        _ =>
-          'Встроенное Xray-ядро не смогло запустить этот VLESS XHTTP профиль. Проверь type, mode, path, параметры TLS/Reality и логи Xray.',
-      };
-    }
-    return switch (this) {
-      _Strings.en =>
-        '${kind.label} is not enabled in this Android build. Use VLESS Reality, NaiveProxy, or Hysteria/Hysteria2.',
-      _ =>
-        '${kind.label} отключён в этой Android-сборке. Используй VLESS Reality, NaiveProxy или Hysteria/Hysteria2.',
-    };
-  }
+  HomeProfileLabels get _profileLabels =>
+      this == en ? HomeProfileLabels.en : HomeProfileLabels.ru;
 
-  String networkRecoveryPaused(String name) => switch (this) {
-    _Strings.en =>
-      'Mobile network is unstable. Auto reconnect is paused for $name.',
-    _ => 'Мобильная сеть нестабильна. Автовосстановление для $name на паузе.',
-  };
+  String unsupportedProtocol(VpnProfileKind kind) =>
+      _profileLabels.unsupportedProtocol(kind);
 
   String vpnNotConnected(String status) => switch (this) {
     _Strings.en => 'VPN did not reach Connected. Last status: $status.',
@@ -807,30 +658,8 @@ class _Strings {
     _ => 'Обновление не удалось: $error',
   };
 
-  String subscriptionStatus(DateTime? expiresAt) {
-    if (expiresAt == null) {
-      return subscriptionUnknown;
-    }
-
-    final remaining = expiresAt.toUtc().difference(DateTime.now().toUtc());
-    if (remaining.isNegative) {
-      return subscriptionExpired;
-    }
-
-    if (remaining.inHours < 24) {
-      final hours = remaining.inHours.clamp(1, 23);
-      return switch (this) {
-        _Strings.en => '$hours h left',
-        _ => 'Осталось $hours ч',
-      };
-    }
-
-    final days = remaining.inDays + (remaining.inHours % 24 == 0 ? 0 : 1);
-    return switch (this) {
-      _Strings.en => '$days d left',
-      _ => 'Осталось $days дн.',
-    };
-  }
+  String subscriptionStatus(DateTime? expiresAt) =>
+      _profileLabels.subscriptionStatus(expiresAt, now: DateTime.now());
 
   static const ru = _Strings._(
     addProfileHint: 'Добавь подписку Remnawave, QR или отдельный ключ',
@@ -1282,4 +1111,57 @@ class _Strings {
     noLogs: 'No logs yet.',
     notificationDescription: 'VPN connection is active',
   );
+}
+
+/// Presentation-only labels. They do not decide whether a profile can run
+/// or whether an expiry notice should be shown.
+final class HomeProfileLabels {
+  const HomeProfileLabels._(this._strings);
+
+  static const en = HomeProfileLabels._(_Strings.en);
+  static const ru = HomeProfileLabels._(_Strings.ru);
+
+  final _Strings _strings;
+
+  String unsupportedProtocol(VpnProfileKind kind) {
+    if (kind == VpnProfileKind.vlessXhttp) {
+      return switch (_strings) {
+        _Strings.en =>
+          'The bundled Xray core could not start this VLESS XHTTP profile. Check type, mode, path, TLS/Reality parameters, and Xray logs.',
+        _ =>
+          'Встроенное Xray-ядро не смогло запустить этот VLESS XHTTP профиль. Проверь type, mode, path, параметры TLS/Reality и логи Xray.',
+      };
+    }
+    return switch (_strings) {
+      _Strings.en =>
+        '${kind.label} is not enabled in this Android build. Use VLESS Reality, NaiveProxy, or Hysteria/Hysteria2.',
+      _ =>
+        '${kind.label} отключён в этой Android-сборке. Используй VLESS Reality, NaiveProxy или Hysteria/Hysteria2.',
+    };
+  }
+
+  String subscriptionStatus(DateTime? expiresAt, {required DateTime now}) {
+    if (expiresAt == null) {
+      return _strings.subscriptionUnknown;
+    }
+
+    final remaining = expiresAt.toUtc().difference(now.toUtc());
+    if (remaining.isNegative) {
+      return _strings.subscriptionExpired;
+    }
+
+    if (remaining.inHours < 24) {
+      final hours = remaining.inHours.clamp(1, 23);
+      return switch (_strings) {
+        _Strings.en => '$hours h left',
+        _ => 'Осталось $hours ч',
+      };
+    }
+
+    final days = remaining.inDays + (remaining.inHours % 24 == 0 ? 0 : 1);
+    return switch (_strings) {
+      _Strings.en => '$days d left',
+      _ => 'Осталось $days дн.',
+    };
+  }
 }

@@ -22,6 +22,7 @@ class ProfileStore {
   static const _smartRouteRuDirectKey = 'smartRouteRuDirect';
   static const _dnsProtectionModeKey = 'dnsProtectionMode';
   static const _subscriptionReminderStampKey = 'subscriptionReminderStamp';
+  static const _nextSubscriptionRefreshAtKey = 'nextSubscriptionRefreshAt';
   static const _vpnDisclosureVersionKey = 'vpnDisclosureVersion';
   static const _deletedProfileIdsBySubscriptionSourceKey =
       'deletedProfileIdsBySubscriptionSource';
@@ -340,6 +341,22 @@ class ProfileStore {
   Future<void> saveSubscriptionReminderStamp(String stamp) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_subscriptionReminderStampKey, stamp);
+  }
+
+  Future<DateTime?> loadNextSubscriptionRefreshAt() async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = prefs.get(_nextSubscriptionRefreshAtKey);
+    return value is String ? DateTime.tryParse(value)?.toUtc() : null;
+  }
+
+  Future<void> saveNextSubscriptionRefreshAt(DateTime at) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!await prefs.setString(
+      _nextSubscriptionRefreshAtKey,
+      at.toUtc().toIso8601String(),
+    )) {
+      throw StateError('Subscription refresh schedule was not persisted');
+    }
   }
 
   Future<int> loadVpnDisclosureVersion() async {

@@ -146,8 +146,13 @@ private const val APP_ALERT_CHANNEL_ID = "yurich_connect_alerts"
 
 internal object VpnStopLifecyclePolicy {
     const val GRACEFUL_TIMEOUT_MS = 25_000L
+    const val FENCED_STARTUP_GRACE_MS = 4_000L
     const val FORCE_STOP_TIMEOUT_MS = 4_000L
     const val PROCESS_EXIT_CONFIRM_TIMEOUT_MS = 2_000L
+
+    fun gracefulTimeoutMs(stoppedDuringStartup: Boolean, durableStopIssued: Boolean): Long =
+        if (stoppedDuringStartup && durableStopIssued) FENCED_STARTUP_GRACE_MS
+        else GRACEFUL_TIMEOUT_MS
 
     fun canStart(isShuttingDown: Boolean): Boolean = !isShuttingDown
 
@@ -307,6 +312,8 @@ class FlutterSingboxPlugin :
                     null
                 }
                 val sessionReason = intent.getStringExtra(Action.EXTRA_SESSION_REASON)
+                val readyPhysicalPath = intent.getStringExtra(Action.EXTRA_READY_PHYSICAL_PATH)
+                val failedReadinessPath = intent.getStringExtra(Action.EXTRA_FAILED_READINESS_PATH)
                 val desiredRunning = if (intent.hasExtra(Action.EXTRA_DESIRED_RUNNING)) {
                     intent.getBooleanExtra(Action.EXTRA_DESIRED_RUNNING, false)
                 } else {
@@ -430,6 +437,13 @@ class FlutterSingboxPlugin :
                     manualDisconnectRequested = manualDisconnectRequested,
                     sessionReason = sessionReason,
                     desiredRunning = desiredRunning,
+                    readyPhysicalPath = readyPhysicalPath.takeIf { status == Status.Started },
+                    failedReadinessPath = failedReadinessPath.takeIf {
+                        status == Status.Starting && !isShuttingDown &&
+                            NativeStatusQuery.matchesConfig(
+                                intent.getStringExtra(Action.EXTRA_CONFIG_FINGERPRINT), expectedConfigFingerprint(),
+                            )
+                    },
                 )
             }
         }
@@ -764,6 +778,8 @@ class FlutterSingboxPlugin :
         manualDisconnectRequested: Boolean? = null,
         sessionReason: String? = null,
         desiredRunning: Boolean? = null,
+        readyPhysicalPath: String? = null,
+        failedReadinessPath: String? = null,
     ) {
         if (status != Status.Started) {
             clearNotificationPing(refresh = status != Status.Stopped)
@@ -780,6 +796,8 @@ class FlutterSingboxPlugin :
             ?.let { statusMap["manualDisconnectRequested"] = it }
         sessionReason?.let { statusMap["sessionReason"] = it }
         desiredRunning?.let { statusMap["desiredRunning"] = it }
+        readyPhysicalPath?.let { statusMap["readyPhysicalPath"] = it }
+        failedReadinessPath?.let { statusMap["failedReadinessPath"] = it }
         
         val handler = Handler(Looper.getMainLooper())
         handler.post {
@@ -1738,7 +1756,10 @@ class FlutterSingboxPlugin :
                     android.util.Log.e("FlutterSingboxPlugin", "Waiting for service to stop...")
 
                     val deadline = SystemClock.elapsedRealtime() +
-                        VpnStopLifecyclePolicy.GRACEFUL_TIMEOUT_MS
+                        VpnStopLifecyclePolicy.gracefulTimeoutMs(
+                            stoppedDuringStartup,
+                            durableStopIssued = commandToken != null,
+                        )
                     var running = true
                     var resentStartupClose = false
                     while (SystemClock.elapsedRealtime() < deadline) {
@@ -1980,7 +2001,7 @@ class FlutterSingboxPlugin :
                 statusInitialized = true
             } catch (e: Exception) {
                 android.util.Log.e("FlutterSingboxPlugin", "Error checking VPN status", e)
-                result.success(_vpnStatus.value.name) // Return current status as fallback
+                result.error("VPN_STATUS_UNAVAILABLE", "Could not verify VPN status", null)
             }
         }
     }

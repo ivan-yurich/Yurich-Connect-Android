@@ -1,6 +1,4 @@
-class TrafficFormatter {
-  const TrafficFormatter._();
-
+abstract final class TrafficFormatter {
   static String formatSpeed(int bytesPerSecond) {
     return '${formatBytes(bytesPerSecond)}/s';
   }

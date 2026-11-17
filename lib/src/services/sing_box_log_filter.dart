@@ -1,6 +1,4 @@
-class SingBoxLogFilter {
-  const SingBoxLogFilter._();
-
+abstract final class SingBoxLogFilter {
   static bool isDiagnosticNoise(String log) {
     return log.contains('router: found package name:') ||
         log.contains('router: found user id:') ||

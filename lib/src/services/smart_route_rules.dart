@@ -1,6 +1,4 @@
-class SmartRouteRules {
-  const SmartRouteRules._();
-
+abstract final class SmartRouteRules {
   static const globalProxyDomains = [
     'chat.openai.com',
     'api.openai.com',

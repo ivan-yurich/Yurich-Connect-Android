@@ -16,6 +16,11 @@ enum IncidentSignal {
   const IncidentSignal(this.stage, this.code);
   final String stage;
   final String code;
+
+  /// Applies a fixed category without creating an attempt when the pilot is off.
+  void recordOn(LocalConnectionIncidentAttempt? attempt) {
+    attempt?._signal = this;
+  }
 }
 
 /// One user command, including all core retries and the Auto fallback.
@@ -26,7 +31,7 @@ final class LocalConnectionIncidentAttempt {
   final String epoch;
   String? _protocol;
   String _network = 'unknown';
-  IncidentSignal signal = IncidentSignal.unknown;
+  IncidentSignal _signal = IncidentSignal.unknown;
   bool _cancelled = false;
   bool _succeeded = false;
   bool _consumed = false;
@@ -36,7 +41,7 @@ final class LocalConnectionIncidentAttempt {
   void nextCandidate() {
     _protocol = null;
     _network = 'unknown';
-    signal = IncidentSignal.unknown;
+    _signal = IncidentSignal.unknown;
   }
 
   void observedStart(VpnProfile profile, String network) {
@@ -52,12 +57,12 @@ final class LocalConnectionIncidentAttempt {
       'ethernet' || 'bluetooth' || 'other' => 'other',
       _ => 'unknown',
     };
-    signal = IncidentSignal.unknown;
+    _signal = IncidentSignal.unknown;
   }
 
   void observedStartError(Object error) {
     if (error is TimeoutException) {
-      signal = IncidentSignal.startTimeout;
+      _signal = IncidentSignal.startTimeout;
     } else if (error is PlatformException) {
       switch (error.code) {
         // Android returns one result for denial and closing the dialog.
@@ -65,7 +70,7 @@ final class LocalConnectionIncidentAttempt {
         case 'START_CANCELLED':
           _cancelled = true;
         case 'START_VPN_ERROR':
-          signal = IncidentSignal.startFailed;
+          _signal = IncidentSignal.startFailed;
       }
     }
   }
@@ -88,8 +93,8 @@ final class LocalConnectionIncidentAttempt {
       'epoch': epoch,
       'protocol': protocol,
       'network': _network,
-      'stage': signal.stage,
-      'code': signal.code,
+      'stage': _signal.stage,
+      'code': _signal.code,
     };
   }
 }

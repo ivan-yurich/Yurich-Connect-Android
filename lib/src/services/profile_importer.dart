@@ -44,7 +44,10 @@ class ProfileImporter {
     caseSensitive: false,
   );
 
-  Future<List<VpnProfile>> importFromText(String input) async {
+  Future<List<VpnProfile>> importFromText(
+    String input, {
+    bool currentTunnelOnly = false,
+  }) async {
     final text = input.trim();
     if (text.isEmpty) {
       throw const ProfileImportException('Вставь ссылку, подписку или JSON.');
@@ -54,7 +57,10 @@ class ProfileImporter {
     final uri = Uri.tryParse(text);
     if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
       _validateSubscriptionUri(uri);
-      final fetched = await _fetchSubscription(uri);
+      final fetched = await _fetchSubscription(
+        uri,
+        currentTunnelOnly: currentTunnelOnly,
+      );
       return _parsePayload(
         fetched.body,
         source: text,
@@ -65,16 +71,24 @@ class ProfileImporter {
     return _parsePayload(text, source: text);
   }
 
-  Future<_FetchedSubscription> _fetchSubscription(Uri uri) async {
-    final directClient = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 12);
-    await KillSwitchHttpPolicy.protect(directClient);
+  Future<_FetchedSubscription> _fetchSubscription(
+    Uri uri, {
+    required bool currentTunnelOnly,
+  }) async {
+    // A scheduled fetch started on a live tunnel must not switch to a direct
+    // connection if the user stops VPN during retries or redirects.
+    final directClient = currentTunnelOnly
+        ? null
+        : (HttpClient()..connectionTimeout = const Duration(seconds: 12));
     final proxyClient = HttpClient()
       ..connectionTimeout = const Duration(seconds: 8)
       ..findProxy = (_) =>
           'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
     var cancelled = false;
     try {
+      if (directClient != null) {
+        await KillSwitchHttpPolicy.protect(directClient);
+      }
       return await _fetchSubscriptionCandidates(
         uri,
         directClient: directClient,
@@ -88,16 +102,18 @@ class ProfileImporter {
       );
     } finally {
       cancelled = true;
-      KillSwitchHttpPolicy.forget(directClient);
+      if (directClient != null) {
+        KillSwitchHttpPolicy.forget(directClient);
+        directClient.close(force: true);
+      }
       KillSwitchHttpPolicy.forget(proxyClient);
-      directClient.close(force: true);
       proxyClient.close(force: true);
     }
   }
 
   Future<_FetchedSubscription> _fetchSubscriptionCandidates(
     Uri uri, {
-    required HttpClient directClient,
+    required HttpClient? directClient,
     required HttpClient proxyClient,
     required bool Function() isCancelled,
   }) async {
@@ -110,9 +126,13 @@ class ProfileImporter {
     Object? lastError;
     final uris = _subscriptionCandidates(uri);
     final candidates = <String>[];
+    final routes = [
+      if (directClient != null) (client: directClient, viaLocalProxy: false),
+      (client: proxyClient, viaLocalProxy: true),
+    ];
     for (final userAgent in clients) {
       for (final candidateUri in uris) {
-        for (final viaLocalProxy in const [false, true]) {
+        for (final route in routes) {
           if (isCancelled()) {
             throw const ProfileImportException('Импорт подписки завершён.');
           }
@@ -120,8 +140,8 @@ class ProfileImporter {
             final fetched = await _get(
               candidateUri,
               userAgent: userAgent,
-              client: viaLocalProxy ? proxyClient : directClient,
-              alwaysProxy: viaLocalProxy,
+              client: route.client,
+              alwaysProxy: route.viaLocalProxy,
             );
             final body = fetched.body;
             if (_canParsePayload(body)) {
@@ -129,7 +149,7 @@ class ProfileImporter {
             }
             if (_looksLikeHtml(body)) {
               lastError = ProfileImportException(
-                '${_fetchModeLabel(viaLocalProxy)} ${candidateUri.path}: сервер вернул HTML-страницу без поддерживаемых ключей.',
+                '${_fetchModeLabel(route.viaLocalProxy)} ${candidateUri.path}: сервер вернул HTML-страницу без поддерживаемых ключей.',
               );
               continue;
             }
@@ -139,7 +159,7 @@ class ProfileImporter {
               rethrow;
             }
             lastError = ProfileImportException(
-              '${_fetchModeLabel(viaLocalProxy)} ${candidateUri.path}: $error',
+              '${_fetchModeLabel(route.viaLocalProxy)} ${candidateUri.path}: $error',
             );
           }
         }
@@ -466,10 +486,6 @@ class ProfileImporter {
   DateTime? _parseSubscriptionDate(Object? value) {
     if (value == null) {
       return null;
-    }
-
-    if (value is DateTime) {
-      return value.toUtc();
     }
 
     if (value is int) {

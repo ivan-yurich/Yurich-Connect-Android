@@ -3,9 +3,7 @@ import '../models/vpn_profile.dart';
 import 'protocol_display_mapper.dart';
 
 /// QA metadata only. Never serialize names, endpoint values or error messages.
-class ProtocolTestMetadata {
-  const ProtocolTestMetadata._();
-
+abstract final class ProtocolTestMetadata {
   static final _offline = RegExp(
     r'offline|офлайн|оффлайн|не\s*работает|недоступен|отключ[её]н|expired|истекла',
     caseSensitive: false,

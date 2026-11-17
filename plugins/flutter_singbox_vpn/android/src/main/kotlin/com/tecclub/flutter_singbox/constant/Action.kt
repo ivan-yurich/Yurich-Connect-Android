@@ -19,6 +19,8 @@ object Action {
     const val EXTRA_BACKGROUND_RESTORE = "background_restore"
     const val EXTRA_MANUAL_DISCONNECT_REQUESTED = "manual_disconnect_requested"
     const val EXTRA_SESSION_REASON = "session_reason"
+    const val EXTRA_READY_PHYSICAL_PATH = "ready_physical_path"
+    const val EXTRA_FAILED_READINESS_PATH = "failed_readiness_path"
     const val EXTRA_DESIRED_RUNNING = "desired_running"
     const val EXTRA_SYSTEM_ALWAYS_ON = "system_always_on"
     const val EXTRA_TRAFFIC_UP = "traffic_up"

@@ -12,9 +12,7 @@ class VlessValidationResult {
   final Map<String, String> details;
 }
 
-class VlessProfileValidator {
-  const VlessProfileValidator._();
-
+abstract final class VlessProfileValidator {
   static bool get isSupportedRealityTcpOnly => true;
 
   static bool hasEnabledTls(Map<String, dynamic>? outbound) {

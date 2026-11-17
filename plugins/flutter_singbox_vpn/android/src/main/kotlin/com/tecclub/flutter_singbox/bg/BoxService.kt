@@ -1284,7 +1284,18 @@ class BoxService(
         android.util.Log.d("BoxService", "Notification: ${notification.title} - ${notification.body}")
     }
 
-    private fun broadcastStatus(nextStatus: Status) {
+    private fun validatedHandoverPath(network: Network?): String? {
+        if (network == null || !DefaultNetworkMonitor.isValidatedPhysical(network)) return null
+        val caps = Application.connectivity.getNetworkCapabilities(network) ?: return null
+        val transport = when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            else -> return null
+        }
+        return "$transport:${network.networkHandle}"
+    }
+
+    private fun broadcastStatus(nextStatus: Status, failedReadinessPath: String? = null) {
         val snapshot = sessionState.snapshot()
         Application.application.sendBroadcast(
             Intent(Action.BROADCAST_STATUS_CHANGED).apply {
@@ -1292,6 +1303,12 @@ class BoxService(
                 putExtra(Action.EXTRA_STATUS, nextStatus.ordinal)
                 putExtra(Action.EXTRA_CONFIG_FINGERPRINT, nativeConfigBinding?.forGeneration(snapshot.generation))
                 putExtra(Action.EXTRA_SESSION_REASON, snapshot.reason)
+                if (nextStatus == Status.Started) {
+                    validatedHandoverPath(lastHealthyDefaultNetwork)?.let {
+                        putExtra(Action.EXTRA_READY_PHYSICAL_PATH, it)
+                    }
+                }
+                failedReadinessPath?.let { putExtra(Action.EXTRA_FAILED_READINESS_PATH, it) }
                 putExtra(Action.EXTRA_DESIRED_RUNNING, snapshot.desiredRunning)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && service is VPNService) {
                     putExtra(Action.EXTRA_SYSTEM_ALWAYS_ON, service.systemOwnsLifecycle())
@@ -1383,6 +1400,8 @@ class BoxService(
 
                 while (isReadinessCurrent(generation, revision)) {
                     delay(delayBeforeCycleMs)
+                    val cyclePath = validatedHandoverPath(physicalDefaultNetwork())
+                    var failedOnSamePath = cyclePath != null
                     repeat(probeAttempts) { attempt ->
                         if (!isReadinessCurrent(generation, revision)) {
                             return@launch
@@ -1392,6 +1411,8 @@ class BoxService(
                         sawDefaultNetwork = sawDefaultNetwork || hasNetwork
                         val probe = if (hasNetwork) probeMixedProxy() else null
                         val healthy = probe?.healthy == true
+                        failedOnSamePath = failedOnSamePath && probe != null &&
+                            validatedHandoverPath(physicalDefaultNetwork()) == cyclePath
                         if (healthy && isReadinessCurrent(generation, revision)) {
                             markRuntimeReady(generation, reason)
                             return@launch
@@ -1408,6 +1429,13 @@ class BoxService(
 
                     if (!isReadinessCurrent(generation, revision)) {
                         return@launch
+                    }
+                    // Offer a completed failed cycle, not a grace/backoff event.
+                    // Native remains responsible if the UI is absent or declines.
+                    if (failedCycles == 0 && failedOnSamePath && cyclePath != null &&
+                        currentSessionStatus() == Status.Starting &&
+                        sessionState.snapshot().desiredRunning) {
+                        broadcastStatus(Status.Starting, failedReadinessPath = cyclePath)
                     }
                     withContext(Dispatchers.Main) {
                         notification.show(currentProfileName(), if (hasDefaultNetwork()) {

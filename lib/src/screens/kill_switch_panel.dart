@@ -68,6 +68,12 @@ class KillSwitchPanel extends StatelessWidget {
                     ? 'Запрос строгого режима сохранён; это не подтверждение защиты.'
                     : 'Strict mode is requested; this is not proof of protection.',
               ),
+            if (state.requested && state.supported && !state.known)
+              Text(
+                russian
+                    ? 'Если защита Android отключена, подключи VPN, чтобы подтвердить это и вернуть обычные маршруты.'
+                    : 'If Android protection is off, connect the VPN to verify it and restore normal routes.',
+              ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
@@ -96,10 +102,7 @@ class KillSwitchPanel extends StatelessWidget {
                           : 'Apply strict routes',
                     ),
                   ),
-                if (state.requested &&
-                    (!state.supported ||
-                        (state.known && !state.alwaysOn && !state.lockdown)) &&
-                    onNormal != null)
+                if (state.canRestoreNormalRoutes && onNormal != null)
                   TextButton(
                     onPressed: busy ? null : onNormal,
                     child: Text(russian ? 'Обычные маршруты' : 'Normal routes'),

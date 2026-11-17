@@ -1,9 +1,7 @@
 import '../models/vpn_profile.dart';
 import 'profile_geo_service.dart';
 
-class ProfileCountryResolver {
-  const ProfileCountryResolver._();
-
+abstract final class ProfileCountryResolver {
   // Immutable profile copies get fresh results; the weak cache cannot retain
   // removed profiles. Flags, labels and ISO codes share one coherent decision.
   static final _cache = Expando<_CountryDisplay>();

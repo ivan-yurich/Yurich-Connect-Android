@@ -1,8 +1,6 @@
 import 'dart:convert';
 
-class RuntimeConfigMatcher {
-  const RuntimeConfigMatcher._();
-
+abstract final class RuntimeConfigMatcher {
   static bool equivalent(String current, String expected) {
     if (current == expected) {
       return true;

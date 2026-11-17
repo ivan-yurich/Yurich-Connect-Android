@@ -1,8 +1,6 @@
 import '../models/vpn_profile.dart';
 
-class ProtocolDisplayMapper {
-  const ProtocolDisplayMapper._();
-
+abstract final class ProtocolDisplayMapper {
   static const naiveName = 'NaiveProxy';
   static const hysteriaName = 'Hysteria';
   static const hysteria2Name = 'Hysteria2';

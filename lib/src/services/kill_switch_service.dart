@@ -36,6 +36,11 @@ class KillSwitchState {
   final bool lockdown;
   final bool strictRuntime;
   final bool vpnActive;
+  bool get canRestoreNormalRoutes =>
+      (requested || strictRuntime) &&
+      (known || !supported) &&
+      !alwaysOn &&
+      !lockdown;
   bool get systemEnforced => supported && known && alwaysOn && lockdown;
   bool get fullyConfigured =>
       systemEnforced && runtimeKnown && vpnActive && strictRuntime;

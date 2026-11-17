@@ -58,6 +58,17 @@ class ProfileAutoSelector {
       return value != null && value > 0 ? value : null;
     }
 
+    DateTime? recentlyHealthy(ProfileNetworkStabilityStats? stats) {
+      final healthy = stats?.lastHealthyAt;
+      if (healthy == null ||
+          stats!.lastFailureAt?.isAfter(healthy) == true ||
+          healthy.isAfter(current) ||
+          current.difference(healthy) > const Duration(minutes: 30)) {
+        return null;
+      }
+      return healthy;
+    }
+
     candidates.sort((a, b) {
       if (a.id == b.id) return 0;
       if (preferCurrentNetwork) {
@@ -74,6 +85,16 @@ class ProfileAutoSelector {
         if (measured != 0) return measured;
       }
       final aNetwork = networkStats[a.id], bNetwork = networkStats[b.id];
+      if (preferCurrentNetwork) {
+        final aHealthy = recentlyHealthy(aNetwork);
+        final bHealthy = recentlyHealthy(bNetwork);
+        if (aHealthy != null || bHealthy != null) {
+          if (aHealthy == null) return 1;
+          if (bHealthy == null) return -1;
+          final freshness = bHealthy.compareTo(aHealthy);
+          if (freshness != 0) return freshness;
+        }
+      }
       final networkSuccess = (bNetwork?.successfulStarts ?? 0).compareTo(
         aNetwork?.successfulStarts ?? 0,
       );

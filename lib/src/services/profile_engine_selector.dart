@@ -23,9 +23,7 @@ class ProfileEngineSelection {
   bool get canRunInCurrentBuild => available;
 }
 
-class ProfileEngineSelector {
-  const ProfileEngineSelector._();
-
+abstract final class ProfileEngineSelector {
   static const bool xrayEnabled = true;
   static const singBoxCoreVersion = '1.13.11';
   static const xrayCoreVersion = '26.6.27';

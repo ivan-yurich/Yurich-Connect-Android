@@ -109,7 +109,13 @@ class MethodChannelFlutterSingbox extends FlutterSingboxPlatform {
   @override
   Future<String> getVPNStatus() async {
     final status = await methodChannel.invokeMethod<String>('getVPNStatus');
-    return status ?? 'Stopped';
+    if (status == null) {
+      throw PlatformException(
+        code: 'VPN_STATUS_UNAVAILABLE',
+        message: 'Native VPN status was not returned.',
+      );
+    }
+    return status;
   }
 
   @override

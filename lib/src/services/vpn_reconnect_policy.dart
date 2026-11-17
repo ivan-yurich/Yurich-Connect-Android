@@ -59,6 +59,7 @@ final class VpnReconnectPolicy {
     required bool rapidRestart,
     required bool crossEngineRestart,
     bool automaticFailover = false,
+    bool hasAutoAlternative = false,
   }) {
     if (automaticFailover) {
       final slowReadiness =
@@ -71,14 +72,22 @@ final class VpnReconnectPolicy {
         maxAttemptsPerPlan: 1,
         configTimeout: const Duration(seconds: 4),
         startCallTimeout: const Duration(seconds: 7),
-        statusTimeout: Duration(seconds: slowReadiness ? 40 : 24),
+        statusTimeout: Duration(
+          seconds: hasAutoAlternative
+              ? (slowReadiness ? 20 : 14)
+              : (slowReadiness ? 40 : 24),
+        ),
         startupProbeTimeout: const Duration(seconds: 6),
         stopCallTimeout: const Duration(seconds: 5),
         stopStatusTimeout: nativeStopStatusTimeout,
         startSettleDelay: Duration.zero,
         retryDelay: Duration.zero,
         fallbackDelay: Duration.zero,
-        attemptBudget: Duration(seconds: slowReadiness ? 51 : 35),
+        attemptBudget: Duration(
+          seconds: hasAutoAlternative
+              ? (slowReadiness ? 31 : 25)
+              : (slowReadiness ? 51 : 35),
+        ),
       );
     }
     if (!rapidRestart) {

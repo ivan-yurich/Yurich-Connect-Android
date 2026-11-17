@@ -2,7 +2,7 @@ part of 'home_screen.dart';
 
 enum _MobilePage { home, servers, settings }
 
-enum _MobileServerAction { details, check, delete }
+enum _MobileServerAction { details, checkThroughVpn, checkDirect, delete }
 
 enum _MobileListAction { refresh, qr, copy, help }
 
@@ -35,7 +35,7 @@ extension _MobileHomeView on _HomeScreenState {
       version: _appVersion,
       serverCount: _profiles.length,
       serverActions: _mobilePage == _MobilePage.servers
-          ? _mobileServerActions(selected)
+          ? _mobileServerActions(selected, canProbe: _mobileCanProbe)
           : const [],
       onNavigate: _navigateMobile,
       onImport: _preparingAutoConnect
@@ -165,7 +165,7 @@ extension _MobileHomeView on _HomeScreenState {
         !_vpnUiCommandFailed &&
         _lastRecoverySource == null &&
         _tunnelHealthFailures == 0 &&
-        !_isTunnelStale(DateTime.now())) {
+        !_isTunnelStale(_healthTime())) {
       // An unrelated error (for example, refreshing subscriptions) can leave
       // a notice. It is not evidence that the currently running VPN failed.
       status = _status == AurumVpnStatus.started
@@ -316,8 +316,17 @@ extension _MobileHomeView on _HomeScreenState {
       _directLatencyAllowed != false &&
       _directLatencyProbe == null;
 
-  Future<void> _checkMobileLatency(List<VpnProfile> profiles) async {
-    if (_mobileCanProbe) {
+  Future<void> _checkMobileLatency(
+    List<VpnProfile> profiles, {
+    required bool throughVpn,
+  }) async {
+    if (!mounted) return;
+    // A stale VPN-only tap must never become a direct probe after disconnect.
+    if (throughVpn) {
+      if (!_mobileCanProbe) {
+        _showSnack(s.workingVpnRequired);
+        return;
+      }
       if (profiles.length == 1) {
         await _pingProfile(profiles.single, force: true);
       } else {
@@ -332,14 +341,18 @@ extension _MobileHomeView on _HomeScreenState {
     }
   }
 
-  List<Widget> _mobileServerActions(VpnProfile? selected) => [
+  List<Widget> _mobileServerActions(
+    VpnProfile? selected, {
+    required bool canProbe,
+  }) => [
     IconButton(
       key: const ValueKey('mobile-check-servers'),
       tooltip: _connected ? s.refreshPing : s.directLatencySetting,
       onPressed:
           _profiles.isNotEmpty &&
-              ((_mobileCanProbe && !_pingAllInFlight) || _mobileCanDirectProbe)
-          ? () => unawaited(_checkMobileLatency(_profiles))
+              ((canProbe && !_pingAllInFlight) || _mobileCanDirectProbe)
+          ? () =>
+                unawaited(_checkMobileLatency(_profiles, throughVpn: canProbe))
           : null,
       icon: _directLatencyProbe != null || _pingAllInFlight
           ? const SizedBox.square(
@@ -511,8 +524,13 @@ extension _MobileHomeView on _HomeScreenState {
                             unawaited(_selectProfile(profile));
                           },
                     onCheck: canCheck
-                        ? () => unawaited(_checkMobileLatency([profile]))
+                        ? () => unawaited(
+                            _checkMobileLatency([
+                              profile,
+                            ], throughVpn: canProbe),
+                          )
                         : null,
+                    checkThroughVpn: canProbe,
                     onDelete: _busy || _preparingAutoConnect
                         ? null
                         : () => unawaited(_deleteProfile(profile)),
@@ -559,6 +577,18 @@ extension _MobileHomeView on _HomeScreenState {
                     ? (enabled) => unawaited(_setSmartRouteRuDirect(enabled))
                     : null,
               ),
+              if (paused && _killSwitchState.canRestoreNormalRoutes)
+                TextButton(
+                  key: const ValueKey('mobile-smart-route-normal'),
+                  onPressed: ready && !_killSwitchApplying
+                      ? () => unawaited(_useNormalKillSwitchRoutes())
+                      : null,
+                  child: Text(
+                    _language == _AppLanguage.ru
+                        ? 'Вернуть Smart Route'
+                        : 'Restore Smart Route',
+                  ),
+                ),
               const Divider(height: 1, indent: 16, endIndent: 16),
               SwitchListTile.adaptive(
                 key: const ValueKey('mobile-direct-latency'),
@@ -626,7 +656,7 @@ extension _MobileHomeView on _HomeScreenState {
         KillSwitchPanel(
           state: _killSwitchState,
           russian: _language == _AppLanguage.ru,
-          busy: _busy,
+          busy: !ready || _killSwitchApplying,
           onSettings: () => unawaited(_openKillSwitchSettings()),
           onRefresh: () =>
               unawaited(_refreshKillSwitchState(applyIfNeeded: true)),
@@ -1509,8 +1539,10 @@ class _MobileMetric extends StatelessWidget {
   }
 }
 
-class _MobileFlag extends StatelessWidget {
-  const _MobileFlag(this.flag, {this.size = 38});
+/// Decorative marker for a profile. Unknown country markers must not imply
+/// a specific location, including when the caller has no flag string.
+class MobileProfileFlag extends StatelessWidget {
+  const MobileProfileFlag(this.flag, {super.key, this.size = 38});
 
   final String? flag;
   final double size;
@@ -1582,7 +1614,7 @@ class _MobileActiveServer extends StatelessWidget {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _MobileFlag(flag, size: 28),
+                        MobileProfileFlag(flag, size: 28),
                         const SizedBox(width: 8),
                         Flexible(
                           child: Text(
@@ -1620,6 +1652,7 @@ class _MobileServerTile extends StatelessWidget {
     required this.onSelect,
     required this.onDetails,
     required this.onCheck,
+    required this.checkThroughVpn,
     required this.onDelete,
   });
 
@@ -1633,11 +1666,15 @@ class _MobileServerTile extends StatelessWidget {
   final VoidCallback? onSelect;
   final VoidCallback onDetails;
   final VoidCallback? onCheck;
+  final bool checkThroughVpn;
   final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final checkAction = checkThroughVpn
+        ? _MobileServerAction.checkThroughVpn
+        : _MobileServerAction.checkDirect;
     return Card(
       color: selected ? YurichMobileColors.blueTint : null,
       clipBehavior: Clip.antiAlias,
@@ -1653,7 +1690,7 @@ class _MobileServerTile extends StatelessWidget {
                   padding: const EdgeInsets.fromLTRB(12, 9, 0, 9),
                   child: Row(
                     children: [
-                      _MobileFlag(flag),
+                      MobileProfileFlag(flag),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Column(
@@ -1705,8 +1742,10 @@ class _MobileServerTile extends StatelessWidget {
               switch (action) {
                 case _MobileServerAction.details:
                   onDetails();
-                case _MobileServerAction.check:
-                  onCheck?.call();
+                case _MobileServerAction.checkThroughVpn:
+                case _MobileServerAction.checkDirect:
+                  // A menu item can outlive a rebuild of its button.
+                  if (action == checkAction) onCheck?.call();
                 case _MobileServerAction.delete:
                   onDelete?.call();
               }
@@ -1717,7 +1756,7 @@ class _MobileServerTile extends StatelessWidget {
                 child: Text(strings.serverDetails),
               ),
               PopupMenuItem(
-                value: _MobileServerAction.check,
+                value: checkAction,
                 enabled: onCheck != null,
                 child: Text(strings.refreshServer),
               ),

@@ -1,6 +1,4 @@
-final class SensitiveDataRedactor {
-  const SensitiveDataRedactor._();
-
+abstract final class SensitiveDataRedactor {
   static final _httpUrl = RegExp(
     r'''https?://[^\s<>"']+''',
     caseSensitive: false,

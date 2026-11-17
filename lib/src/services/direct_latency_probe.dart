@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 
 import '../models/vpn_profile.dart';
@@ -228,12 +229,31 @@ final class DirectLatencyProbe {
     }
   }
 
-  Future<DirectLatencyReading?> _icmp(InternetAddress address) async {
-    if (!Platform.isAndroid || _closed) return null;
+  Future<DirectLatencyReading?> _icmp(InternetAddress address) =>
+      runIcmpWithStarter(
+        address,
+        startProcess: Platform.isAndroid ? Process.start : null,
+      );
+
+  /// Runs the ICMP lifecycle with an explicit starter, never a default.
+  /// Only [check] authorizes direct traffic, and only Android supplies its
+  /// system process starter on that path.
+  @visibleForTesting
+  Future<DirectLatencyReading?> runIcmpWithStarter(
+    InternetAddress address, {
+    required Future<Process> Function(
+      String executable,
+      List<String> arguments,
+    )?
+    startProcess,
+  }) async {
+    if (startProcess == null || _closed || !isPublicAddress(address)) {
+      return null;
+    }
     final executable = address.type == InternetAddressType.IPv4
         ? '/system/bin/ping'
         : '/system/bin/ping6';
-    final process = await Process.start(executable, [
+    final process = await startProcess(executable, [
       '-n',
       '-c',
       '1',
@@ -241,11 +261,15 @@ final class DirectLatencyProbe {
       '1',
       address.address,
     ]);
-    void cancel() => process.kill();
+    var signalSent = false;
+    void cancel() {
+      if (!signalSent) signalSent = process.kill();
+    }
+
     _abort.add(cancel);
-    final errors = process.stderr.drain<void>();
     try {
       if (_closed) return null;
+      final errors = process.stderr.drain<void>();
       final output = process.stdout.transform(utf8.decoder).join();
       final result = await Future.wait<Object>([
         output,
