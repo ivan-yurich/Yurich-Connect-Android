@@ -8,9 +8,6 @@ import 'src/services/on_device_diagnostics.dart';
 
 void main() => _launch(tvMode: false);
 
-@pragma('vm:entry-point')
-void tvMain() => _launch(tvMode: true);
-
 void _launch({required bool tvMode}) {
   runZonedGuarded(
     () {

@@ -41,10 +41,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
 class MainActivity : FlutterActivity() {
-    override fun getDartEntrypointFunctionName(): String =
-        if (BuildConfig.DISTRIBUTION_CHANNEL == "tv") "tvMain"
-        else super.getDartEntrypointFunctionName()
-
     private val mainHandler = Handler(Looper.getMainLooper())
     private var firstFrameRendered = false
     private var firstFrameWatchdog: Runnable? = null
@@ -576,22 +572,15 @@ class MainActivity : FlutterActivity() {
 
     private fun getInstalledPackages(): List<String> {
         return try {
-            val categories = if (BuildConfig.DISTRIBUTION_CHANNEL == "tv") {
-                listOf(Intent.CATEGORY_LAUNCHER, Intent.CATEGORY_LEANBACK_LAUNCHER)
+            val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.queryIntentActivities(
+                    launcherIntent,
+                    PackageManager.ResolveInfoFlags.of(0L),
+                )
             } else {
-                listOf(Intent.CATEGORY_LAUNCHER)
-            }
-            val activities = categories.flatMap { category ->
-                val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(category)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    packageManager.queryIntentActivities(
-                        launcherIntent,
-                        PackageManager.ResolveInfoFlags.of(0L),
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    packageManager.queryIntentActivities(launcherIntent, 0)
-                }
+                @Suppress("DEPRECATION")
+                packageManager.queryIntentActivities(launcherIntent, 0)
             }
             (activities.mapNotNull { it.activityInfo?.packageName } + packageName)
                 .distinct()

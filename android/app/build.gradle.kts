@@ -90,10 +90,6 @@ android {
             buildConfigField("boolean", "HERMES_DELIVERY_PILOT", hermesDeliveryPilot.get().toString())
             manifestPlaceholders["hermesDeliveryPilot"] = hermesDeliveryPilot.get().toString()
         }
-        create("tv") {
-            dimension = "distribution"
-            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"tv\"")
-        }
         create("play") {
             dimension = "distribution"
             // Keep Play builds above Flutter's per-ABI APK version-code offsets.
@@ -126,15 +122,6 @@ android {
                 hermesReleaseKeepFile,
             )
         }
-    }
-}
-
-androidComponents {
-    onVariants(selector().withFlavor("distribution" to "tv")) { variant ->
-        // Flutter's default build-type filter also permits x86_64 for ARM targets.
-        variant.packaging.jniLibs.excludes.addAll(
-            listOf("lib/x86/**", "lib/x86_64/**"),
-        )
     }
 }
 
