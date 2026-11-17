@@ -91,6 +91,127 @@ Future<HttpClientResponse> _geo(String country) async =>
     _Response(200, jsonEncode({'country_code': country}));
 
 void main() {
+  for (final ipv6First in [true, false]) {
+    test(
+      'prefers IPv4 before IPv6 fallback (IPv6 first: $ipv6First)',
+      () async {
+        final ipv4 = InternetAddress('192.0.2.10');
+        final ipv6 = InternetAddress('2001:db8::10');
+        final queriedAddresses = <String>[];
+        final lookups = <String>[];
+        final client = _Client(
+          (uri) async =>
+              uri == _sources.first ? _Response(503, '') : await _geo('FI'),
+        );
+        final service = ProfileGeoService(
+          addressLookup: (host) async {
+            lookups.add(host);
+            return ipv6First ? [ipv6, ipv4] : [ipv4, ipv6];
+          },
+          ipSources: (address) {
+            queriedAddresses.add(address);
+            return [address == ipv4.address ? _sources.first : _sources.last];
+          },
+          clientFactory: () => client,
+        );
+        addTearDown(service.close);
+
+        final result = await service.resolveEndpointCountry(
+          _profile('EDGE.example.invalid'),
+        );
+        expect(result?.countryCode, 'FI');
+        expect(lookups, ['edge.example.invalid']);
+        expect(queriedAddresses, [ipv4.address, ipv6.address]);
+        expect(client.requested, _sources);
+        expect(client.forced, isTrue);
+      },
+    );
+  }
+
+  test(
+    'tries only two preferred addresses when several are available',
+    () async {
+      final ipv4 = [
+        InternetAddress('192.0.2.10'),
+        InternetAddress('198.51.100.10'),
+      ];
+      final addresses = [
+        InternetAddress('2001:db8::20'),
+        ipv4.first,
+        InternetAddress('2001:db8::10'),
+        ipv4.last,
+      ];
+      final queriedAddresses = <String>[];
+      final client = _Client((_) async => _Response(503, ''));
+      final service = ProfileGeoService(
+        addressLookup: (_) async => addresses,
+        ipSources: (address) {
+          queriedAddresses.add(address);
+          return [_sources.first];
+        },
+        clientFactory: () => client,
+      );
+      addTearDown(service.close);
+
+      expect(
+        await service.resolveEndpointCountry(_profile('edge.example.invalid')),
+        isNull,
+      );
+      expect(queriedAddresses, unorderedEquals(ipv4.map((ip) => ip.address)));
+      expect(client.requested, hasLength(2));
+      expect(client.forced, isTrue);
+    },
+  );
+
+  for (final (label, payload, code, name, ip) in [
+    (
+      'snake-case country and IP',
+      {
+        'country_code': ' nl ',
+        'country_name': '  Netherlands  ',
+        'ip': '203.0.113.20',
+      },
+      'NL',
+      'Netherlands',
+      '203.0.113.20',
+    ),
+    (
+      'camel-case country and query address',
+      {
+        'countryCode': ' fi ',
+        'countryName': '  Finland ',
+        'query': '203.0.113.21',
+      },
+      'FI',
+      'Finland',
+      '203.0.113.21',
+    ),
+    (
+      'duplicate country code in the name',
+      {'country_code2': ' de ', 'country': ' DE '},
+      'DE',
+      null,
+      null,
+    ),
+  ]) {
+    test('normalizes a proxied geo response with $label', () async {
+      final client = _Client((_) async => _Response(200, jsonEncode(payload)));
+      final service = ProfileGeoService(
+        clientFactory: () => client,
+        exitSources: [_sources.first],
+      );
+      addTearDown(service.close);
+
+      final result = await service.resolveExitCountryThroughTunnel();
+      expect(result?.countryCode, code);
+      expect(result?.countryName, name);
+      expect(result?.ip, ip);
+      expect(client.requested, [_sources.first]);
+      expect(client.findProxy!(_sources.first), 'PROXY 127.0.0.1:20808');
+      expect(client.forced, isTrue);
+    });
+  }
+
   test(
     'same endpoint shares in-flight DNS and result across protocol profiles',
     () async {

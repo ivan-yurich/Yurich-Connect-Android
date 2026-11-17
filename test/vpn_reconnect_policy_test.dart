@@ -267,6 +267,30 @@ void main() {
     },
   );
 
+  test(
+    'Auto prefers a faster handoff only while another candidate remains',
+    () {
+      for (final (kind, engine, quick, full) in [
+        (VpnProfileKind.naive, VpnCoreEngine.singBox, 14, 24),
+        (VpnProfileKind.hysteria2, VpnCoreEngine.singBox, 20, 40),
+        (VpnProfileKind.vlessXhttp, VpnCoreEngine.xray, 20, 40),
+      ]) {
+        VpnReconnectPolicy policy(bool alternative) =>
+            VpnReconnectPolicy.resolve(
+              kind: kind,
+              engine: engine,
+              rapidRestart: false,
+              crossEngineRestart: false,
+              automaticFailover: true,
+              hasAutoAlternative: alternative,
+            );
+        expect(policy(true).statusTimeout, Duration(seconds: quick));
+        expect(policy(false).statusTimeout, Duration(seconds: full));
+        expect(policy(true).stopStatusTimeout, policy(false).stopStatusTimeout);
+      }
+    },
+  );
+
   test('attempt timeout is clamped to the remaining budget', () {
     final policy = VpnReconnectPolicy.resolve(
       kind: VpnProfileKind.vlessTls,

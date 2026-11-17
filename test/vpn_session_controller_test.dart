@@ -9,19 +9,33 @@ void main() {
     final connect = controller.beginConnect();
     final entered = Completer<void>();
     final release = Completer<void>();
+    final events = <String>[];
 
     final connectFuture = controller.enqueue(connect, () async {
+      events.add('start sent');
       entered.complete();
       await release.future;
+      events.add('start acknowledged');
       controller.ensureCurrent(connect);
     });
     await entered.future;
 
     final disconnect = controller.beginDisconnect();
+    final cancelled = expectLater(
+      connectFuture,
+      throwsA(isA<VpnSessionCancelled>()),
+    );
+    final stop = controller.enqueue(disconnect, () async {
+      events.add('stop sent');
+    });
+    await Future<void>.value();
+    expect(controller.pendingOperations, 2);
+    expect(events, ['start sent']);
     release.complete();
-    await expectLater(connectFuture, throwsA(isA<VpnSessionCancelled>()));
-    await controller.enqueue(disconnect, () async {});
+    await cancelled;
+    await stop;
 
+    expect(events, ['start sent', 'start acknowledged', 'stop sent']);
     expect(controller.desiredRunning, isFalse);
     expect(controller.hasPendingOperations, isFalse);
   });
@@ -112,6 +126,55 @@ void main() {
     expect(controller.isCurrent(connect), isFalse);
     expect(() => controller.beginConnect(), throwsStateError);
   });
+
+  test(
+    'disposed queue rejects submissions without running or counting them',
+    () async {
+      final controller = VpnSessionController();
+      final pending = controller.beginProfileSwitch();
+      controller.dispose();
+
+      await expectLater(
+        controller.enqueue(pending, () async => fail('Disposed action ran')),
+        throwsA(
+          isA<VpnSessionCancelled>().having(
+            (failure) => failure.generation,
+            'generation',
+            pending.generation,
+          ),
+        ),
+      );
+      expect(controller.pendingOperations, 0);
+      expect(controller.desiredRunning, isFalse);
+    },
+  );
+
+  test(
+    'a generation without an issued operation cannot schedule a wait',
+    () async {
+      final controller = VpnSessionController();
+      final unissued = VpnSessionOperation(
+        generation: controller.generation,
+        command: VpnSessionCommand.maintenance,
+      );
+      final read = Completer<void>();
+
+      await expectLater(
+        Future<void>.sync(
+          () => controller.cancelWhenSuperseded(unissued, read.future),
+        ),
+        throwsA(
+          isA<VpnSessionCancelled>().having(
+            (failure) => failure.generation,
+            'generation',
+            unissued.generation,
+          ),
+        ),
+      );
+      expect(controller.pendingOperations, 0);
+      read.complete();
+    },
+  );
 
   test('superseding an operation cancels its active wait', () async {
     final controller = VpnSessionController();

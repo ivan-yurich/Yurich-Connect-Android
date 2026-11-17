@@ -12,6 +12,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// The public SharedPreferences test helper cannot simulate a failed write.
+// ignore: depend_on_referenced_packages
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -22,6 +25,24 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     secureStorage = _MemorySecureProfileStorage();
     store = ProfileStore(secureStorage: secureStorage);
+  });
+
+  test('persists only the subscription refresh deadline in UTC', () async {
+    expect(await store.loadNextSubscriptionRefreshAt(), isNull);
+    final next = DateTime.parse('2026-01-01T13:00:00+07:00');
+    await store.saveNextSubscriptionRefreshAt(next);
+    expect(
+      await store.loadNextSubscriptionRefreshAt(),
+      DateTime.utc(2026, 1, 1, 6),
+    );
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getKeys(), {'nextSubscriptionRefreshAt'});
+    for (final invalid in ['not-a-date', 1234]) {
+      SharedPreferences.setMockInitialValues({
+        'nextSubscriptionRefreshAt': invalid,
+      });
+      expect(await store.loadNextSubscriptionRefreshAt(), isNull);
+    }
   });
 
   test('remembers deleted subscription profile ids by source', () async {
@@ -92,6 +113,35 @@ void main() {
     await store.saveSmartRouteRuDirect(false);
     expect(await store.loadSmartRouteRuDirect(), isFalse);
   });
+
+  for (final removal in [_RemovalFailure.none, _RemovalFailure.rejected]) {
+    test(
+      'falls back to deleting consent when saving false fails ($removal)',
+      () async {
+        const key = 'flutter.directLatencyAllowed';
+        const selected = 'flutter.selectedProfileId';
+        final backend = _RejectingPreferences(
+          {key: true, selected: 'fixture'},
+          key: key,
+          removal: removal,
+        );
+        _usePreferences(backend);
+
+        expect(await store.loadDirectLatencyAllowed(), isTrue);
+        final revoked = removal == _RemovalFailure.none;
+        expect(await store.saveDirectLatencyAllowed(false), revoked);
+        expect(backend.calls, ['read', 'set:$key=false', 'remove:$key']);
+        expect(await backend.persisted(), {
+          selected: 'fixture',
+          if (!revoked) key: true,
+        });
+        if (revoked) {
+          await (await SharedPreferences.getInstance()).reload();
+          expect(await store.loadDirectLatencyAllowed(), isNull);
+        }
+      },
+    );
+  }
 
   group('Smart Route install default', () {
     const channel = MethodChannel('com.tecclub.flutter_singbox/methods');
@@ -285,6 +335,39 @@ void main() {
       },
     );
 
+    for (final (label, throwOnWrite, removal, throwOnReload) in [
+      ('write returns false', false, _RemovalFailure.none, false),
+      ('write and cleanup throw', true, _RemovalFailure.throws, false),
+      ('reload also throws', false, _RemovalFailure.throws, true),
+    ]) {
+      test('discards a tentative Smart Route default when $label', () async {
+        const key = 'flutter.$preferenceKey';
+        final backend = _RejectingPreferences(
+          {},
+          key: key,
+          throwOnWrite: throwOnWrite,
+          removal: removal,
+          throwOnReload: throwOnReload,
+        );
+        _usePreferences(backend);
+
+        expect(await loadFresh(), isFalse);
+        expect(calls, ['initializeSmartRouteInstallDefault']);
+        expect(backend.calls, ['read', 'set:$key=true', 'remove:$key', 'read']);
+        await expectNoDefaultSaved();
+        expect(await backend.persisted(), isNot(contains(key)));
+
+        expect(
+          await store.loadSmartRouteRuDirect(
+            installTime: installTime,
+            updateTime: later,
+          ),
+          isFalse,
+        );
+        expect(calls, hasLength(1));
+      });
+    }
+
     test('does not infer a clean install on other platforms', () async {
       for (final platform in TargetPlatform.values.where(
         (value) => value != TargetPlatform.android,
@@ -302,6 +385,33 @@ void main() {
 
     await store.saveDnsProtectionMode(DnsProtectionMode.leakGuard);
     expect(await store.loadDnsProtectionMode(), DnsProtectionMode.leakGuard);
+  });
+
+  test('autoconnect defaults off and persists both explicit choices', () async {
+    final prefs = await SharedPreferences.getInstance();
+    expect(await store.loadAutoConnect(), isFalse);
+    expect(prefs.containsKey('autoConnect'), isFalse);
+
+    for (final enabled in [true, false]) {
+      await store.saveAutoConnect(enabled);
+      await prefs.reload();
+      expect(await store.loadAutoConnect(), enabled);
+      expect(prefs.getBool('autoConnect'), enabled);
+    }
+  });
+
+  test('persists and clears the split tunnel process list', () async {
+    final prefs = await SharedPreferences.getInstance();
+    expect(await store.loadSplitTunnelExcludedProcesses(), isEmpty);
+    const processes = ['fixture-browser.exe', 'fixture-helper.exe'];
+
+    await store.saveSplitTunnelExcludedProcesses(processes);
+    await prefs.reload();
+    expect(await store.loadSplitTunnelExcludedProcesses(), processes);
+
+    await store.saveSplitTunnelExcludedProcesses(const []);
+    await prefs.reload();
+    expect(await store.loadSplitTunnelExcludedProcesses(), isEmpty);
   });
 
   test('stores manual disconnect guard', () async {
@@ -367,6 +477,38 @@ void main() {
       'health-probe:watchdog',
     );
   });
+
+  test(
+    'removes empty stability records without erasing other settings',
+    () async {
+      const profile = 'fixture';
+      await store.saveSelectedProfileId(profile);
+      await store.saveProfileStabilityStats({
+        profile: const ProfileStabilityStats(successfulStarts: 2),
+      });
+      await store.saveProfileNetworkStabilityStats({
+        profile: {
+          'wifi': const ProfileNetworkStabilityStats(successfulStarts: 1),
+        },
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      expect(await store.loadProfileStabilityStats(), contains(profile));
+      expect(await store.loadProfileNetworkStabilityStats(), contains(profile));
+
+      await store.saveProfileStabilityStats({});
+      await prefs.reload();
+      expect(prefs.containsKey('profileStabilityStats'), isFalse);
+      expect(await store.loadProfileStabilityStats(), isEmpty);
+      expect(await store.loadProfileNetworkStabilityStats(), contains(profile));
+
+      await store.saveProfileNetworkStabilityStats({});
+      await prefs.reload();
+      expect(prefs.containsKey('profileNetworkStabilityStats'), isFalse);
+      expect(await store.loadProfileNetworkStabilityStats(), isEmpty);
+      expect(await store.loadSelectedProfileId(), profile);
+    },
+  );
 
   test('migrates plaintext profiles to secure storage once', () async {
     const profile = VpnProfile(
@@ -477,6 +619,65 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.containsKey('profiles'), isFalse);
   });
+}
+
+void _usePreferences(SharedPreferencesStorePlatform backend) {
+  final previous = SharedPreferencesStorePlatform.instance;
+  SharedPreferencesStorePlatform.instance = backend;
+  addTearDown(() => SharedPreferencesStorePlatform.instance = previous);
+}
+
+enum _RemovalFailure { none, rejected, throws }
+
+final class _RejectingPreferences extends InMemorySharedPreferencesStore {
+  _RejectingPreferences(
+    super.data, {
+    required this.key,
+    this.throwOnWrite = false,
+    this.removal = _RemovalFailure.none,
+    this.throwOnReload = false,
+  }) : super.withData();
+
+  final String key;
+  final bool throwOnWrite;
+  final _RemovalFailure removal;
+  final bool throwOnReload;
+  final calls = <String>[];
+  var _reads = 0;
+
+  Future<Map<String, Object>> persisted() => super.getAll();
+
+  @override
+  Future<Map<String, Object>> getAll() async {
+    calls.add('read');
+    _reads++;
+    if (throwOnReload && _reads > 1) {
+      throw PlatformException(code: 'FIXTURE_RELOAD_FAILED');
+    }
+    return super.getAll();
+  }
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    calls.add('set:$key=$value');
+    if (key != this.key) return super.setValue(valueType, key, value);
+    if (throwOnWrite) throw PlatformException(code: 'FIXTURE_WRITE_FAILED');
+    return false;
+  }
+
+  @override
+  Future<bool> remove(String key) async {
+    calls.add('remove:$key');
+    if (key != this.key) return super.remove(key);
+    switch (removal) {
+      case _RemovalFailure.none:
+        return super.remove(key);
+      case _RemovalFailure.rejected:
+        return false;
+      case _RemovalFailure.throws:
+        throw PlatformException(code: 'FIXTURE_REMOVE_FAILED');
+    }
+  }
 }
 
 final class _MemorySecureProfileStorage implements SecureProfileStorage {

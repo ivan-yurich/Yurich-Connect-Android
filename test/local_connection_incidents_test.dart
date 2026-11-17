@@ -86,6 +86,26 @@ void main() {
     expect(attempt.takeTerminal(current: true, consentEpoch: 'epoch'), isNull);
   });
 
+  test('startup traffic rejection records only the fixed category', () {
+    // The non-Android startup probe does not have a pilot attempt.
+    IncidentSignal.trafficCheckFailed.recordOn(null);
+    final attempt = LocalConnectionIncidentAttempt('epoch')
+      ..observedStart(profile, 'cellular');
+    IncidentSignal.trafficCheckFailed.recordOn(attempt);
+    expect(attempt.takeTerminal(current: true, consentEpoch: 'epoch'), {
+      'epoch': 'epoch',
+      'protocol': 'xhttp',
+      'network': 'cellular',
+      'stage': 'traffic',
+      'code': 'unknown',
+    });
+
+    final revoked = LocalConnectionIncidentAttempt('old')
+      ..observedStart(profile, 'wifi');
+    IncidentSignal.trafficCheckFailed.recordOn(revoked);
+    expect(revoked.takeTerminal(current: true, consentEpoch: 'new'), isNull);
+  });
+
   test(
     'cancellation, stale generation and revoked consent suppress recording',
     () {

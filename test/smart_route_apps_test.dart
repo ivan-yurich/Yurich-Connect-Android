@@ -167,6 +167,61 @@ void main() {
     },
   );
 
+  for (final (reported, availability) in [
+    ('shared_uid', SmartRouteAppAvailability.sharedUid),
+    ('disabled', SmartRouteAppAvailability.disabled),
+  ]) {
+    test('reads $reported without claiming an applied direct route', () async {
+      const channel = MethodChannel('com.tecclub.flutter_singbox/methods');
+      const package = 'org.example.fixture';
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final calls = <String>[];
+      var protected = false;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        expect(call.method, 'getSmartRouteApps');
+        expect(call.arguments, isNull);
+        return {
+          'candidates': [
+            {'packageId': package, 'name': 'Fixture', 'availability': reported},
+          ],
+          'selected': [package],
+          'applied': [if (protected) package],
+          'protected': protected,
+          'supported': true,
+          'protectionKnown': true,
+        };
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      const service = SmartRouteAppsService();
+
+      SmartRouteAppRoute route(SmartRouteAppsSnapshot snapshot) =>
+          snapshot.routeFor(
+            package,
+            builtIn: false,
+            smartRouteEnabled: true,
+            managedProfile: true,
+            vpnActive: true,
+            availability: snapshot.candidates.single.availability,
+          );
+
+      final snapshot = await service.read();
+      expect(snapshot.candidates.single.packageId, package);
+      expect(snapshot.candidates.single.availability, availability);
+      expect(snapshot.selected, {package});
+      expect(snapshot.applied, isEmpty);
+      expect(route(snapshot), SmartRouteAppRoute.unavailable);
+
+      protected = true;
+      final underProtection = await service.read();
+      expect(underProtection.selected, {package});
+      expect(underProtection.applied, {package});
+      expect(route(underProtection), SmartRouteAppRoute.protected);
+      expect(calls, ['getSmartRouteApps', 'getSmartRouteApps']);
+    });
+  }
+
   test('expanded catalog preserves case and full live exclusion evidence', () {
     const mixedCase = 'website.copyandpaste.MFCRO';
     final candidates = [
@@ -276,6 +331,19 @@ void main() {
       expect(calls.single.arguments, {
         'config': config,
         'smartRouteApps': true,
+      });
+      expect(
+        await service.saveManagedConfig(
+          config,
+          smartRouteApps: false,
+          hermesManagedXhttp: true,
+        ),
+        isTrue,
+      );
+      expect(calls.map((call) => call.method), ['saveConfig', 'saveConfig']);
+      expect(calls.last.arguments, {
+        'config': config,
+        'hermesManagedXhttp': true,
       });
       expect(
         SmartRouteAppsService.managedProfile(

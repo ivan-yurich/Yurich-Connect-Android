@@ -802,7 +802,8 @@ void main() {
   test(
     'imports go-it style NaiveProxy link as native Naive outbound',
     () async {
-      const link = 'naive+https://ivan:secret-for-test@go-it.tech:443';
+      const link =
+          'naive+https://ivan:secret-for-test@f2-fixture.example.test:443';
 
       final profile = (await ProfileImporter().importFromText(link)).first;
       final config =
@@ -811,13 +812,16 @@ void main() {
       final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
 
       expect(profile.kind, VpnProfileKind.naive);
-      expect(profile.server, 'go-it.tech');
+      expect(profile.server, 'f2-fixture.example.test');
       expect(proxy['type'], 'naive');
-      expect(proxy['server'], 'go-it.tech');
+      expect(proxy['server'], 'f2-fixture.example.test');
       expect(proxy['server_port'], 443);
       expect(proxy['username'], 'ivan');
       expect(proxy['password'], 'secret-for-test');
-      expect(proxy['tls'], {'enabled': true, 'server_name': 'go-it.tech'});
+      expect(proxy['tls'], {
+        'enabled': true,
+        'server_name': 'f2-fixture.example.test',
+      });
     },
   );
 
@@ -825,7 +829,7 @@ void main() {
     'imports n8n style NaiveProxy link and supports HTTP CONNECT fallback',
     () async {
       const link =
-          'naive+https://n8n-cloud.online:secret-for-test@n8n-cloud.online:443';
+          'naive+https://f1-fixture.example.test:secret-for-test@f1-fixture.example.test:443';
 
       final profile = (await ProfileImporter().importFromText(link)).first;
       final nativeConfig =
@@ -845,16 +849,16 @@ void main() {
           (httpConfig['outbounds'] as List).first as Map<String, dynamic>;
 
       expect(profile.kind, VpnProfileKind.naive);
-      expect(profile.server, 'n8n-cloud.online');
+      expect(profile.server, 'f1-fixture.example.test');
       expect(nativeProxy['type'], 'naive');
       expect(httpProxy['type'], 'http');
-      expect(httpProxy['server'], 'n8n-cloud.online');
+      expect(httpProxy['server'], 'f1-fixture.example.test');
       expect(httpProxy['server_port'], 443);
-      expect(httpProxy['username'], 'n8n-cloud.online');
+      expect(httpProxy['username'], 'f1-fixture.example.test');
       expect(httpProxy['password'], 'secret-for-test');
       expect(httpProxy['tls'], {
         'enabled': true,
-        'server_name': 'n8n-cloud.online',
+        'server_name': 'f1-fixture.example.test',
       });
     },
   );
@@ -863,11 +867,11 @@ void main() {
     final payload = jsonEncode({
       'type': 'http',
       'tag': 'naiveproxy-out',
-      'server': 'n8n-cloud.online',
+      'server': 'f1-fixture.example.test',
       'server_port': 443,
-      'username': 'n8n-cloud.online',
+      'username': 'f1-fixture.example.test',
       'password': 'secret-for-test',
-      'tls': {'enabled': true, 'server_name': 'n8n-cloud.online'},
+      'tls': {'enabled': true, 'server_name': 'f1-fixture.example.test'},
     });
 
     final profile = (await ProfileImporter().importFromText(payload)).first;
@@ -877,14 +881,17 @@ void main() {
     final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
 
     expect(profile.kind, VpnProfileKind.naive);
-    expect(profile.name, 'n8n-cloud.online');
+    expect(profile.name, 'f1-fixture.example.test');
     expect(proxy['type'], 'http');
     expect(proxy['tag'], 'proxy');
-    expect(proxy['server'], 'n8n-cloud.online');
+    expect(proxy['server'], 'f1-fixture.example.test');
     expect(proxy['server_port'], 443);
-    expect(proxy['username'], 'n8n-cloud.online');
+    expect(proxy['username'], 'f1-fixture.example.test');
     expect(proxy['password'], 'secret-for-test');
-    expect(proxy['tls'], {'server_name': 'n8n-cloud.online', 'enabled': true});
+    expect(proxy['tls'], {
+      'server_name': 'f1-fixture.example.test',
+      'enabled': true,
+    });
   });
 
   test('imports standalone sing-box Hysteria2 outbound', () async {
@@ -1443,6 +1450,39 @@ void main() {
     },
   );
 
+  test(
+    'current tunnel subscription refresh never falls back to a direct socket',
+    () async {
+      final routes = <String>[];
+      final clients = <_UnavailableSubscriptionClient>[];
+      await HttpOverrides.runZoned(
+        () async {
+          await expectLater(
+            ProfileImporter().importFromText(
+              'https://subscriptions.example.invalid/s/fixture/',
+              currentTunnelOnly: true,
+            ),
+            throwsA(isA<ProfileImportException>()),
+          );
+        },
+        createHttpClient: (_) {
+          final client = _UnavailableSubscriptionClient(routes);
+          clients.add(client);
+          return client;
+        },
+      );
+      expect(clients, hasLength(1));
+      expect(clients.single.forceClosed, isTrue);
+      expect(routes.length, greaterThan(1));
+      expect(
+        routes,
+        everyElement(
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}',
+        ),
+      );
+    },
+  );
+
   test('rejects subscriptions with too many profiles', () async {
     final links = List.generate(ProfileImporter.maxImportedProfiles + 1, (i) {
       final suffix = i.toRadixString(16).padLeft(12, '0');
@@ -1461,4 +1501,30 @@ void main() {
       ),
     );
   });
+}
+
+class _UnavailableSubscriptionClient implements HttpClient {
+  _UnavailableSubscriptionClient(this.routes);
+
+  final List<String> routes;
+  String Function(Uri)? _findProxy;
+  bool forceClosed = false;
+
+  @override
+  Duration? connectionTimeout;
+
+  @override
+  set findProxy(String Function(Uri)? findProxy) => _findProxy = findProxy;
+
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) async {
+    routes.add(_findProxy?.call(url) ?? 'DIRECT');
+    throw const SocketException('Fixture tunnel is unavailable');
+  }
+
+  @override
+  void close({bool force = false}) => forceClosed = force;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

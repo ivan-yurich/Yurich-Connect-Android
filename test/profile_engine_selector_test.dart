@@ -20,6 +20,41 @@ void main() {
     expect(selection.reason, contains('sing-box'));
   });
 
+  for (final (transport, metadata) in [
+    ('ws', <String, dynamic>{'network': ' WS '}),
+    (
+      'grpc',
+      <String, dynamic>{
+        'transport': {'type': 'grpc'},
+      },
+    ),
+    (
+      'xhttp',
+      <String, dynamic>{
+        'unsupported_transport': ' XHTTP ',
+        'transport': {'type': 'tcp'},
+      },
+    ),
+  ]) {
+    test('keeps non-TCP Reality $transport unavailable', () {
+      final profile = _profile(
+        VpnProfileKind.vlessReality,
+        outbound: {'type': 'vless', ...metadata},
+      );
+
+      final selection = ProfileEngineSelector.select(profile);
+      expect(selection.engine, VpnCoreEngine.xray);
+      expect(selection.canRunInCurrentBuild, isFalse);
+      expect(selection.supportLevel, VpnProtocolSupportLevel.unavailable);
+      expect(selection.reason, contains('transport=$transport'));
+      expect(
+        ProfileEngineSelector.requiresSuccessfulStartupProbe(profile),
+        isFalse,
+      );
+      expect(ProfileEngineSelector.supportsLocalProxyProbe(profile), isFalse);
+    });
+  }
+
   test('runs VLESS XHTTP on Xray engine', () {
     final profile = _profile(
       VpnProfileKind.vlessXhttp,
@@ -70,12 +105,18 @@ void main() {
   });
 
   test('requires a successful startup probe only for Xray profiles', () {
+    final available = _profile(VpnProfileKind.vlessXhttp);
+    final blocked = _profile(VpnProfileKind.vlessMkcp);
     expect(
-      ProfileEngineSelector.requiresSuccessfulStartupProbe(
-        _profile(VpnProfileKind.vlessXhttp),
-      ),
+      ProfileEngineSelector.requiresSuccessfulStartupProbe(available),
       isTrue,
     );
+    expect(ProfileEngineSelector.supportsLocalProxyProbe(available), isTrue);
+    expect(
+      ProfileEngineSelector.requiresSuccessfulStartupProbe(blocked),
+      isFalse,
+    );
+    expect(ProfileEngineSelector.supportsLocalProxyProbe(blocked), isFalse);
   });
 
   test('does not enforce mixed-proxy probe for sing-box profiles', () {

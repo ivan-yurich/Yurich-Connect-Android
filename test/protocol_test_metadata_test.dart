@@ -14,6 +14,51 @@ void main() {
         port: 443,
       );
 
+  test('reports only safe XHTTP TLS metadata for a marked-offline profile', () {
+    final fixture = profile('endpoint.example.invalid', name: 'fixture-offline')
+        .copyWith(
+          kind: VpnProfileKind.vlessXhttp,
+          outbound: {
+            'uuid': 'fixture-identity',
+            'tls': {'enabled': true, 'server_name': 'tls.example.invalid'},
+          },
+        );
+
+    expect(ProtocolTestMetadata.profile(fixture), {
+      'protocol': 'XHTTP (TLS)',
+      'offlineMarked': true,
+      'upstreamKind': 'domain',
+    });
+  });
+
+  for (final (label, upload, download, bandwidth) in [
+    (
+      'only the valid numeric limit',
+      1000000,
+      '25',
+      {'bandwidthMode': 'configured', 'uploadLimitMbps': 1000000},
+    ),
+    ('no out-of-range limits', 0, 1000001, {'bandwidthMode': 'auto'}),
+  ]) {
+    test('Hysteria emits $label', () {
+      final fixture = profile('2001:db8::25').copyWith(
+        kind: VpnProfileKind.hysteria,
+        outbound: {
+          'up_mbps': upload,
+          'down_mbps': download,
+          'auth_str': 'fixture-secret',
+        },
+      );
+
+      expect(ProtocolTestMetadata.profile(fixture), {
+        'protocol': 'Hysteria',
+        'offlineMarked': false,
+        'upstreamKind': 'ipv6',
+        ...bandwidth,
+      });
+    });
+  }
+
   test('metadata contains only protocol, offline flag and address family', () {
     final value = ProtocolTestMetadata.profile(profile('private.example'));
     expect(value, {

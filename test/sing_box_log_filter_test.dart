@@ -59,5 +59,33 @@ void main() {
         isFalse,
       );
     });
+
+    test('keeps TLS and DNS failures in order in a mixed diagnostic batch', () {
+      const failures = [
+        'ERROR outbound/vless[proxy]: TLS handshake failed: certificate expired',
+        'ERROR dns: exchange failed for endpoint.example.invalid',
+      ];
+      final batch = [
+        'INFO router: found package name: org.example.fixture',
+        failures[0],
+        'TRACE outbound/vless[proxy]: XtlsPadding 1 2 3',
+        failures[1],
+        'INFO router: found user id: 12345',
+      ];
+
+      expect(
+        batch.where((line) => !SingBoxLogFilter.isDiagnosticNoise(line)),
+        failures,
+      );
+    });
+
+    test('does not hide failures that resemble router or XTLS noise', () {
+      for (final line in [
+        'ERROR router: failed to search process: permission denied',
+        'ERROR outbound/vless[backup]: XtlsPadding failed',
+      ]) {
+        expect(SingBoxLogFilter.isDiagnosticNoise(line), isFalse, reason: line);
+      }
+    });
   });
 }

@@ -2,6 +2,22 @@ import 'package:aurum_vpn/src/services/sensitive_data_redactor.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final scheme in ['NAIVE', 'naive+https']) {
+    test('masks both Naive credentials in $scheme links', () {
+      const user = 'fixture-user%40example';
+      const password = 'fixture%3Apassword%40value';
+      const destination = 'relay.example.invalid:2443/fixture';
+      final redacted = SensitiveDataRedactor.redact(
+        'connecting $scheme://$user:$password@$destination',
+      );
+
+      expect(redacted, 'connecting $scheme://***:***@$destination');
+      expect(redacted, isNot(contains(user)));
+      expect(redacted, isNot(contains(password)));
+      expect(SensitiveDataRedactor.redact(redacted), redacted);
+    });
+  }
+
   test('redacts VPN credentials and JSON secrets', () {
     const input =
         'vless://uuid-secret@example.com:443 '
@@ -18,7 +34,7 @@ void main() {
 
   test('redacts subscription path, query token and URL credentials', () {
     const input =
-        'failed https://user:pass@plus-dns.tech/s/'
+        'failed https://user:pass@f1-fixture.example.test/s/'
         '0123456789abcdef0123456789abcdef0123456789abcdef/xhttp.txt'
         '?token=query-secret&client=android.';
 

@@ -6,6 +6,19 @@ import 'package:aurum_vpn/src/services/protocol_display_mapper.dart';
 import 'package:aurum_vpn/src/utils/traffic_formatter.dart';
 
 void main() {
+  test('connection statuses expose their Russian display labels', () {
+    expect(ConnectionStatus.values.map((status) => status.displayName), [
+      'Подключено',
+      'Ожидание',
+      'Смена сети',
+      'Нестабильно',
+      'Переподключение',
+      'Сбой',
+      'Отключено',
+      'Подключение...',
+    ]);
+  });
+
   group('TrafficFormatter', () {
     test('formats speeds and bytes', () {
       expect(TrafficFormatter.formatSpeed(0), '0 B/s');
@@ -13,6 +26,12 @@ void main() {
       expect(TrafficFormatter.formatSpeed(2048), '2 KB/s');
       expect(TrafficFormatter.formatSpeed(1048576), '1 MB/s');
       expect(TrafficFormatter.formatBytes(128 * 1024 * 1024), '128 MB');
+    });
+
+    test('keeps one decimal for fractional units below 100', () {
+      expect(TrafficFormatter.formatBytes(1536), '1.5 KB');
+      expect(TrafficFormatter.formatSpeed(5 * 1024 * 1024 ~/ 4), '1.3 MB/s');
+      expect(TrafficFormatter.formatBytes(100 * 1024 + 512), '101 KB');
     });
 
     test('formats duration as hh:mm:ss', () {
@@ -36,6 +55,30 @@ void main() {
   });
 
   group('ProtocolDisplayMapper', () {
+    test('keeps an unknown protocol label without guessing from metadata', () {
+      expect(
+        ProtocolDisplayMapper.mapProtocolToDisplayName(
+          '  Fixture-Relay  ',
+          transport: 'xhttp',
+          security: 'reality',
+        ),
+        'Fixture-Relay',
+      );
+    });
+
+    test('uses a neutral label for empty or whitespace-only protocols', () {
+      for (final protocol in ['', ' \t\r\n ']) {
+        expect(
+          ProtocolDisplayMapper.mapProtocolToDisplayName(
+            protocol,
+            transport: 'grpc',
+            security: 'tls',
+          ),
+          'Unknown protocol',
+        );
+      }
+    });
+
     test('distinguishes TLS and Reality XHTTP without changing profiles', () {
       for (final transport in ['xhttp', 'splithttp']) {
         expect(
@@ -133,6 +176,29 @@ void main() {
   });
 
   group('ConnectionUiState', () {
+    test('connecting keeps selected location and zeroes traffic', () {
+      final state = ConnectionUiState.connecting(
+        profileName: 'Fixture profile',
+        protocolDisplayName: 'XHTTP (TLS)',
+        countryName: 'Finland',
+        countryCode: 'FI',
+        pingMs: 42,
+        latencyLabel: 'TCP 42 ms',
+      );
+
+      expect(state.status, ConnectionStatus.connecting);
+      expect(state.profileName, 'Fixture profile');
+      expect(state.protocolDisplayName, 'XHTTP (TLS)');
+      expect(state.countryName, 'Finland');
+      expect(state.countryCode, 'FI');
+      expect(state.pingMs, 42);
+      expect(state.latencyLabel, 'TCP 42 ms');
+      expect(state.uploadSpeed, '0 B/s');
+      expect(state.downloadSpeed, '0 B/s');
+      expect(state.totalTraffic, '0 B');
+      expect(state.sessionDuration, isNull);
+    });
+
     test('preserves a protocol-specific latency label', () {
       final state = ConnectionUiState.connected(
         uploadSpeed: '0 B/s',

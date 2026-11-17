@@ -187,6 +187,50 @@ void main() {
     }
   });
 
+  test('the DNS name length limit does not widen an exact exception', () {
+    String host(int labelLength) =>
+        '${'a' * 63}.${'b' * 63}.${'c' * 63}.${'d' * labelLength}.test';
+    final allowed = host(56);
+    final oversized = host(57);
+    expect(allowed.length, 253);
+    expect(oversized.length, 254);
+
+    final rules = SmartRouteDomainRules.compile(
+      domains: [' ${allowed.toUpperCase()}. '],
+      domainSuffixes: const [],
+    );
+    expect(rules.xrayDomains, ['full:$allowed']);
+    expect(rules.matchesHost(allowed), isTrue);
+    expect(rules.matchesHost(oversized), isFalse);
+    expect(SmartRouteRules.domainOutbound(oversized), 'proxy');
+    expect(
+      () => SmartRouteDomainRules.compile(
+        domains: [oversized],
+        domainSuffixes: const [],
+      ),
+      throwsArgumentError,
+    );
+  });
+
+  test(
+    'installed-app fixtures cannot add browsers or lookalikes to bypass',
+    () {
+      const notAllowed = {
+        'com.android.chrome',
+        'ru.yandex.browser',
+        'ru.gosuslugi.fixture',
+        'org.example.fixture',
+      };
+      final packages = SmartRouteRules.ruBypassPackages([
+        'ru.gosuslugi',
+        ...notAllowed,
+      ]);
+
+      expect(packages, containsAll(['ru.gosuslugi', 'ru.sberbankmobile']));
+      expect(packages.toSet().intersection(notAllowed), isEmpty);
+    },
+  );
+
   test('cached route and package lists are immutable and shared', () {
     final domains = SmartRouteRules.proxyDomainRules;
     expect(identical(domains, SmartRouteRules.proxyDomainRules), isTrue);

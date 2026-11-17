@@ -118,4 +118,84 @@ void main() {
     expect(saved, unorderedEquals({bank, max}));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('cancel discards removal of a selected but unapplied app', (
+    tester,
+  ) async {
+    const id = 'example.route.fixture';
+    const snapshot = SmartRouteAppsSnapshot(
+      candidates: [
+        SmartRouteAppCandidate(
+          id,
+          'Fixture app',
+          SmartRouteAppAvailability.installed,
+        ),
+      ],
+      selected: {id},
+      applied: {},
+      supported: true,
+      protectionKnown: true,
+    );
+    var closed = 0;
+    Set<String>? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await showDialog<Set<String>>(
+                  context: context,
+                  builder: (_) => const SmartRouteAppsDialog(
+                    snapshot: snapshot,
+                    builtInPackages: {},
+                    smartRouteEnabled: true,
+                    managedProfile: true,
+                    vpnActive: true,
+                    russian: false,
+                  ),
+                );
+                closed++;
+              },
+              child: const Text('Open route editor'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Future<void> openEditor() async {
+      await tester.tap(find.text('Open route editor'));
+      await tester.pumpAndSettle();
+    }
+
+    final row = find.byKey(const ValueKey('smart-route-app-$id'));
+    CheckboxListTile currentRow() => tester.widget<CheckboxListTile>(row);
+    final cancel = find.widgetWithText(TextButton, 'Cancel');
+    await openEditor();
+    expect(currentRow().value, isTrue);
+    expect(find.text('Not applied to the current VPN'), findsOneWidget);
+    expect(find.text('Direct · applied'), findsNothing);
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    expect(currentRow().value, isFalse);
+    expect(find.text('Removed on save'), findsOneWidget);
+    expect(find.text('Not applied to the current VPN'), findsOneWidget);
+    expect(
+      tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+      isNotNull,
+    );
+
+    await tester.tap(cancel);
+    await tester.pumpAndSettle();
+    expect(closed, 1);
+    expect(result, isNull);
+    await openEditor();
+    expect(currentRow().value, isTrue);
+    expect(find.text('Removed on save'), findsNothing);
+    await tester.tap(cancel);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
 }

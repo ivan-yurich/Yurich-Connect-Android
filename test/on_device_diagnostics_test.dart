@@ -10,6 +10,9 @@ void main() {
   var active = false;
   var available = false;
   var fail = false;
+  String? failingMethod;
+  var pluginMissing = false;
+  var stoppedEarly = true;
   var exportResult = true;
   var mode = DiagnosticRun.standardMode;
   var durationHours = 7 * 24;
@@ -18,6 +21,9 @@ void main() {
     active = false;
     available = false;
     fail = false;
+    failingMethod = null;
+    pluginMissing = false;
+    stoppedEarly = true;
     exportResult = true;
     mode = DiagnosticRun.standardMode;
     durationHours = 7 * 24;
@@ -26,7 +32,10 @@ void main() {
       OnDeviceDiagnosticsService.channel,
       (call) async {
         calls.add(call);
-        if (fail) throw PlatformException(code: 'unavailable');
+        if (pluginMissing) throw MissingPluginException();
+        if (fail || call.method == failingMethod) {
+          throw PlatformException(code: 'unavailable');
+        }
         if (call.method == 'recordError') return null;
         if (call.method == 'export') return exportResult;
         if (call.method == 'start') {
@@ -40,7 +49,13 @@ void main() {
           'startedAtMs': DateTime(2026, 10, 2, 12, 30).millisecondsSinceEpoch,
           'endsAtMs': DateTime(2026, 10, 9, 12, 30).millisecondsSinceEpoch,
           'endedAtMs': !active && available
-              ? DateTime(2026, 10, 3, 12, 30).millisecondsSinceEpoch
+              ? DateTime(
+                  2026,
+                  10,
+                  stoppedEarly ? 3 : 9,
+                  12,
+                  30,
+                ).millisecondsSinceEpoch
               : 0,
           'events': 12,
           'rotatedEvents': 0,
@@ -130,6 +145,10 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  final exportButton = find.byWidgetPredicate(
+    (widget) => widget is IconButton && widget.tooltip == 'Export ZIP',
+  );
+
   testWidgets(
     'recording is opt-in and consent cancellation does not start it',
     (tester) async {
@@ -213,6 +232,81 @@ void main() {
     expect(find.text('7-day diagnostics'), findsOneWidget);
     expect(find.byTooltip('Export ZIP'), findsOneWidget);
   });
+
+  testWidgets('a missing plugin fails closed and resume refreshes status', (
+    tester,
+  ) async {
+    pluginMissing = true;
+    await showPanel(tester, russian: false);
+    expect(find.text('Diagnostics unavailable'), findsOneWidget);
+    expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNull);
+    expect(tester.widget<IconButton>(exportButton).onPressed, isNull);
+    expect(calls.map((call) => call.method), ['status']);
+
+    pluginMissing = false;
+    available = true;
+    stoppedEarly = false;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    expect(calls.map((call) => call.method), ['status']);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(calls.map((call) => call.method), ['status', 'status']);
+    expect(find.text('Completed'), findsOneWidget);
+    expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+  });
+
+  testWidgets('English replacement consent protects the previous report', (
+    tester,
+  ) async {
+    available = true;
+    await showPanel(tester, russian: false);
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Nothing is uploaded.'), findsOneWidget);
+    expect(
+      find.textContaining('Export the previous one first.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(calls.map((call) => call.method), ['status']);
+  });
+
+  testWidgets('failed stop keeps the last confirmed recording state', (
+    tester,
+  ) async {
+    active = true;
+    available = true;
+    failingMethod = 'stop';
+    await showPanel(tester, russian: false);
+    final toggle = find.byType(Switch);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(find.text('Could not change diagnostics'), findsOneWidget);
+    expect(tester.widget<Switch>(toggle).value, isTrue);
+    expect(tester.widget<Switch>(toggle).onChanged, isNotNull);
+    expect(calls.map((call) => call.method), ['status', 'stop']);
+  });
+
+  for (final failed in [false, true]) {
+    testWidgets('export shows the confirmed outcome (failed=$failed)', (
+      tester,
+    ) async {
+      available = true;
+      failingMethod = failed ? 'export' : null;
+      await showPanel(tester, russian: false);
+      await tester.tap(exportButton);
+      await tester.pumpAndSettle();
+      expect(find.text('Report saved'), failed ? findsNothing : findsOneWidget);
+      expect(
+        find.text('Could not save report'),
+        failed ? findsOneWidget : findsNothing,
+      );
+      expect(tester.widget<IconButton>(exportButton).onPressed, isNotNull);
+      expect(calls.map((call) => call.method), ['status', 'export', 'status']);
+    });
+  }
 
   testWidgets('passive 24 hour run is visible and read only', (tester) async {
     active = true;

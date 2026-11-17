@@ -396,10 +396,20 @@ void main() {
         matching: find.byType(Scrollable),
       ),
     );
+    Future<double> scrollWith(LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await tester.pumpAndSettle();
+      return scrollable.position.pixels;
+    }
+
     expect(scrollable.position.pixels, 0);
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-    await tester.pumpAndSettle();
-    expect(scrollable.position.pixels, greaterThan(0));
+    expect(await scrollWith(LogicalKeyboardKey.arrowDown), 64);
+    expect(await scrollWith(LogicalKeyboardKey.arrowUp), 0);
+    expect(
+      await scrollWith(LogicalKeyboardKey.pageDown),
+      closeTo(scrollable.position.viewportDimension, 0.1),
+    );
+    expect(await scrollWith(LogicalKeyboardKey.pageUp), 0);
     await Navigator.of(tester.element(find.byType(TvHomeScreen))).maybePop();
     await tester.pumpAndSettle();
     expect(visibility, [true, false]);
@@ -420,6 +430,25 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Connection failed'), findsOneWidget);
+  });
+
+  testWidgets('English TV status is Connecting until native confirmation', (
+    tester,
+  ) async {
+    await _viewport(tester, const Size(960, 540));
+    await tester.pumpWidget(
+      _app(
+        _screen(
+          connected: false,
+          busy: true,
+          russian: false,
+          connection: ConnectionUiState.connecting(profileName: 'Finland 1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Connecting'), findsOneWidget);
+    expect(find.text('Connected'), findsNothing);
   });
 
   testWidgets('disconnected TV shows the selected profile before connecting', (
@@ -555,15 +584,77 @@ void main() {
     },
   );
 
+  testWidgets('failed TV paste keeps typed input and allows a retry', (
+    tester,
+  ) async {
+    await _viewport(tester, const Size(960, 540));
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    var reads = 0;
+    const typed = 'https://typed.example.invalid/list';
+    const pasted = 'https://pasted.example.invalid/list';
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method != 'Clipboard.getData') return null;
+      if (++reads == 1) throw PlatformException(code: 'CLIPBOARD_UNAVAILABLE');
+      return {'text': pasted};
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    String? result;
+    await tester.pumpWidget(
+      _app(
+        Builder(
+          builder: (context) => _screen(
+            russian: false,
+            onImport: () async {
+              result = await showTvImportDialog(context, russian: false);
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('tv-import')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), typed);
+    await tester.pumpAndSettle();
+    final paste = find.byKey(const ValueKey('tv-import-paste'));
+    await tester.tap(paste);
+    await tester.pumpAndSettle();
+    expect(find.text('Clipboard unavailable'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      typed,
+    );
+    expect(reads, 1);
+    expect(result, isNull);
+
+    await tester.tap(paste);
+    await tester.pumpAndSettle();
+    expect(reads, 2);
+    await tester.tap(find.byKey(const ValueKey('tv-import-submit')));
+    await tester.pumpAndSettle();
+    expect(result, pasted);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('launcher banner is 320 x 180 with visible product name', (
     tester,
   ) async {
     await _viewport(tester, const Size(320, 180));
     final captureKey = GlobalKey();
+    final bannerKey = ValueKey(tester.view.physicalSize);
     await tester.pumpWidget(
-      _app(RepaintBoundary(key: captureKey, child: const TvLauncherBanner())),
+      _app(
+        RepaintBoundary(
+          key: captureKey,
+          child: TvLauncherBanner(key: bannerKey),
+        ),
+      ),
     );
     await tester.pumpAndSettle();
+    expect(find.byKey(bannerKey), findsOneWidget);
     expect(find.text('Yurich Connect'), findsOneWidget);
     expect(find.text('TV'), findsOneWidget);
     expect(tester.takeException(), isNull);
